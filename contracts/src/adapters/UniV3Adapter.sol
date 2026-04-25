@@ -25,14 +25,29 @@ contract UniV3Adapter is ILiquidityAdapter {
     INonfungiblePositionManager public immutable npm;
     ISwapRouter02 public immutable swapRouter;
     IUniswapV3Factory public immutable factory;
+    /// @notice The vault this adapter exclusively serves. Set at construction
+    /// and immutable; state-mutating entry points reject other callers.
+    address public immutable vault;
 
     error UnknownToken(address token);
     error PoolNotFound();
+    error NotVault();
 
-    constructor(INonfungiblePositionManager _npm, ISwapRouter02 _swapRouter, IUniswapV3Factory _factory) {
+    modifier onlyVault() {
+        if (msg.sender != vault) revert NotVault();
+        _;
+    }
+
+    constructor(
+        INonfungiblePositionManager _npm,
+        ISwapRouter02 _swapRouter,
+        IUniswapV3Factory _factory,
+        address _vault
+    ) {
         npm = _npm;
         swapRouter = _swapRouter;
         factory = _factory;
+        vault = _vault;
     }
 
     // -------- ILiquidityAdapter --------
@@ -44,7 +59,7 @@ contract UniV3Adapter is ILiquidityAdapter {
         uint256 amount0Min,
         uint256 amount1Min,
         bytes calldata extra
-    ) external returns (uint256 positionId, uint128 liquidity, uint256 amount0Used, uint256 amount1Used) {
+    ) external onlyVault returns (uint256 positionId, uint128 liquidity, uint256 amount0Used, uint256 amount1Used) {
         (int24 tickLower, int24 tickUpper, uint256 deadline, uint256 existingPositionId) =
             abi.decode(extra, (int24, int24, uint256, uint256));
 
@@ -105,7 +120,7 @@ contract UniV3Adapter is ILiquidityAdapter {
         uint256 amount0Min,
         uint256 amount1Min,
         bytes calldata extra
-    ) external returns (uint256 amount0Out, uint256 amount1Out, bool burned) {
+    ) external onlyVault returns (uint256 amount0Out, uint256 amount1Out, bool burned) {
         (uint256 deadline, bool burnIfEmpty) = abi.decode(extra, (uint256, bool));
 
         if (liquidity > 0) {
@@ -141,6 +156,7 @@ contract UniV3Adapter is ILiquidityAdapter {
         uint256 positionId
     )
         external
+        onlyVault
         returns (uint256 amount0, uint256 amount1)
     {
         (amount0, amount1) = npm.collect(
@@ -156,7 +172,7 @@ contract UniV3Adapter is ILiquidityAdapter {
         uint256 amountIn,
         uint256 amountOutMin,
         bytes calldata extra
-    ) external returns (uint256 amountOut) {
+    ) external onlyVault returns (uint256 amountOut) {
         if (tokenIn != pool.token0 && tokenIn != pool.token1) revert UnknownToken(tokenIn);
         address tokenOut = (tokenIn == pool.token0) ? pool.token1 : pool.token0;
 
@@ -201,14 +217,25 @@ contract UniV3Adapter is ILiquidityAdapter {
             uint128 liquidity,
             uint256,
             uint256,
-            uint128,
-            uint128
+            uint128 tokensOwed0,
+            uint128 tokensOwed1
         ) {
-            if (liquidity == 0) return (0, 0);
+            if (liquidity == 0) {
+                // Even with zero liquidity the position can still hold owed
+                // fees pending collection. Honour them in the valuation.
+                return (uint256(tokensOwed0), uint256(tokensOwed1));
+            }
             uint160 sqrtPriceX96 = _poolSqrtPrice(pool);
             (amount0, amount1) = LiquidityMath.getAmountsForLiquidity(
                 sqrtPriceX96, TickMath.getSqrtPriceAtTick(tickLower), TickMath.getSqrtPriceAtTick(tickUpper), liquidity
             );
+            // Add already-synced owed fees. Fees that have accrued in the
+            // pool but not yet been pushed into `tokensOwed` are still
+            // un-counted; the agent should call `executeCollectFees`
+            // periodically to keep this gap small. V4 has the same
+            // convention; this comment applies to both.
+            amount0 += uint256(tokensOwed0);
+            amount1 += uint256(tokensOwed1);
         } catch {
             return (0, 0);
         }

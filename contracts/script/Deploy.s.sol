@@ -55,18 +55,24 @@ contract Deploy is Script {
 
         PoolRegistry registry = new PoolRegistry(owner, guardian);
 
+        // Vault deploys before the adapters so each adapter can pin the vault
+        // address as immutable (the `onlyVault` constraint).
+        ALPVault vault = new ALPVault(IERC20(baseAsset), "ALP USDC Vault", "alpUSDC", registry, owner, agent, guardian);
+
         UniV3Adapter v3Adapter = new UniV3Adapter(
-            INonfungiblePositionManager(V3_NPM), ISwapRouter02(V3_SWAP_ROUTER), IUniswapV3Factory(V3_FACTORY)
+            INonfungiblePositionManager(V3_NPM),
+            ISwapRouter02(V3_SWAP_ROUTER),
+            IUniswapV3Factory(V3_FACTORY),
+            address(vault)
         );
 
         UniV4Adapter v4Adapter = new UniV4Adapter(
             IPositionManager(V4_POSITION_MANAGER),
             IPoolManager(V4_POOL_MANAGER),
             IUniswapV4Router04(payable(v4SwapRouter)),
-            IPermit2(PERMIT2)
+            IPermit2(PERMIT2),
+            address(vault)
         );
-
-        ALPVault vault = new ALPVault(IERC20(baseAsset), "ALP USDC Vault", "alpUSDC", registry, owner, agent, guardian);
 
         vm.stopBroadcast();
 

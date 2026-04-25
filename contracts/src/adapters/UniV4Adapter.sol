@@ -50,6 +50,9 @@ contract UniV4Adapter is ILiquidityAdapter {
     IPoolManager public immutable poolManager;
     IUniswapV4Router04 public immutable swapRouter;
     IPermit2 public immutable permit2;
+    /// @notice The vault this adapter exclusively serves. Set at construction
+    /// and immutable; state-mutating entry points reject other callers.
+    address public immutable vault;
 
     /// @dev token => initialised. Tracks one-time Permit2 setup for the
     /// PositionManager (which pulls tokens via Permit2 inside `modifyLiquidities`).
@@ -60,17 +63,25 @@ contract UniV4Adapter is ILiquidityAdapter {
 
     error UnknownToken(address token);
     error InsufficientLiquidityComputed();
+    error NotVault();
+
+    modifier onlyVault() {
+        if (msg.sender != vault) revert NotVault();
+        _;
+    }
 
     constructor(
         IPositionManager _positionManager,
         IPoolManager _poolManager,
         IUniswapV4Router04 _swapRouter,
-        IPermit2 _permit2
+        IPermit2 _permit2,
+        address _vault
     ) {
         positionManager = _positionManager;
         poolManager = _poolManager;
         swapRouter = _swapRouter;
         permit2 = _permit2;
+        vault = _vault;
     }
 
     // -------- ILiquidityAdapter --------
@@ -82,7 +93,7 @@ contract UniV4Adapter is ILiquidityAdapter {
         uint256 amount0Min,
         uint256 amount1Min,
         bytes calldata extra
-    ) external returns (uint256 positionId, uint128 liquidity, uint256 amount0Used, uint256 amount1Used) {
+    ) external onlyVault returns (uint256 positionId, uint128 liquidity, uint256 amount0Used, uint256 amount1Used) {
         AddLiquidityVars memory v;
         (v.tickLower, v.tickUpper, v.deadline, v.existingPositionId) =
             abi.decode(extra, (int24, int24, uint256, uint256));
@@ -124,7 +135,7 @@ contract UniV4Adapter is ILiquidityAdapter {
         uint256 amount0Min,
         uint256 amount1Min,
         bytes calldata extra
-    ) external returns (uint256 amount0Out, uint256 amount1Out, bool burned) {
+    ) external onlyVault returns (uint256 amount0Out, uint256 amount1Out, bool burned) {
         (uint256 deadline, bool burnIfEmpty) = abi.decode(extra, (uint256, bool));
 
         Currency currency0 = Currency.wrap(pool.token0);
@@ -164,6 +175,7 @@ contract UniV4Adapter is ILiquidityAdapter {
 
     function collectFees(PoolRegistry.Pool calldata pool, uint256 positionId)
         external
+        onlyVault
         returns (uint256 amount0, uint256 amount1)
     {
         // V4 collects fees by calling DECREASE_LIQUIDITY with liquidity = 0.
@@ -190,7 +202,7 @@ contract UniV4Adapter is ILiquidityAdapter {
         uint256 amountIn,
         uint256 amountOutMin,
         bytes calldata extra
-    ) external returns (uint256 amountOut) {
+    ) external onlyVault returns (uint256 amountOut) {
         if (tokenIn != pool.token0 && tokenIn != pool.token1) revert UnknownToken(tokenIn);
         bool zeroForOne = (tokenIn == pool.token0);
         address tokenOut = zeroForOne ? pool.token1 : pool.token0;

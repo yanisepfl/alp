@@ -11,6 +11,8 @@ import {IERC721Receiver} from "@openzeppelin/contracts/token/ERC721/IERC721Recei
 
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+
 import {ILiquidityAdapter} from "./interfaces/ILiquidityAdapter.sol";
 import {PoolRegistry} from "./PoolRegistry.sol";
 
@@ -53,9 +55,26 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     /// gas cost of `totalAssets()` and `closeAllPositionsInPool` so that no
     /// agent or guardian can build up an O(N) liability that bricks the
     /// hot path or the wind-down path.
-    uint256 public constant MAX_POSITIONS_PER_POOL = 16;
+    uint256 public constant MAX_POSITIONS_PER_POOL = 4;
 
     PoolRegistry public immutable registry;
+
+    /// @notice Per-tx swap cap, expressed in basis points of `totalAssets()`.
+    /// Set to `10_000` to disable (default), tighter values shrink the agent's
+    /// per-tx blast radius. Owner-tunable.
+    uint256 public swapNotionalCapBps = 10_000;
+    /// @notice Fee applied to deposits and withdraws, in basis points of the
+    /// asset/share moved. Stays in the vault as donated value to remaining
+    /// holders. Defends against single-tx flash-loan round-trips by making
+    /// any value extracted by spot manipulation cost at least 2x this fee.
+    /// Owner-tunable, capped at 200 bps (2%).
+    uint256 public entryExitFeeBps = 0;
+    uint256 public constant MAX_FEE_BPS = 200;
+    uint256 public constant BPS_DENOM = 10_000;
+    /// @dev address => last block in which they minted shares. Used to refuse
+    /// a same-block redeem from the same address — the cheapest defence
+    /// against the deposit-then-withdraw flash-loan flow.
+    mapping(address => uint256) internal _lastMintBlock;
 
     address public agent;
     address public guardian;
@@ -82,6 +101,9 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     event GuardianUpdated(address indexed previous, address indexed current);
     event AdapterBootstrapped(address indexed nftManager, address indexed adapter);
     event AdapterRevoked(address indexed nftManager, address indexed adapter);
+    event Swept(address indexed token, address indexed recipient, uint256 amount);
+    event SwapNotionalCapBpsUpdated(uint256 previous, uint256 current);
+    event EntryExitFeeBpsUpdated(uint256 previous, uint256 current);
     event PoolTracked(bytes32 indexed poolKey, address indexed nonBaseToken);
     event PoolUntracked(bytes32 indexed poolKey);
     event PoolOrphaned(bytes32 indexed poolKey, bool orphaned);
@@ -105,6 +127,12 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     error PositionNotTracked(bytes32 key, uint256 positionId);
     error AdapterNftManagerMismatch(address expected, address provided);
     error MaxPositionsPerPoolExceeded(bytes32 key);
+    error CannotSweepProtectedToken(address token);
+    error SlippageMinRequired();
+    error SwapNotionalCapExceeded(uint256 amountIn, uint256 cap);
+    error InsufficientLiquidityAfterUnwind(uint256 needed, uint256 available);
+    error SameBlockMintAndRedeem();
+    error InvalidFeeBps(uint256 bps);
 
     modifier onlyAgent() {
         if (msg.sender != agent) revert NotAgent();
@@ -142,6 +170,18 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     function setGuardian(address newGuardian) external onlyOwner {
         emit GuardianUpdated(guardian, newGuardian);
         guardian = newGuardian;
+    }
+
+    function setSwapNotionalCapBps(uint256 newCap) external onlyOwner {
+        if (newCap == 0 || newCap > BPS_DENOM) revert InvalidFeeBps(newCap);
+        emit SwapNotionalCapBpsUpdated(swapNotionalCapBps, newCap);
+        swapNotionalCapBps = newCap;
+    }
+
+    function setEntryExitFeeBps(uint256 newFee) external onlyOwner {
+        if (newFee > MAX_FEE_BPS) revert InvalidFeeBps(newFee);
+        emit EntryExitFeeBpsUpdated(entryExitFeeBps, newFee);
+        entryExitFeeBps = newFee;
     }
 
     function pause() external onlyGuardian {
@@ -186,6 +226,21 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
 
     function isPoolOrphaned(bytes32 poolKey) external view returns (bool) {
         return _orphanedPool[poolKey];
+    }
+
+    /// @notice Sweep an ERC20 the vault accidentally received but doesn't
+    /// participate in. Refuses the base asset and any token that appears
+    /// as `token0` or `token1` in any registry-known pool (so positions
+    /// and idle non-base balances can never be drained this way).
+    function guardianSweep(address token, address recipient, uint256 amount) external onlyGuardian {
+        if (token == asset()) revert CannotSweepProtectedToken(token);
+        uint256 numPools = registry.poolCount();
+        for (uint256 i; i < numPools; ++i) {
+            PoolRegistry.Pool memory p = registry.getPool(registry.poolKeys(i));
+            if (p.token0 == token || p.token1 == token) revert CannotSweepProtectedToken(token);
+        }
+        IERC20(token).safeTransfer(recipient, amount);
+        emit Swept(token, recipient, amount);
     }
 
     // -------- ERC-4626 valuation --------
@@ -357,12 +412,30 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         nonReentrant
         returns (uint256 amountOut)
     {
+        if (amountOutMin == 0) revert SlippageMinRequired();
         if (!registry.isPoolKnown(poolKey)) revert PoolNotKnown(poolKey);
         PoolRegistry.Pool memory pool = registry.getPool(poolKey);
         // Hooked V4 pools are blocked here as well as on the add path,
         // because a hook can fire callbacks during the V4 swap router's
         // unlock/settle cycle and reach back into the vault's read path.
         if (pool.hooks != address(0)) revert HookedPoolsNotAllowed(poolKey);
+
+        // Per-tx notional cap. The agent can move at most `swapNotionalCapBps`
+        // of TAV in any single swap call. We measure `amountIn` in base-asset
+        // units: if `tokenIn` is the base asset use it directly; otherwise
+        // value it through the pool's spot.
+        if (swapNotionalCapBps < BPS_DENOM) {
+            uint256 tav = totalAssets();
+            uint256 cap = (tav * swapNotionalCapBps) / BPS_DENOM;
+            uint256 amountInBase;
+            if (tokenIn == asset()) {
+                amountInBase = amountIn;
+            } else {
+                uint160 sqrtPriceX96 = ILiquidityAdapter(pool.adapter).getSpotSqrtPriceX96(pool);
+                amountInBase = _convertToBase(amountIn, sqrtPriceX96, tokenIn == pool.token0);
+            }
+            if (amountInBase > cap) revert SwapNotionalCapExceeded(amountInBase, cap);
+        }
 
         IERC20(tokenIn).forceApprove(pool.adapter, amountIn);
         amountOut = ILiquidityAdapter(pool.adapter).swapExactIn(pool, tokenIn, amountIn, amountOutMin, extra);
@@ -433,7 +506,24 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         return IERC721Receiver.onERC721Received.selector;
     }
 
-    // -------- Pause + reentrancy hooks --------
+    // -------- Pause + reentrancy hooks + anti-MEV layer --------
+
+    /// @dev Apply the entry/exit fee at the share-pricing layer so it
+    /// influences both `previewDeposit` quotes and the actual mint amount
+    /// consistently. Fee bps haircut on incoming asset value: shares minted
+    /// reflect (assets - fee). The fee stays in the vault as donated TAV.
+    function _convertToShares(uint256 assets, Math.Rounding rounding) internal view override returns (uint256) {
+        uint256 fee = (assets * entryExitFeeBps) / BPS_DENOM;
+        return super._convertToShares(assets - fee, rounding);
+    }
+
+    /// @dev Symmetric fee on the redeem path: shares burnt return
+    /// `assets * (1 - fee)` to the user; the haircut stays as TAV.
+    function _convertToAssets(uint256 shares, Math.Rounding rounding) internal view override returns (uint256) {
+        uint256 grossAssets = super._convertToAssets(shares, rounding);
+        uint256 fee = (grossAssets * entryExitFeeBps) / BPS_DENOM;
+        return grossAssets - fee;
+    }
 
     function _deposit(address caller, address receiver, uint256 assets, uint256 shares)
         internal
@@ -442,6 +532,11 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         nonReentrant
     {
         super._deposit(caller, receiver, assets, shares);
+        // Same-block lockout: stamp the receiver's last-mint block so a
+        // subsequent same-block redeem from the same address reverts.
+        // This kills the canonical mint-and-redeem-in-one-transaction
+        // flash-loan flow at near-zero cost to honest users.
+        _lastMintBlock[receiver] = block.number;
     }
 
     function _withdraw(address caller, address receiver, address owner_, uint256 assets, uint256 shares)
@@ -450,7 +545,66 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         whenNotPaused
         nonReentrant
     {
+        if (_lastMintBlock[owner_] == block.number) revert SameBlockMintAndRedeem();
+        // Auto-unwind: if idle base is short of `assets`, peel pro-rata from
+        // every tracked position until either the gap is closed or the loop
+        // exhausts itself. Reverts only if the vault genuinely doesn't hold
+        // enough underlying value.
+        uint256 idle = IERC20(asset()).balanceOf(address(this));
+        if (idle < assets) {
+            _unwindForWithdraw(assets - idle);
+            idle = IERC20(asset()).balanceOf(address(this));
+            if (idle < assets) revert InsufficientLiquidityAfterUnwind(assets, idle);
+        }
         super._withdraw(caller, receiver, owner_, assets, shares);
+    }
+
+    // -------- Internal: auto unwind on withdraw shortfall --------
+
+    /// @dev Peel pro-rata liquidity from every tracked position and convert
+    /// any non-base proceeds back into the base asset until at least
+    /// `shortfall` base units are available. The fraction peeled per
+    /// position is `shortfall / totalAssets()` so we touch every position
+    /// once. Best-effort: partial peels run with min=0 (caller is the user
+    /// who is exiting; they accept market price). The same-block lockout
+    /// already ensures this can't be the second leg of a sandwich.
+    function _unwindForWithdraw(uint256 shortfall) internal {
+        uint256 tav = totalAssets();
+        if (tav == 0) return;
+        uint256 numPools = _activePoolKeys.length;
+        bytes memory removeExtra = abi.encode(block.timestamp, false);
+        bytes memory swapExtra = abi.encode(block.timestamp);
+        for (uint256 i; i < numPools && IERC20(asset()).balanceOf(address(this)) < shortfall + 1; ++i) {
+            bytes32 key = _activePoolKeys[i];
+            if (_orphanedPool[key]) continue;
+            PoolRegistry.Pool memory pool = _trackedPools[key];
+            ILiquidityAdapter adapter_ = ILiquidityAdapter(pool.adapter);
+            uint256[] storage ids = _positionIdsByPool[key];
+            for (uint256 j; j < ids.length; ++j) {
+                uint128 currentLiq = adapter_.getPositionLiquidity(pool, ids[j]);
+                if (currentLiq == 0) continue;
+                uint128 toPeel = uint128((uint256(currentLiq) * shortfall) / tav);
+                if (toPeel == 0) toPeel = 1; // round up so dust positions still contribute
+                if (toPeel > currentLiq) toPeel = currentLiq;
+
+                IERC20(pool.token0).forceApprove(pool.adapter, 0); // belt-and-braces
+                IERC20(pool.token1).forceApprove(pool.adapter, 0);
+                (,, bool burned) = adapter_.removeLiquidity(pool, ids[j], toPeel, 0, 0, removeExtra);
+                if (burned) {
+                    _untrackPosition(key, ids[j]);
+                }
+            }
+
+            // Convert non-base side back to base in this pool so the withdraw
+            // can settle in the vault's asset.
+            address nonBase = (pool.token0 == asset()) ? pool.token1 : pool.token0;
+            uint256 nonBaseBal = IERC20(nonBase).balanceOf(address(this));
+            if (nonBaseBal > 0) {
+                IERC20(nonBase).forceApprove(pool.adapter, nonBaseBal);
+                adapter_.swapExactIn(pool, nonBase, nonBaseBal, 1, swapExtra);
+                IERC20(nonBase).forceApprove(pool.adapter, 0);
+            }
+        }
     }
 
     // -------- Internal: tracking --------

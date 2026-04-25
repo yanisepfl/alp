@@ -121,11 +121,24 @@ contract ALPVaultUnitTest is Test {
         vm.prank(alice);
         vault.deposit(1_000e6, alice);
 
+        // Same-block lockout means we have to advance the block before
+        // redeeming from the same address that just deposited.
+        vm.roll(block.number + 1);
+
         vm.prank(alice);
         vault.withdraw(400e6, alice, alice);
 
         assertEq(usdc.balanceOf(alice), 100_000e6 - 1_000e6 + 400e6);
         assertEq(vault.totalAssets(), 600e6);
+    }
+
+    function test_withdraw_sameBlockAsDeposit_reverts() public {
+        vm.prank(alice);
+        vault.deposit(1_000e6, alice);
+
+        vm.expectRevert(ALPVault.SameBlockMintAndRedeem.selector);
+        vm.prank(alice);
+        vault.withdraw(100e6, alice, alice);
     }
 
     function test_withdraw_paused_reverts() public {
@@ -217,6 +230,15 @@ contract ALPVaultUnitTest is Test {
     function test_executeSwap_unknownPool_reverts() public {
         bytes32 fake = keccak256("fake");
         vm.expectRevert(abi.encodeWithSelector(ALPVault.PoolNotKnown.selector, fake));
+        vm.prank(agent);
+        // Pass non-zero amountOutMin so we hit the pool-known check, not the
+        // SlippageMinRequired guard.
+        vault.executeSwap(fake, address(usdc), 1, 1, "");
+    }
+
+    function test_executeSwap_zeroAmountOutMin_reverts() public {
+        bytes32 fake = keccak256("fake");
+        vm.expectRevert(ALPVault.SlippageMinRequired.selector);
         vm.prank(agent);
         vault.executeSwap(fake, address(usdc), 1, 0, "");
     }

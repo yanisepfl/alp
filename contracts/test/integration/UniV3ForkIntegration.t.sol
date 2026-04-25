@@ -56,10 +56,13 @@ contract UniV3ForkIntegrationTest is Test {
         token1 = USDC < WETH ? WETH : USDC;
 
         registry = new PoolRegistry(owner, guardian);
-        adapter = new UniV3Adapter(
-            INonfungiblePositionManager(V3_NPM), ISwapRouter02(V3_SWAP_ROUTER), IUniswapV3Factory(V3_FACTORY)
-        );
         vault = new ALPVault(IERC20(USDC), "ALP USDC Vault", "alpUSDC", registry, owner, address(this), guardian);
+        adapter = new UniV3Adapter(
+            INonfungiblePositionManager(V3_NPM),
+            ISwapRouter02(V3_SWAP_ROUTER),
+            IUniswapV3Factory(V3_FACTORY),
+            address(vault)
+        );
 
         PoolRegistry.Pool memory pool = PoolRegistry.Pool({
             adapter: address(adapter),
@@ -119,7 +122,7 @@ contract UniV3ForkIntegrationTest is Test {
         uint256 vaultUsdcBefore = IERC20(USDC).balanceOf(address(vault));
         uint256 vaultWethBefore = IERC20(WETH).balanceOf(address(vault));
 
-        uint256 amountOut = vault.executeSwap(poolKeyHash, USDC, 100e6, 0, "");
+        uint256 amountOut = vault.executeSwap(poolKeyHash, USDC, 100e6, 1, "");
 
         assertGt(amountOut, 0);
         assertEq(IERC20(USDC).balanceOf(address(vault)), vaultUsdcBefore - 100e6);
@@ -132,7 +135,7 @@ contract UniV3ForkIntegrationTest is Test {
         vault.deposit(20_000e6, alice);
 
         // 2. Swap half to WETH
-        uint256 wethReceived = vault.executeSwap(poolKeyHash, USDC, 10_000e6, 0, "");
+        uint256 wethReceived = vault.executeSwap(poolKeyHash, USDC, 10_000e6, 1, "");
         assertGt(wethReceived, 0);
 
         // 3. Add liquidity full-range
@@ -154,12 +157,14 @@ contract UniV3ForkIntegrationTest is Test {
         // 5. Swap WETH back to USDC for clean withdraw accounting
         uint256 wethLeft = IERC20(WETH).balanceOf(address(vault));
         if (wethLeft > 0) {
-            vault.executeSwap(poolKeyHash, WETH, wethLeft, 0, "");
+            vault.executeSwap(poolKeyHash, WETH, wethLeft, 1, "");
         }
 
         // 6. Alice withdraws — should retrieve > 99% (round-trip swap fees ~0.1% twice)
         uint256 aliceBefore = IERC20(USDC).balanceOf(alice);
         uint256 aliceShares = vault.balanceOf(alice);
+        // Same-block-mint-and-redeem lockout: advance the block before alice exits.
+        vm.roll(block.number + 1);
         vm.prank(alice);
         vault.redeem(aliceShares, alice, alice);
         uint256 received = IERC20(USDC).balanceOf(alice) - aliceBefore;

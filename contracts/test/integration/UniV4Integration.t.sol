@@ -28,6 +28,7 @@ import {MockERC20Token} from "../mocks/MockERC20Token.sol";
 contract UniV4IntegrationTest is V4Deployers {
     PoolRegistry internal registry;
     UniV4Adapter internal adapter;
+    UniV4Adapter internal seedAdapter;
     ALPVault internal vault;
 
     MockERC20Token internal usdc;
@@ -63,11 +64,17 @@ contract UniV4IntegrationTest is V4Deployers {
         token0 = address(usdc) < address(weth) ? address(usdc) : address(weth);
         token1 = address(usdc) < address(weth) ? address(weth) : address(usdc);
 
-        // Vault stack — vault asset is USDC.
+        // Vault stack — vault asset is USDC. Vault deploys before the
+        // adapter so the adapter can pin the vault address as immutable.
         registry = new PoolRegistry(owner, guardian);
-        adapter = new UniV4Adapter(positionManager, poolManager, swapRouter, permit2);
         vault =
             new ALPVault(IERC20(address(usdc)), "ALP USDC Vault", "alpUSDC", registry, owner, address(this), guardian);
+        adapter = new UniV4Adapter(positionManager, poolManager, swapRouter, permit2, address(vault));
+
+        // Second adapter with this test contract as the "vault" — used only
+        // to seed the pool with external liquidity so swap tests have a
+        // counterparty. Production paths route exclusively through `adapter`.
+        seedAdapter = new UniV4Adapter(positionManager, poolManager, swapRouter, permit2, address(this));
 
         // I (the test contract) act as the agent for simplicity.
         // Guardian whitelists the pool + bootstraps the adapter for V4 NFTs.
@@ -110,10 +117,10 @@ contract UniV4IntegrationTest is V4Deployers {
         // Seed external liquidity using the same adapter (acting as a third-party LP).
         // The adapter pulls from msg.sender (the test contract) and mints the NFT to
         // the test contract; the adapter handles its own permit2 setup.
-        usdc.approve(address(adapter), type(uint256).max);
-        weth.approve(address(adapter), type(uint256).max);
+        usdc.approve(address(seedAdapter), type(uint256).max);
+        weth.approve(address(seedAdapter), type(uint256).max);
         PoolRegistry.Pool memory poolStruct = registry.getPool(poolKeyHash);
-        adapter.addLiquidity(
+        seedAdapter.addLiquidity(
             poolStruct,
             500_000e18,
             500_000e18,
@@ -163,7 +170,7 @@ contract UniV4IntegrationTest is V4Deployers {
         uint256 vaultUsdcBefore = usdc.balanceOf(address(vault));
         uint256 vaultWethBefore = weth.balanceOf(address(vault));
 
-        uint256 amountOut = vault.executeSwap(poolKeyHash, address(weth), 100e18, 0, abi.encode(block.timestamp + 600));
+        uint256 amountOut = vault.executeSwap(poolKeyHash, address(weth), 100e18, 1, abi.encode(block.timestamp + 600));
 
         assertGt(amountOut, 0, "swap should yield non-zero output");
         assertEq(weth.balanceOf(address(vault)), vaultWethBefore - 100e18);
@@ -248,7 +255,7 @@ contract UniV4IntegrationTest is V4Deployers {
 
         // 2. Agent swaps 10k USDC -> WETH inside the vault
         uint256 wethReceived =
-            vault.executeSwap(poolKeyHash, address(usdc), 10_000e18, 0, abi.encode(block.timestamp + 600));
+            vault.executeSwap(poolKeyHash, address(usdc), 10_000e18, 1, abi.encode(block.timestamp + 600));
         assertGt(wethReceived, 0);
 
         // 3. Agent adds liquidity using both sides
@@ -279,7 +286,7 @@ contract UniV4IntegrationTest is V4Deployers {
         // 6. Agent rebalances — swap WETH back to USDC so the vault is mostly USDC for withdraw
         uint256 wethLeft = weth.balanceOf(address(vault));
         if (wethLeft > 0) {
-            vault.executeSwap(poolKeyHash, address(weth), wethLeft, 0, abi.encode(block.timestamp + 600));
+            vault.executeSwap(poolKeyHash, address(weth), wethLeft, 1, abi.encode(block.timestamp + 600));
         }
 
         // 7. Alice withdraws everything
@@ -288,6 +295,9 @@ contract UniV4IntegrationTest is V4Deployers {
         assertEq(maxRedeem, aliceShares);
 
         uint256 aliceUsdcBefore = usdc.balanceOf(alice);
+        // Same-block-mint-and-redeem lockout: advance the block before alice
+        // exits her position.
+        vm.roll(block.number + 1);
         vm.prank(alice);
         vault.redeem(aliceShares, alice, alice);
         uint256 aliceUsdcAfter = usdc.balanceOf(alice);

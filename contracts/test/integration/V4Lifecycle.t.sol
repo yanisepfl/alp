@@ -21,6 +21,7 @@ import {MockERC20Token} from "../mocks/MockERC20Token.sol";
 contract V4LifecycleTest is V4Deployers {
     PoolRegistry internal registry;
     UniV4Adapter internal adapter;
+    UniV4Adapter internal seedAdapter;
     ALPVault internal vault;
 
     MockERC20Token internal usdc;
@@ -57,9 +58,10 @@ contract V4LifecycleTest is V4Deployers {
         token1 = address(usdc) < address(weth) ? address(weth) : address(usdc);
 
         registry = new PoolRegistry(owner, guardian);
-        adapter = new UniV4Adapter(positionManager, poolManager, swapRouter, permit2);
         vault =
             new ALPVault(IERC20(address(usdc)), "ALP USDC Vault", "alpUSDC", registry, owner, address(this), guardian);
+        adapter = new UniV4Adapter(positionManager, poolManager, swapRouter, permit2, address(vault));
+        seedAdapter = new UniV4Adapter(positionManager, poolManager, swapRouter, permit2, address(this));
 
         PoolRegistry.Pool memory pool = PoolRegistry.Pool({
             adapter: address(adapter),
@@ -93,9 +95,9 @@ contract V4LifecycleTest is V4Deployers {
         vm.prank(alice);
         usdc.approve(address(vault), type(uint256).max);
 
-        usdc.approve(address(adapter), type(uint256).max);
-        weth.approve(address(adapter), type(uint256).max);
-        adapter.addLiquidity(
+        usdc.approve(address(seedAdapter), type(uint256).max);
+        weth.approve(address(seedAdapter), type(uint256).max);
+        seedAdapter.addLiquidity(
             registry.getPool(poolKeyHash),
             500_000e18,
             500_000e18,
@@ -229,7 +231,7 @@ contract V4LifecycleTest is V4Deployers {
         // Swaps still work — the agent may need them to clean up non-base balances.
         uint256 wethLeft = weth.balanceOf(address(vault));
         if (wethLeft > 0) {
-            vault.executeSwap(poolKeyHash, address(weth), wethLeft, 0, abi.encode(block.timestamp + 600));
+            vault.executeSwap(poolKeyHash, address(weth), wethLeft, 1, abi.encode(block.timestamp + 600));
         }
     }
 
@@ -265,7 +267,7 @@ contract V4LifecycleTest is V4Deployers {
         );
 
         vm.expectRevert(abi.encodeWithSelector(ALPVault.PoolNotKnown.selector, poolKeyHash));
-        vault.executeSwap(poolKeyHash, address(weth), 1, 0, abi.encode(block.timestamp + 600));
+        vault.executeSwap(poolKeyHash, address(weth), 1, 1, abi.encode(block.timestamp + 600));
 
         // Removal STILL works — the vault's snapshot is independent of the
         // registry. This is what saves us from orphaned positions when a
