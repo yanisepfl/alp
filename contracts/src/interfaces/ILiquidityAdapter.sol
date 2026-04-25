@@ -81,4 +81,10 @@ interface ILiquidityAdapter {
         external
         view
         returns (uint128 liquidity);
+
+    /// @notice Address of the ERC721 contract that issues this adapter's LP
+    /// position NFTs (the V3 NonfungiblePositionManager or the V4
+    /// PositionManager). The vault uses this in `bootstrapAdapter` to make
+    /// sure the operator approval lands on the right ERC721.
+    function nftManager() external view returns (address);
 }

@@ -116,6 +116,14 @@ contract PoolRegistryTest is Test {
         registry.addPool(p);
     }
 
+    function test_addPool_withHooks_reverts() public {
+        PoolRegistry.Pool memory p = _samplePool();
+        p.hooks = makeAddr("someHook");
+        vm.prank(guardian);
+        vm.expectRevert(PoolRegistry.HookedPoolsNotAllowed.selector);
+        registry.addPool(p);
+    }
+
     function test_addPool_duplicate_reverts() public {
         PoolRegistry.Pool memory p = _samplePool();
         vm.startPrank(guardian);

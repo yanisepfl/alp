@@ -49,6 +49,7 @@ contract PoolRegistry is Ownable2Step {
     error UnknownPool(bytes32 key);
     error PoolAlreadyExists(bytes32 key);
     error InvalidConfig();
+    error HookedPoolsNotAllowed();
 
     modifier onlyGuardian() {
         if (msg.sender != guardian) revert NotGuardian();
@@ -80,6 +81,11 @@ contract PoolRegistry is Ownable2Step {
         if (p.adapter == address(0) || p.token0 == address(0) || p.token1 == address(0)) revert InvalidConfig();
         if (p.token0 >= p.token1) revert InvalidConfig();
         if (p.maxAllocationBps == 0 || p.maxAllocationBps > 10_000) revert InvalidConfig();
+        // Hook contracts are blocked at the registry layer too. The vault
+        // also rejects them on every routed call (defence in depth) but
+        // refusing them at registration time keeps the whitelist itself
+        // free of pools the protocol cannot safely interact with.
+        if (p.hooks != address(0)) revert HookedPoolsNotAllowed();
 
         key = poolKey(p.adapter, p.token0, p.token1, p.fee, p.tickSpacing, p.hooks);
         if (_poolKeyIndex[key] != 0) revert PoolAlreadyExists(key);

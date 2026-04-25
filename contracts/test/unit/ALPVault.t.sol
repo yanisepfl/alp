@@ -205,6 +205,15 @@ contract ALPVaultUnitTest is Test {
         vault.executeRemoveLiquidity(fake, 0, 0, 0, 0, "");
     }
 
+    function test_bootstrapAdapter_wrongNftManager_reverts() public {
+        // Use an EOA-shaped adapter address that has no `nftManager()` selector
+        // — calling the view should revert and we want a clear error message.
+        address bogusAdapter = address(this);
+        vm.prank(guardian);
+        vm.expectRevert();
+        vault.bootstrapAdapter(makeAddr("anyNft"), bogusAdapter);
+    }
+
     function test_executeSwap_unknownPool_reverts() public {
         bytes32 fake = keccak256("fake");
         vm.expectRevert(abi.encodeWithSelector(ALPVault.PoolNotKnown.selector, fake));

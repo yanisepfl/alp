@@ -49,6 +49,12 @@ import {PoolRegistry} from "./PoolRegistry.sol";
 contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Receiver {
     using SafeERC20 for IERC20;
 
+    /// @notice Hard cap on positions tracked under a single pool. Bounds the
+    /// gas cost of `totalAssets()` and `closeAllPositionsInPool` so that no
+    /// agent or guardian can build up an O(N) liability that bricks the
+    /// hot path or the wind-down path.
+    uint256 public constant MAX_POSITIONS_PER_POOL = 16;
+
     PoolRegistry public immutable registry;
 
     address public agent;
@@ -75,6 +81,7 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     event AgentUpdated(address indexed previous, address indexed current);
     event GuardianUpdated(address indexed previous, address indexed current);
     event AdapterBootstrapped(address indexed nftManager, address indexed adapter);
+    event AdapterRevoked(address indexed nftManager, address indexed adapter);
     event PoolTracked(bytes32 indexed poolKey, address indexed nonBaseToken);
     event PoolUntracked(bytes32 indexed poolKey);
     event PoolOrphaned(bytes32 indexed poolKey, bool orphaned);
@@ -95,6 +102,9 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     error MaxAllocationExceeded(bytes32 key);
     error HookedPoolsNotAllowed(bytes32 key);
     error PoolStillHasPositions(bytes32 key);
+    error PositionNotTracked(bytes32 key, uint256 positionId);
+    error AdapterNftManagerMismatch(address expected, address provided);
+    error MaxPositionsPerPoolExceeded(bytes32 key);
 
     modifier onlyAgent() {
         if (msg.sender != agent) revert NotAgent();
@@ -145,14 +155,23 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     /// @notice Authorise `adapter` to operate the vault's LP NFTs held in
     /// `nftManager` (V3 NonfungiblePositionManager or V4 PositionManager).
     /// Required before the agent can call removeLiquidity or collectFees.
-    function bootstrapAdapter(address nftManager, address adapter) external onlyGuardian {
-        IERC721(nftManager).setApprovalForAll(adapter, true);
-        emit AdapterBootstrapped(nftManager, adapter);
+    /// We cross-check that `nftManager` matches the adapter's own
+    /// `nftManager()` so a mistyped guardian call can't grant the operator
+    /// approval on an unrelated ERC721.
+    function bootstrapAdapter(address nftManager_, address adapter) external onlyGuardian {
+        address expected = ILiquidityAdapter(adapter).nftManager();
+        if (expected != nftManager_) revert AdapterNftManagerMismatch(expected, nftManager_);
+        IERC721(nftManager_).setApprovalForAll(adapter, true);
+        emit AdapterBootstrapped(nftManager_, adapter);
     }
 
-    /// @notice Symmetric off-switch for `bootstrapAdapter`.
-    function revokeAdapter(address nftManager, address adapter) external onlyGuardian {
-        IERC721(nftManager).setApprovalForAll(adapter, false);
+    /// @notice Symmetric off-switch for `bootstrapAdapter`. Same NFT-manager
+    /// validation applies.
+    function revokeAdapter(address nftManager_, address adapter) external onlyGuardian {
+        address expected = ILiquidityAdapter(adapter).nftManager();
+        if (expected != nftManager_) revert AdapterNftManagerMismatch(expected, nftManager_);
+        IERC721(nftManager_).setApprovalForAll(adapter, false);
+        emit AdapterRevoked(nftManager_, adapter);
     }
 
     /// @notice Mark a tracked pool as orphaned so `totalAssets()` skips it.
@@ -304,6 +323,7 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         bytes calldata extra
     ) external onlyAgent whenNotPaused nonReentrant returns (uint256 amount0Out, uint256 amount1Out, bool burned) {
         PoolRegistry.Pool memory pool = _requireTrackedPool(poolKey);
+        if (_positionIndex[poolKey][positionId] == 0) revert PositionNotTracked(poolKey, positionId);
         (amount0Out, amount1Out, burned) =
             ILiquidityAdapter(pool.adapter).removeLiquidity(pool, positionId, liquidity, amount0Min, amount1Min, extra);
         // Tracking cleanup runs after the adapter call because we need its
@@ -325,6 +345,7 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         returns (uint256 amount0, uint256 amount1)
     {
         PoolRegistry.Pool memory pool = _requireTrackedPool(poolKey);
+        if (_positionIndex[poolKey][positionId] == 0) revert PositionNotTracked(poolKey, positionId);
         (amount0, amount1) = ILiquidityAdapter(pool.adapter).collectFees(pool, positionId);
         emit FeesCollected(poolKey, positionId, amount0, amount1);
     }
@@ -338,6 +359,10 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     {
         if (!registry.isPoolKnown(poolKey)) revert PoolNotKnown(poolKey);
         PoolRegistry.Pool memory pool = registry.getPool(poolKey);
+        // Hooked V4 pools are blocked here as well as on the add path,
+        // because a hook can fire callbacks during the V4 swap router's
+        // unlock/settle cycle and reach back into the vault's read path.
+        if (pool.hooks != address(0)) revert HookedPoolsNotAllowed(poolKey);
 
         IERC20(tokenIn).forceApprove(pool.adapter, amountIn);
         amountOut = ILiquidityAdapter(pool.adapter).swapExactIn(pool, tokenIn, amountIn, amountOutMin, extra);
@@ -370,10 +395,11 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
 
         for (uint256 i; i < ids.length; ++i) {
             uint128 liquidity = adapter_.getPositionLiquidity(pool, ids[i]);
-            if (liquidity == 0) {
-                _untrackPosition(poolKey, ids[i]);
-                continue;
-            }
+            // A zero reading can mean the position was already burned OR
+            // that the adapter view itself reverted and was caught upstream.
+            // Skip the position without untracking; a real burn will surface
+            // via the next `executeRemoveLiquidity` and untrack cleanly.
+            if (liquidity == 0) continue;
             (uint256 amount0Out, uint256 amount1Out, bool burned) =
                 adapter_.removeLiquidity(pool, ids[i], liquidity, 0, 0, extra);
             if (burned) {
@@ -445,6 +471,7 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
 
     function _trackPositionIfNew(bytes32 key, uint256 positionId) internal {
         if (_positionIndex[key][positionId] != 0) return;
+        if (_positionIdsByPool[key].length >= MAX_POSITIONS_PER_POOL) revert MaxPositionsPerPoolExceeded(key);
         _positionIdsByPool[key].push(positionId);
         _positionIndex[key][positionId] = _positionIdsByPool[key].length;
         emit PositionTracked(key, positionId);

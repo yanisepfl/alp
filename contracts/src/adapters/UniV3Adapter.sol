@@ -218,6 +218,10 @@ contract UniV3Adapter is ILiquidityAdapter {
         sqrtPriceX96 = _poolSqrtPrice(pool);
     }
 
+    function nftManager() external view returns (address) {
+        return address(npm);
+    }
+
     function getPositionLiquidity(
         PoolRegistry.Pool calldata,
         /* pool */

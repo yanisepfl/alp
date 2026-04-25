@@ -107,9 +107,10 @@ contract V4LifecycleTest is V4Deployers {
 
     // -------- Hook restriction --------
 
-    function test_executeAddLiquidity_revertsWhenPoolHasHooks() public {
-        // Register a pool with a non-zero hooks address. The vault must
-        // refuse to interact with it until each hook is reviewed.
+    function test_addPool_withHooks_revertsAtRegistryLayer() public {
+        // The first line of defence is the registry: hooked pools cannot
+        // even be whitelisted. (The vault-side check at executeAddLiquidity
+        // remains as belt-and-braces in case the registry is later relaxed.)
         address fakeHook = makeAddr("fakeHook");
         PoolRegistry.Pool memory pool = PoolRegistry.Pool({
             adapter: address(adapter),
@@ -122,12 +123,8 @@ contract V4LifecycleTest is V4Deployers {
             enabled: true
         });
         vm.prank(guardian);
-        bytes32 hookedKey = registry.addPool(pool);
-
-        vm.expectRevert(abi.encodeWithSelector(ALPVault.HookedPoolsNotAllowed.selector, hookedKey));
-        vault.executeAddLiquidity(
-            hookedKey, 1e18, 1e18, 0, 0, abi.encode(int24(-6_000), int24(6_000), block.timestamp + 600, uint256(0))
-        );
+        vm.expectRevert(PoolRegistry.HookedPoolsNotAllowed.selector);
+        registry.addPool(pool);
     }
 
     // -------- Orphan switch --------
