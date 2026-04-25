@@ -195,7 +195,10 @@ contract UniV4Adapter is ILiquidityAdapter {
         bool zeroForOne = (tokenIn == pool.token0);
         address tokenOut = zeroForOne ? pool.token1 : pool.token0;
 
-        uint256 deadline = abi.decode(extra, (uint256));
+        // Accept either an explicit `abi.encode(uint256 deadline)` or empty
+        // extra (defaults to current block) so callers can pass identical
+        // payloads to V3 and V4 adapters without conditional encoding.
+        uint256 deadline = extra.length == 0 ? block.timestamp : abi.decode(extra, (uint256));
 
         IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
         _ensureRouterApproval(tokenIn);
@@ -231,6 +234,22 @@ contract UniV4Adapter is ILiquidityAdapter {
 
     function getSpotSqrtPriceX96(PoolRegistry.Pool calldata pool) external view returns (uint160 sqrtPriceX96) {
         sqrtPriceX96 = _poolSqrtPrice(pool);
+    }
+
+    function getPositionLiquidity(
+        PoolRegistry.Pool calldata,
+        /* pool */
+        uint256 positionId
+    )
+        external
+        view
+        returns (uint128 liquidity)
+    {
+        try positionManager.getPositionLiquidity(positionId) returns (uint128 _liquidity) {
+            return _liquidity;
+        } catch {
+            return 0;
+        }
     }
 
     // -------- internal --------
@@ -318,20 +337,23 @@ contract UniV4Adapter is ILiquidityAdapter {
         positionManager.modifyLiquidities(abi.encode(actions, params), deadline);
     }
 
-    /// @dev Permit2 plumbing for the PositionManager (which pulls tokens via Permit2
-    /// inside `modifyLiquidities`). One-shot per token.
+    /// @dev Permit2 plumbing for the PositionManager (which pulls tokens via
+    /// Permit2 inside `modifyLiquidities`). One-shot per token. Sets the
+    /// initialised flag before issuing the external approvals so a re-entrant
+    /// callback observes the post-state, not a re-runnable pre-state.
     function _ensurePermit2(address token) internal {
         if (_permit2Initialised[token]) return;
+        _permit2Initialised[token] = true;
         IERC20(token).forceApprove(address(permit2), type(uint256).max);
         permit2.approve(token, address(positionManager), type(uint160).max, type(uint48).max);
-        _permit2Initialised[token] = true;
     }
 
     /// @dev Direct ERC20 approval for the V4 swap router (which uses
-    /// `transferFrom`, not Permit2). One-shot per token.
+    /// `transferFrom`, not Permit2). One-shot per token. Same CEI ordering
+    /// as `_ensurePermit2`.
     function _ensureRouterApproval(address token) internal {
         if (_routerApproved[token]) return;
-        IERC20(token).forceApprove(address(swapRouter), type(uint256).max);
         _routerApproved[token] = true;
+        IERC20(token).forceApprove(address(swapRouter), type(uint256).max);
     }
 }

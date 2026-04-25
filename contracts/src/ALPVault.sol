@@ -58,6 +58,11 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     /// with a pool, so removeLiquidity / valuation continue to work even if
     /// the pool is later dropped from the registry.
     mapping(bytes32 => PoolRegistry.Pool) internal _trackedPools;
+    /// @dev Pools the guardian has marked as broken: their valuation is
+    /// excluded from `totalAssets()` so a single bad pool can't brick the
+    /// vault's accounting. The pool's positions and balances remain on
+    /// chain; the guardian can investigate and re-enable later.
+    mapping(bytes32 => bool) internal _orphanedPool;
     /// @dev Position IDs the vault holds, grouped by pool.
     mapping(bytes32 => uint256[]) internal _positionIdsByPool;
     /// @dev (poolKey, positionId) => 1-based index into `_positionIdsByPool`.
@@ -72,6 +77,7 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     event AdapterBootstrapped(address indexed nftManager, address indexed adapter);
     event PoolTracked(bytes32 indexed poolKey, address indexed nonBaseToken);
     event PoolUntracked(bytes32 indexed poolKey);
+    event PoolOrphaned(bytes32 indexed poolKey, bool orphaned);
     event PositionTracked(bytes32 indexed poolKey, uint256 indexed positionId);
     event PositionUntracked(bytes32 indexed poolKey, uint256 indexed positionId);
     event LiquidityAdded(bytes32 indexed poolKey, uint256 positionId, uint256 amount0Used, uint256 amount1Used);
@@ -81,11 +87,14 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
 
     error NotAgent();
     error NotGuardian();
+    error NotAgentOrGuardian();
     error PoolNotAddAllowed(bytes32 key);
     error PoolNotKnown(bytes32 key);
     error PoolNotTracked(bytes32 key);
     error BaseAssetNotInPool(bytes32 key);
     error MaxAllocationExceeded(bytes32 key);
+    error HookedPoolsNotAllowed(bytes32 key);
+    error PoolStillHasPositions(bytes32 key);
 
     modifier onlyAgent() {
         if (msg.sender != agent) revert NotAgent();
@@ -146,6 +155,20 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         IERC721(nftManager).setApprovalForAll(adapter, false);
     }
 
+    /// @notice Mark a tracked pool as orphaned so `totalAssets()` skips it.
+    /// Use when the pool's adapter or non-base token is misbehaving and
+    /// would otherwise brick the entire vault's valuation. Positions in the
+    /// pool stay on chain; the agent can still call `executeRemoveLiquidity`
+    /// or `closeAllPositionsInPool` to wind them down. Reversible.
+    function setPoolOrphaned(bytes32 poolKey, bool orphaned) external onlyGuardian {
+        _orphanedPool[poolKey] = orphaned;
+        emit PoolOrphaned(poolKey, orphaned);
+    }
+
+    function isPoolOrphaned(bytes32 poolKey) external view returns (bool) {
+        return _orphanedPool[poolKey];
+    }
+
     // -------- ERC-4626 valuation --------
 
     /// @notice Virtual-share offset used by ERC4626 to mitigate the inflate-
@@ -163,37 +186,59 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
 
         uint256 numPools = _activePoolKeys.length;
         for (uint256 i; i < numPools; ++i) {
+            // Skip pools the guardian has marked orphaned. They contribute
+            // zero to TAV until manually rehabilitated.
             bytes32 key = _activePoolKeys[i];
-            PoolRegistry.Pool memory pool = _trackedPools[key];
-            ILiquidityAdapter adapter_ = ILiquidityAdapter(pool.adapter);
-
-            bool baseIsToken0 = (pool.token0 == base);
-            address nonBase = baseIsToken0 ? pool.token1 : pool.token0;
-
-            uint160 sqrtPriceX96 = adapter_.getSpotSqrtPriceX96(pool);
-
-            // Idle non-base balance held by the vault, valued through this
-            // pool's spot. We attribute it to the first active pool that
-            // contains it; later pools containing the same non-base would
-            // double-count, which is why each non-base balance is added
-            // only once (we skip if already credited in this iteration).
-            if (!_alreadyCounted(nonBase, base, i)) {
-                uint256 idleNonBase = IERC20(nonBase).balanceOf(address(this));
-                if (idleNonBase > 0) {
-                    total += _convertToBase(idleNonBase, sqrtPriceX96, !baseIsToken0);
-                }
+            if (_orphanedPool[key]) continue;
+            // A misbehaving non-base token, broken adapter, or pre-init pool
+            // would otherwise brick deposits/redemptions. Skip and continue;
+            // the guardian can `forceUntrackPool` to surface and fix the
+            // root cause if needed.
+            try this.poolValueExternal(key) returns (uint256 v) {
+                total += v;
+            } catch {
+                // intentionally swallowed — see comment above
             }
+        }
+    }
 
-            uint256[] storage ids = _positionIdsByPool[key];
-            uint256 numPositions = ids.length;
-            for (uint256 j; j < numPositions; ++j) {
-                (uint256 amount0, uint256 amount1) = adapter_.getPositionAmounts(pool, ids[j]);
-                uint256 baseAmount = baseIsToken0 ? amount0 : amount1;
-                uint256 nonBaseAmount = baseIsToken0 ? amount1 : amount0;
-                total += baseAmount;
-                if (nonBaseAmount > 0) {
-                    total += _convertToBase(nonBaseAmount, sqrtPriceX96, !baseIsToken0);
-                }
+    /// @notice External wrapper around `_poolValueWithIdle` so `totalAssets`
+    /// can wrap the per-pool block in `try/catch` without using `call`.
+    /// Marked external + view so it can only be invoked statically.
+    function poolValueExternal(bytes32 key) external view returns (uint256) {
+        return _poolValueWithIdle(key);
+    }
+
+    /// @dev Per-pool value contribution to TAV: idle non-base balance (only
+    /// charged once per token, attributed to the lowest-index pool that
+    /// contains it) + sum of position values. Always priced through the
+    /// pool's own spot.
+    function _poolValueWithIdle(bytes32 key) internal view returns (uint256 value) {
+        PoolRegistry.Pool memory pool = _trackedPools[key];
+        if (pool.adapter == address(0)) return 0;
+        ILiquidityAdapter adapter_ = ILiquidityAdapter(pool.adapter);
+        address base = asset();
+        bool baseIsToken0 = (pool.token0 == base);
+        address nonBase = baseIsToken0 ? pool.token1 : pool.token0;
+
+        uint160 sqrtPriceX96 = adapter_.getSpotSqrtPriceX96(pool);
+
+        if (!_alreadyCounted(nonBase, base, _activePoolKeyIndex[key] - 1)) {
+            uint256 idleNonBase = IERC20(nonBase).balanceOf(address(this));
+            if (idleNonBase > 0) {
+                value += _convertToBase(idleNonBase, sqrtPriceX96, !baseIsToken0);
+            }
+        }
+
+        uint256[] storage ids = _positionIdsByPool[key];
+        uint256 numPositions = ids.length;
+        for (uint256 j; j < numPositions; ++j) {
+            (uint256 amount0, uint256 amount1) = adapter_.getPositionAmounts(pool, ids[j]);
+            uint256 baseAmount = baseIsToken0 ? amount0 : amount1;
+            uint256 nonBaseAmount = baseIsToken0 ? amount1 : amount0;
+            value += baseAmount;
+            if (nonBaseAmount > 0) {
+                value += _convertToBase(nonBaseAmount, sqrtPriceX96, !baseIsToken0);
             }
         }
     }
@@ -218,6 +263,11 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         PoolRegistry.Pool memory pool = registry.getPool(poolKey);
         address base = asset();
         if (pool.token0 != base && pool.token1 != base) revert BaseAssetNotInPool(poolKey);
+        // Hook contracts can fire callbacks inside V4's `modifyLiquidities`
+        // that read or steer the vault's state mid-transaction. We block
+        // hooked pools entirely until each hook is reviewed and explicitly
+        // allowlisted; V3 always passes (`hooks == address(0)`).
+        if (pool.hooks != address(0)) revert HookedPoolsNotAllowed(poolKey);
 
         _trackPoolIfNew(poolKey, pool);
 
@@ -294,6 +344,43 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         IERC20(tokenIn).forceApprove(pool.adapter, 0);
 
         emit Swapped(poolKey, tokenIn, amountIn, amountOut);
+    }
+
+    /// @notice Wind down every position the vault holds in `poolKey`. Each
+    /// position is removed at its current liquidity with `burnIfEmpty = true`,
+    /// so the NFT is burned and the pool is automatically untracked when the
+    /// last position closes. Callable by the agent (normal operation) or the
+    /// guardian (emergency override). Runs even while the vault is paused so
+    /// emergency wind-downs aren't blocked by the kill switch.
+    ///
+    /// After this returns, the guardian may safely call
+    /// `registry.removePool(poolKey)` to drop the pool from the whitelist
+    /// entirely.
+    ///
+    /// Slippage protection is intentionally `min = 0` per position. Callers
+    /// who need strict per-position slippage should iterate
+    /// `getPositionIds(poolKey)` and invoke `executeRemoveLiquidity` directly.
+    function closeAllPositionsInPool(bytes32 poolKey, uint256 deadline) external nonReentrant {
+        if (msg.sender != agent && msg.sender != guardian) revert NotAgentOrGuardian();
+        PoolRegistry.Pool memory pool = _requireTrackedPool(poolKey);
+        ILiquidityAdapter adapter_ = ILiquidityAdapter(pool.adapter);
+
+        uint256[] memory ids = _positionIdsByPool[poolKey];
+        bytes memory extra = abi.encode(deadline, true);
+
+        for (uint256 i; i < ids.length; ++i) {
+            uint128 liquidity = adapter_.getPositionLiquidity(pool, ids[i]);
+            if (liquidity == 0) {
+                _untrackPosition(poolKey, ids[i]);
+                continue;
+            }
+            (uint256 amount0Out, uint256 amount1Out, bool burned) =
+                adapter_.removeLiquidity(pool, ids[i], liquidity, 0, 0, extra);
+            if (burned) {
+                _untrackPosition(poolKey, ids[i]);
+            }
+            emit LiquidityRemoved(poolKey, ids[i], amount0Out, amount1Out);
+        }
     }
 
     // -------- Views into tracking state --------
@@ -412,9 +499,10 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         return false;
     }
 
-    /// @dev Value held in `key` (positions + idle non-base attributed to that
-    /// pool, but not double-counted across pools), used to enforce
-    /// per-pool max allocation caps.
+    /// @dev Value held in `key` (positions only, not idle non-base), used to
+    /// enforce per-pool max allocation caps. Idle non-base is excluded so the
+    /// cap measures committed liquidity rather than transient balances mid-
+    /// rebalance.
     function _poolValue(bytes32 key) internal view returns (uint256 value) {
         PoolRegistry.Pool memory pool = _trackedPools[key];
         if (pool.adapter == address(0)) return 0;
@@ -437,19 +525,28 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     /// @dev Convert `amount` (in the non-base currency) to base units using
     /// `sqrtPriceX96`. `nonBaseIsToken0` indicates which side of the pool the
     /// `amount` corresponds to.
+    ///
+    /// Implementation note: we apply the sqrt price twice in sequence rather
+    /// than squaring it first. Squaring produces a large intermediate that
+    /// either truncates to zero (very low spot prices) or overflows (very
+    /// high ones); the two-step form keeps every intermediate inside the
+    /// safe range of `mulDiv` and never divides by zero when `sqrtPriceX96`
+    /// is itself non-zero.
     function _convertToBase(uint256 amount, uint160 sqrtPriceX96, bool nonBaseIsToken0)
         internal
         pure
         returns (uint256)
     {
         if (amount == 0 || sqrtPriceX96 == 0) return 0;
-        uint256 priceX96 = FullMath.mulDiv(uint256(sqrtPriceX96), uint256(sqrtPriceX96), 1 << 96);
+        uint256 q96 = 1 << 96;
         if (nonBaseIsToken0) {
-            // amount is token0; base is token1; price token0/token1 = priceX96 / 2^96
-            return FullMath.mulDiv(amount, priceX96, 1 << 96);
+            // base value = amount * (sqrtPriceX96 / 2^96)^2
+            //            = amount * sqrtPriceX96 / 2^96 * sqrtPriceX96 / 2^96
+            return FullMath.mulDiv(FullMath.mulDiv(amount, sqrtPriceX96, q96), sqrtPriceX96, q96);
         } else {
-            // amount is token1; base is token0; price token1/token0 = 2^96 / priceX96
-            return FullMath.mulDiv(amount, 1 << 96, priceX96);
+            // base value = amount / (sqrtPriceX96 / 2^96)^2
+            //            = amount * 2^96 / sqrtPriceX96 * 2^96 / sqrtPriceX96
+            return FullMath.mulDiv(FullMath.mulDiv(amount, q96, sqrtPriceX96), q96, sqrtPriceX96);
         }
     }
 }

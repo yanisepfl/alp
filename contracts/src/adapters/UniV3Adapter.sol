@@ -51,6 +51,12 @@ contract UniV3Adapter is ILiquidityAdapter {
         IERC20(pool.token0).safeTransferFrom(msg.sender, address(this), amount0Desired);
         IERC20(pool.token1).safeTransferFrom(msg.sender, address(this), amount1Desired);
 
+        // Track balance-before so the refund step works correctly with
+        // fee-on-transfer non-base tokens (where `amountUsed` reported by
+        // NPM does not match the actual amount removed from this contract).
+        uint256 bal0Before = IERC20(pool.token0).balanceOf(address(this));
+        uint256 bal1Before = IERC20(pool.token1).balanceOf(address(this));
+
         IERC20(pool.token0).forceApprove(address(npm), amount0Desired);
         IERC20(pool.token1).forceApprove(address(npm), amount1Desired);
 
@@ -85,12 +91,11 @@ contract UniV3Adapter is ILiquidityAdapter {
 
         IERC20(pool.token0).forceApprove(address(npm), 0);
         IERC20(pool.token1).forceApprove(address(npm), 0);
-        if (amount0Used < amount0Desired) {
-            IERC20(pool.token0).safeTransfer(msg.sender, amount0Desired - amount0Used);
-        }
-        if (amount1Used < amount1Desired) {
-            IERC20(pool.token1).safeTransfer(msg.sender, amount1Desired - amount1Used);
-        }
+
+        uint256 leftover0 = IERC20(pool.token0).balanceOf(address(this)) - (bal0Before - amount0Desired);
+        uint256 leftover1 = IERC20(pool.token1).balanceOf(address(this)) - (bal1Before - amount1Desired);
+        if (leftover0 > 0) IERC20(pool.token0).safeTransfer(msg.sender, leftover0);
+        if (leftover1 > 0) IERC20(pool.token1).safeTransfer(msg.sender, leftover1);
     }
 
     function removeLiquidity(
@@ -171,7 +176,9 @@ contract UniV3Adapter is ILiquidityAdapter {
         );
 
         IERC20(tokenIn).forceApprove(address(swapRouter), 0);
-        // (extra) reserved for future routing options.
+        // The V3 SwapRouter02 does not enforce a deadline, but we accept the
+        // V4-shaped `abi.encode(uint256 deadline)` payload anyway so the
+        // agent can pass identical extra-data through either adapter.
         extra;
     }
 
@@ -209,6 +216,35 @@ contract UniV3Adapter is ILiquidityAdapter {
 
     function getSpotSqrtPriceX96(PoolRegistry.Pool calldata pool) external view returns (uint160 sqrtPriceX96) {
         sqrtPriceX96 = _poolSqrtPrice(pool);
+    }
+
+    function getPositionLiquidity(
+        PoolRegistry.Pool calldata,
+        /* pool */
+        uint256 positionId
+    )
+        external
+        view
+        returns (uint128 liquidity)
+    {
+        try npm.positions(positionId) returns (
+            uint96,
+            address,
+            address,
+            address,
+            uint24,
+            int24,
+            int24,
+            uint128 _liquidity,
+            uint256,
+            uint256,
+            uint128,
+            uint128
+        ) {
+            return _liquidity;
+        } catch {
+            return 0;
+        }
     }
 
     // -------- internal --------

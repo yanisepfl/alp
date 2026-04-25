@@ -73,4 +73,12 @@ interface ILiquidityAdapter {
     /// @notice Returns the pool's current spot price as a Q64.96 sqrt(token1/token0).
     /// Used by the vault to value non-base tokens in base-asset units.
     function getSpotSqrtPriceX96(PoolRegistry.Pool calldata pool) external view returns (uint160 sqrtPriceX96);
+
+    /// @notice Returns the current liquidity of a position. Returns 0 for
+    /// burned or unknown positions so callers can iterate a list without
+    /// reverting.
+    function getPositionLiquidity(PoolRegistry.Pool calldata pool, uint256 positionId)
+        external
+        view
+        returns (uint128 liquidity);
 }

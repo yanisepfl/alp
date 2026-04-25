@@ -105,6 +105,65 @@ contract V4LifecycleTest is V4Deployers {
         );
     }
 
+    // -------- Hook restriction --------
+
+    function test_executeAddLiquidity_revertsWhenPoolHasHooks() public {
+        // Register a pool with a non-zero hooks address. The vault must
+        // refuse to interact with it until each hook is reviewed.
+        address fakeHook = makeAddr("fakeHook");
+        PoolRegistry.Pool memory pool = PoolRegistry.Pool({
+            adapter: address(adapter),
+            token0: token0,
+            token1: token1,
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: fakeHook,
+            maxAllocationBps: 10_000,
+            enabled: true
+        });
+        vm.prank(guardian);
+        bytes32 hookedKey = registry.addPool(pool);
+
+        vm.expectRevert(abi.encodeWithSelector(ALPVault.HookedPoolsNotAllowed.selector, hookedKey));
+        vault.executeAddLiquidity(
+            hookedKey, 1e18, 1e18, 0, 0, abi.encode(int24(-6_000), int24(6_000), block.timestamp + 600, uint256(0))
+        );
+    }
+
+    // -------- Orphan switch --------
+
+    function test_setPoolOrphaned_excludesFromTotalAssets() public {
+        // Open a position so the pool contributes to TAV.
+        vm.prank(alice);
+        vault.deposit(10_000e18, alice);
+        weth.mint(address(vault), 10_000e18);
+        vault.executeAddLiquidity(
+            poolKeyHash,
+            5_000e18,
+            5_000e18,
+            0,
+            0,
+            abi.encode(int24(-6_000), int24(6_000), block.timestamp + 600, uint256(0))
+        );
+
+        uint256 tavWithPool = vault.totalAssets();
+        assertGt(tavWithPool, 0);
+
+        // Guardian marks the pool as orphaned (e.g. underlying token started reverting).
+        vm.prank(guardian);
+        vault.setPoolOrphaned(poolKeyHash, true);
+
+        // TAV now excludes the pool's contribution but still reflects idle base.
+        uint256 idleBase = usdc.balanceOf(address(vault));
+        assertEq(vault.totalAssets(), idleBase);
+        assertTrue(vault.isPoolOrphaned(poolKeyHash));
+
+        // Reversible.
+        vm.prank(guardian);
+        vault.setPoolOrphaned(poolKeyHash, false);
+        assertEq(vault.totalAssets(), tavWithPool);
+    }
+
     // -------- Base-asset constraint --------
 
     function test_executeAddLiquidity_revertsWhenBaseAssetNotInPool() public {
@@ -261,6 +320,85 @@ contract V4LifecycleTest is V4Deployers {
         assertEq(vault.getPositionIds(poolKeyHash)[0], id1);
         // Pool still active because id1 is still open.
         assertEq(vault.getActivePools().length, 1);
+    }
+
+    function test_closeAllPositionsInPool_byAgent_burnsEverything() public {
+        vm.prank(alice);
+        vault.deposit(20_000e18, alice);
+        weth.mint(address(vault), 20_000e18);
+
+        vault.executeAddLiquidity(
+            poolKeyHash,
+            5_000e18,
+            5_000e18,
+            0,
+            0,
+            abi.encode(int24(-6_000), int24(6_000), block.timestamp + 600, uint256(0))
+        );
+        vault.executeAddLiquidity(
+            poolKeyHash,
+            5_000e18,
+            5_000e18,
+            0,
+            0,
+            abi.encode(int24(-3_000), int24(3_000), block.timestamp + 600, uint256(0))
+        );
+        assertEq(vault.positionCount(poolKeyHash), 2);
+
+        vault.closeAllPositionsInPool(poolKeyHash, block.timestamp + 600);
+
+        assertEq(vault.positionCount(poolKeyHash), 0);
+        assertEq(vault.getActivePools().length, 0);
+        // Vault now holds only base + non-base token balances; no open positions.
+    }
+
+    function test_closeAllPositionsInPool_byGuardian_works() public {
+        vm.prank(alice);
+        vault.deposit(10_000e18, alice);
+        weth.mint(address(vault), 10_000e18);
+
+        vault.executeAddLiquidity(
+            poolKeyHash,
+            5_000e18,
+            5_000e18,
+            0,
+            0,
+            abi.encode(int24(-6_000), int24(6_000), block.timestamp + 600, uint256(0))
+        );
+
+        vm.prank(guardian);
+        vault.closeAllPositionsInPool(poolKeyHash, block.timestamp + 600);
+
+        assertEq(vault.positionCount(poolKeyHash), 0);
+    }
+
+    function test_closeAllPositionsInPool_byStranger_reverts() public {
+        vm.expectRevert(ALPVault.NotAgentOrGuardian.selector);
+        vm.prank(alice);
+        vault.closeAllPositionsInPool(poolKeyHash, block.timestamp + 600);
+    }
+
+    function test_closeAllPositionsInPool_runsEvenWhilePaused() public {
+        vm.prank(alice);
+        vault.deposit(10_000e18, alice);
+        weth.mint(address(vault), 10_000e18);
+
+        vault.executeAddLiquidity(
+            poolKeyHash,
+            5_000e18,
+            5_000e18,
+            0,
+            0,
+            abi.encode(int24(-6_000), int24(6_000), block.timestamp + 600, uint256(0))
+        );
+
+        vm.prank(guardian);
+        vault.pause();
+
+        // Even while paused, the guardian can still wind down emergency-style.
+        vm.prank(guardian);
+        vault.closeAllPositionsInPool(poolKeyHash, block.timestamp + 600);
+        assertEq(vault.positionCount(poolKeyHash), 0);
     }
 
     function test_partialRemove_keepsPositionTracked() public {
