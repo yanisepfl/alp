@@ -17,9 +17,8 @@ const radley = Radley({
 });
 
 export const metadata: Metadata = {
-  title: "alps — onchain market making",
-  description:
-    "The yield of onchain volume, unlocked. A delta-neutral, agent-managed market-making book, anyone can mint.",
+  title: "alps",
+  description: "An onchain basket vault.",
 };
 
 export default function RootLayout({
@@ -29,7 +28,14 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className={`${sans.variable} ${radley.variable}`}>
-      <body>{children}</body>
+      <body>
+        {children}
+        <div
+          aria-hidden
+          className="pointer-events-none fixed inset-0 z-[100]"
+          style={{ background: "url(/noise.png)", opacity: 0.012 }}
+        />
+      </body>
     </html>
   );
 }
