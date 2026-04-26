@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const WORDS = "Start earning from onchain volume".split(" ");
 const ARROW_DELAY_MS = 2600 + (WORDS.length - 1) * 180 + 600 + 80;
@@ -21,20 +21,11 @@ const MASK_STYLE = {
 
 // Per-token deposit breakdown -used by the expanded Total Deposits view.
 const DEPOSITS = [
-  { slug: "USDC",  src: "/tokens/usdc.png",  color: "#2775CA", amount: "$1.20M" },
-  { slug: "WETH",  src: "/tokens/weth.png",  color: "#627EEA", amount: "$850K"  },
-  { slug: "cbBTC", src: "/tokens/cbbtc.png", color: "#F7931A", amount: "$620K"  },
-  { slug: "AERO",  src: "/tokens/aero.png",  color: "#5B83F4", amount: "$245K"  },
-  { slug: "DAI",   src: "/tokens/dai.png",   color: "#F5AC37", amount: "$145K"  },
-];
-
-// 40-point yield series, fractional values 0–5 (chart row count).
-const APY_SERIES = [
-  2.1, 2.3, 3.0, 2.8, 3.2, 3.4, 3.5, 3.7,
-  3.6, 4.0, 4.1, 4.2, 4.3, 4.5, 4.4, 4.6,
-  4.7, 4.8, 4.9, 4.8, 5.0, 5.1, 5.0, 5.2,
-  5.1, 5.3, 5.2, 5.4, 5.3, 5.4, 5.5, 5.4,
-  5.5, 5.4, 5.5, 5.4, 5.5, 5.4, 5.4, 5.4,
+  { slug: "USDC", src: "/tokens/usdc.png",     color: "#2775CA", amount: "$1.20M" },
+  { slug: "ETH",  src: "/tokens/eth.png",      color: "#627EEA", amount: "$850K"  },
+  { slug: "BTC",  src: "/tokens/btc.png",      color: "#F7931A", amount: "$620K"  },
+  { slug: "USDT", src: "/tokens/usdt.png",     color: "#26A17B", amount: "$245K"  },
+  { slug: "UNI",  src: "/tokens/uni.png",      color: "#FF007A", amount: "$145K"  },
 ];
 
 // Inline `color` is intentionally omitted -color must come from a Tailwind
@@ -47,83 +38,6 @@ const PILL_BOX = {
   fontWeight: 500 as const,
   lineHeight: 1,
 };
-
-const DOT_EMPTY = 0.08;
-const DOT_FULL = 0.82;
-const DOT_HOVER_LIT = 1.0;
-const DOT_HOVER_DIM = 0.22;
-// When a column is being hovered, all other columns dim down so the
-// hovered bar reads as the focus.
-const DOT_FULL_INACTIVE = 0.16;
-const DOT_EMPTY_INACTIVE = 0.04;
-
-function DotMatrixChart({
-  values,
-  rows = 5,
-  dot = 2,
-  gap = 1,
-  hoverIdx = null,
-  onHover,
-}: {
-  values: number[];
-  rows?: number;
-  dot?: number;
-  gap?: number;
-  hoverIdx?: number | null;
-  onHover?: (idx: number | null) => void;
-}) {
-  const cols = values.length;
-  const w = cols * (dot + gap) - gap;
-  const h = rows * (dot + gap) - gap;
-  const stride = dot + gap;
-
-  const handleMove = (e: React.MouseEvent<SVGSVGElement>) => {
-    if (!onHover) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const idx = Math.max(0, Math.min(Math.floor(x / stride), cols - 1));
-    onHover(idx);
-  };
-
-  return (
-    <svg
-      width={w}
-      height={h}
-      viewBox={`0 0 ${w} ${h}`}
-      aria-hidden
-      style={{ display: "block", overflow: "visible" }}
-      onMouseMove={onHover ? handleMove : undefined}
-      onMouseLeave={onHover ? () => onHover(null) : undefined}
-    >
-      {values.flatMap((v, c) => {
-        const anyHover = hoverIdx !== null;
-        const isHover = c === hoverIdx;
-        return Array.from({ length: rows }).map((_, r) => {
-          const rowFromBottom = rows - r;
-          const lit = v >= rowFromBottom;
-          const opacity = isHover
-            ? lit ? DOT_HOVER_LIT : DOT_HOVER_DIM
-            : anyHover
-              ? lit ? DOT_FULL_INACTIVE : DOT_EMPTY_INACTIVE
-              : lit ? DOT_FULL : DOT_EMPTY;
-          return (
-            <circle
-              key={`${c}-${r}`}
-              cx={c * stride + dot / 2}
-              cy={r * stride + dot / 2}
-              r={dot / 2}
-              fill="#fff"
-              style={{
-                opacity,
-                transition: "opacity 260ms cubic-bezier(0.16, 1, 0.3, 1)",
-              }}
-            />
-          );
-        });
-      })}
-    </svg>
-  );
-}
 
 function CatchphraseLink({ disabled = false }: { disabled?: boolean }) {
   return (
@@ -259,13 +173,13 @@ function TotalDeposits() {
       className="reveal absolute z-30"
       style={{
         top: "calc(20% - 28px)",
-        left: "20%",
+        right: "20%",
         animationDelay: "2600ms",
       }}
     >
       {/* Collapsed view */}
       <div
-        className="absolute top-0 left-0 flex items-center gap-1.5 whitespace-nowrap text-xs text-haze"
+        className="absolute top-0 right-0 flex items-center gap-1.5 whitespace-nowrap text-xs text-haze"
         style={{
           opacity: expanded ? 0 : 1,
           transform: expanded ? "translateY(-100%)" : "translateY(0)",
@@ -286,7 +200,7 @@ function TotalDeposits() {
 
       {/* Expanded view -per-token breakdown */}
       <div
-        className="absolute top-0 left-0 flex items-center gap-1.5 whitespace-nowrap text-xs text-haze"
+        className="absolute top-0 right-0 flex items-center gap-1.5 whitespace-nowrap text-xs text-haze"
         style={{
           opacity: expanded ? 1 : 0,
           transform: expanded ? "translateY(0)" : "translateY(100%)",
@@ -303,79 +217,144 @@ function TotalDeposits() {
   );
 }
 
-function CurrentYield() {
-  const [expanded, setExpanded] = useState(false);
-  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+// "Built on top of" bars under the Summary card. Each entry maps to a
+// prize track from ETHGlobal Open Agents that ALP integrates with. Colored
+// rounded-square chip on the left (white glyph), name + descriptor stacked
+// to the right.
+const BUILT_ON = [
+  { name: "Uniswap",   label: "Best Uniswap API integration",    color: "#FF007A", glyph: "U" },
+  { name: "KeeperHub", label: "Best agent execution layer use",  color: "#00D26A", glyph: "K" },
+  { name: "ENS",       label: "Best ENS integration for agents", color: "#5298FF", glyph: "E" },
+];
 
-  const idx = hoverIdx !== null ? hoverIdx : APY_SERIES.length - 1;
-  const display = `${APY_SERIES[idx].toFixed(1)}%`;
-
+function BuiltOnBar({
+  name,
+  label,
+  color,
+  glyph,
+}: {
+  name: string;
+  label: string;
+  color: string;
+  glyph: string;
+}) {
   return (
     <div
-      className="reveal absolute z-30"
       style={{
-        top: "calc(20% - 28px)",
-        right: "20%",
-        animationDelay: "2700ms",
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "10px 14px",
+        background: "rgba(255,255,255,0.04)",
+        border: "1px solid rgba(255,255,255,0.06)",
+        borderRadius: 14,
+        flex: 1,
+        minWidth: 0,
       }}
     >
-      {/* Collapsed view */}
-      <div
-        className="absolute top-0 right-0 flex items-center gap-1.5 whitespace-nowrap"
+      <span
+        aria-hidden
         style={{
-          opacity: expanded ? 0 : 1,
-          transform: expanded ? "translateY(-100%)" : "translateY(0)",
-          pointerEvents: expanded ? "none" : "auto",
-          transition: SWITCH_TRANSITION,
+          width: 26,
+          height: 26,
+          borderRadius: 6,
+          background: color,
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "#fff",
+          fontFamily: "var(--sans-stack)",
+          fontSize: 14,
+          fontWeight: 600,
+          lineHeight: 1,
+          flexShrink: 0,
+          letterSpacing: "-0.02em",
         }}
       >
-        <span className="text-xs text-haze">Current Yield</span>
-        <button
-          type="button"
-          onClick={() => setExpanded(true)}
-          className="inline-flex items-center justify-center bg-white/10 text-haze transition-colors duration-200 hover:text-white"
-          style={{ ...PILL_BOX, border: "none" }}
-        >
-          5.4%
-        </button>
-      </div>
-
-      {/* Expanded view -chart + value + close */}
-      <div
-        className="absolute top-0 right-0 flex items-center gap-2 whitespace-nowrap"
-        style={{
-          opacity: expanded ? 1 : 0,
-          transform: expanded ? "translateY(0)" : "translateY(100%)",
-          pointerEvents: expanded ? "auto" : "none",
-          transition: SWITCH_TRANSITION,
-        }}
-      >
-        <DotMatrixChart
-          values={APY_SERIES}
-          rows={5}
-          dot={2}
-          gap={1}
-          hoverIdx={hoverIdx}
-          onHover={setHoverIdx}
-        />
+        {glyph}
+      </span>
+      <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
         <span
-          className="text-haze"
-          style={{ fontSize: "11px", fontWeight: 500, lineHeight: 1, fontVariantNumeric: "tabular-nums" }}
+          style={{
+            fontFamily: "var(--font-radley)",
+            fontSize: 14,
+            color: "rgba(255,255,255,0.92)",
+            lineHeight: 1.1,
+          }}
         >
-          {display}
+          {name}
         </span>
-        <CloseButton onClick={() => setExpanded(false)} />
+        <span
+          style={{
+            fontFamily: "var(--font-radley)",
+            fontSize: 11,
+            color: "rgba(255,255,255,0.55)",
+            lineHeight: 1.1,
+          }}
+        >
+          {label}
+        </span>
       </div>
     </div>
   );
 }
 
+// Bottom-left "Back" — small text + arrow chip, transparent background.
+// Only rendered while the Learn-more overlay is open.
 function LearnMore({ open, onClick }: { open: boolean; onClick: () => void }) {
+  if (!open) return null;
   return (
     <button
       type="button"
       onClick={onClick}
-      className="reveal absolute z-30 flex items-center gap-1.5 text-xs text-haze transition-colors hover:text-mist"
+      aria-label="Back"
+      className="absolute z-30 flex items-center gap-1.5 text-xs text-haze transition-colors hover:text-mist"
+      style={{
+        top: "calc(80% + 12px)",
+        left: "20%",
+        background: "transparent",
+        border: "none",
+        padding: 0,
+        cursor: "pointer",
+      }}
+    >
+      <span
+        className="inline-flex items-center justify-center bg-white/10"
+        style={{ width: 16, height: 16, borderRadius: 4, position: "relative", top: "1px" }}
+      >
+        <svg
+          width="10"
+          height="10"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden
+          style={{ display: "block", marginRight: "-1px" }}
+        >
+          <path d="M19 12H5M12 19l-7-7 7-7" />
+        </svg>
+      </span>
+      <span>Back</span>
+    </button>
+  );
+}
+
+// "How it works?" — primary entry into the Learn-more overlay. Same
+// text + chip-arrow style as the Back button and same position too
+// (bottom-left, just below the panel — outside the bg). They occupy the
+// same slot mutually exclusively. Always rendered so the reveal animation
+// only plays on first mount; toggling via opacity avoids the delayed
+// re-fade-in when returning from Learn-more.
+function HowItWorks({ disabled, onClick }: { disabled?: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label="How it works"
+      className="reveal absolute z-30 flex items-center gap-1.5 text-xs text-haze transition-opacity hover:text-mist"
       style={{
         top: "calc(80% + 12px)",
         left: "20%",
@@ -383,44 +362,31 @@ function LearnMore({ open, onClick }: { open: boolean; onClick: () => void }) {
         background: "transparent",
         border: "none",
         padding: 0,
+        cursor: disabled ? "default" : "pointer",
+        opacity: disabled ? 0 : 1,
+        pointerEvents: disabled ? "none" : "auto",
+        transition: "opacity 350ms cubic-bezier(0.16, 1, 0.3, 1), color 200ms",
       }}
     >
-      <span>Learn more</span>
+      <span>How it works?</span>
       <span
         className="inline-flex items-center justify-center bg-white/10"
         style={{ width: 16, height: 16, borderRadius: 4, position: "relative", top: "1px" }}
       >
-        {open ? (
-          <svg
-            width="9"
-            height="9"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2.5"
-            strokeLinecap="round"
-            aria-hidden
-            style={{ display: "block" }}
-          >
-            <line x1="6" y1="6" x2="18" y2="18" />
-            <line x1="18" y1="6" x2="6" y2="18" />
-          </svg>
-        ) : (
-          <svg
-            width="10"
-            height="10"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            style={{ display: "block", marginLeft: "-1px" }}
-            aria-hidden
-          >
-            <path d="M5 12h14M12 5l7 7-7 7" />
-          </svg>
-        )}
+        <svg
+          width="10"
+          height="10"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden
+          style={{ display: "block", marginLeft: "-1px" }}
+        >
+          <path d="M5 12h14M12 5l7 7-7 7" />
+        </svg>
       </span>
     </button>
   );
@@ -756,23 +722,31 @@ function InlinePill({ icon, iconImage, iconPair, tooltip, children }: InlinePill
 }
 
 // Token + pair lists used by tooltip grids on the Summary card pills.
-const PORTFOLIO_TOKENS = [
-  { slug: "USDC",  src: "/tokens/usdc.png"  },
-  { slug: "USDT",  src: "/tokens/usdt.png"  },
-  { slug: "DAI",   src: "/tokens/dai.png"   },
-  { slug: "WETH",  src: "/tokens/weth.png"  },
-  { slug: "ETH",   src: "/tokens/eth.png"   },
-  { slug: "cbBTC", src: "/tokens/cbbtc.png" },
-  { slug: "UNI",   src: "/tokens/uni.png"   },
+// Shared 5-token set (matches ALLOCATIONS); each entry has the brand
+// colour and kind/src so it can render through TokenChip as a brand-
+// coloured rounded square (no more circular icon chrome).
+type TokenEntry = { slug: string; kind: "svg" | "png"; src: string; color: string };
+const TOKENS: Record<string, TokenEntry> = {
+  USDC: { slug: "USDC", kind: "png", src: "/tokens/usdc.png",     color: "#2775CA" },
+  ETH:  { slug: "ETH",  kind: "svg", src: "/tokens/svg/eth.svg",  color: "#627EEA" },
+  BTC:  { slug: "BTC",  kind: "svg", src: "/tokens/svg/btc.svg",  color: "#F7931A" },
+  USDT: { slug: "USDT", kind: "svg", src: "/tokens/svg/usdt.svg", color: "#26A17B" },
+  UNI:  { slug: "UNI",  kind: "png", src: "/tokens/uni.png",      color: "#FF007A" },
+};
+const PORTFOLIO_TOKENS: TokenEntry[] = [
+  TOKENS.USDC,
+  TOKENS.ETH,
+  TOKENS.BTC,
+  TOKENS.USDT,
+  TOKENS.UNI,
 ];
-
-const POOL_PAIRS = [
-  { left: "/tokens/eth.png",   right: "/tokens/usdc.png"   },
-  { left: "/tokens/cbbtc.png", right: "/tokens/usdc.png"   },
-  { left: "/tokens/usdc.png",  right: "/tokens/usdt.png"   },
-  { left: "/tokens/weth.png",  right: "/tokens/cbbtc.png"  },
-  { left: "/tokens/usdc.png",  right: "/tokens/dai.png"    },
-  { left: "/tokens/uni.png",   right: "/tokens/usdc.png"   },
+const POOL_PAIRS: [TokenEntry, TokenEntry][] = [
+  [TOKENS.ETH,  TOKENS.USDC],
+  [TOKENS.BTC,  TOKENS.USDC],
+  [TOKENS.USDC, TOKENS.USDT],
+  [TOKENS.UNI,  TOKENS.USDC],
+  [TOKENS.BTC,  TOKENS.ETH],
+  [TOKENS.ETH,  TOKENS.USDT],
 ];
 
 function PortfolioTooltip() {
@@ -780,13 +754,7 @@ function PortfolioTooltip() {
     <div style={{ display: "grid", gridTemplateColumns: "repeat(2, auto)", gap: "10px 18px" }}>
       {PORTFOLIO_TOKENS.map((t) => (
         <div key={t.slug} style={{ display: "flex", alignItems: "center", gap: 7 }}>
-          <Image
-            src={t.src}
-            alt={t.slug}
-            width={18}
-            height={18}
-            style={{ borderRadius: 999, flexShrink: 0 }}
-          />
+          <TokenChip entry={t} size={18} radius={4} />
           <span style={{ fontFamily: "var(--font-radley)", fontSize: 13, lineHeight: 1, color: "rgba(255,255,255,0.92)" }}>
             {t.slug}
           </span>
@@ -796,19 +764,527 @@ function PortfolioTooltip() {
   );
 }
 
+// Portfolio breakdown - Apple-Health-style mini donut charts. Each pie
+// represents one token's allocation; the filled arc is the % of vault TVL
+// in that token. Token PNG sits in the center for instant recognition.
+// Gauge-style allocation cells + shared TokenChip helper. Each chip is a
+// brand-color rounded square with the token glyph inside: ETH/BTC/USDT use
+// single-path SVGs masked white; USDC/UNI overlay their PNG (their SVG
+// sources are missing/404).
+type PiePngEntry = { slug: string; pct: number; color: string; kind: "png"; src: string };
+type PieSvgEntry = { slug: string; pct: number; color: string; kind: "svg"; src: string };
+type PieEntry = PiePngEntry | PieSvgEntry;
+
+function TokenChip({
+  entry,
+  size,
+  glyphSize,
+  radius,
+}: {
+  entry: { kind: "svg" | "png"; src: string; color: string };
+  size: number;
+  glyphSize?: number;
+  radius?: number;
+}) {
+  const gs = glyphSize ?? Math.round(size * 0.62);
+  const r = radius ?? Math.max(3, Math.round(size * 0.26));
+  return (
+    <span
+      aria-hidden
+      style={{
+        width: size,
+        height: size,
+        borderRadius: r,
+        background: entry.color,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        overflow: "hidden",
+      }}
+    >
+      {entry.kind === "svg" ? (
+        <span
+          style={{
+            width: gs,
+            height: gs,
+            backgroundColor: "#fff",
+            WebkitMaskImage: `url(${entry.src})`,
+            maskImage: `url(${entry.src})`,
+            WebkitMaskSize: "contain",
+            maskSize: "contain",
+            WebkitMaskRepeat: "no-repeat",
+            maskRepeat: "no-repeat",
+            WebkitMaskPosition: "center",
+            maskPosition: "center",
+            display: "block",
+          }}
+        />
+      ) : (
+        <Image
+          src={entry.src}
+          alt=""
+          width={size}
+          height={size}
+          style={{ display: "block" }}
+        />
+      )}
+    </span>
+  );
+}
+
+const PORTFOLIO_PIES: PieEntry[] = [
+  { slug: "USDC", kind: "png", src: "/tokens/usdc.png",     pct: 38, color: "#2775CA" },
+  { slug: "ETH",  kind: "svg", src: "/tokens/svg/eth.svg",  pct: 24, color: "#627EEA" },
+  { slug: "BTC",  kind: "svg", src: "/tokens/svg/btc.svg",  pct: 18, color: "#F7931A" },
+  { slug: "USDT", kind: "svg", src: "/tokens/svg/usdt.svg", pct: 12, color: "#26A17B" },
+  { slug: "UNI",  kind: "png", src: "/tokens/uni.png",      pct:  8, color: "#FF007A" },
+];
+
+function MiniPie(entry: PieEntry) {
+  const [hover, setHover] = useState(false);
+  const { slug, pct, color } = entry;
+  const SIZE = 46;
+  const STROKE = 5;
+  const r = (SIZE - STROKE) / 2;
+  const c = 2 * Math.PI * r;
+  const ARC_FRAC = 0.75; // 270° visible
+  const trackLen = ARC_FRAC * c;
+  const fillLen = Math.max(0, Math.min(trackLen, (pct / 100) * trackLen));
+  return (
+    <div
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      onFocus={() => setHover(true)}
+      onBlur={() => setHover(false)}
+      style={{
+        position: "relative",
+        width: SIZE,
+        height: SIZE,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+      aria-label={`${slug} ${pct}%`}
+    >
+      <svg width={SIZE} height={SIZE} aria-hidden style={{ display: "block" }}>
+        {/* Track — muted, full 270° arc */}
+        <circle
+          cx={SIZE / 2}
+          cy={SIZE / 2}
+          r={r}
+          fill="none"
+          stroke="rgba(255,255,255,0.08)"
+          strokeWidth={STROKE}
+          strokeLinecap="round"
+          strokeDasharray={`${trackLen} ${c - trackLen}`}
+          transform={`rotate(135 ${SIZE / 2} ${SIZE / 2})`}
+        />
+        {/* Fill — colored, pct/100 of the visible 270° arc */}
+        <circle
+          cx={SIZE / 2}
+          cy={SIZE / 2}
+          r={r}
+          fill="none"
+          stroke={color}
+          strokeWidth={STROKE}
+          strokeLinecap="round"
+          strokeDasharray={`${fillLen} ${c - fillLen}`}
+          transform={`rotate(135 ${SIZE / 2} ${SIZE / 2})`}
+        />
+      </svg>
+      {/* Center: token chip by default, percentage number on hover */}
+      <span
+        style={{
+          position: "absolute",
+          left: "50%",
+          top: "50%",
+          transform: "translate(-50%, calc(-58% + 2px))",
+          opacity: hover ? 0 : 1,
+          transition: "opacity 180ms ease-out",
+          pointerEvents: "none",
+        }}
+      >
+        <TokenChip entry={entry} size={20} />
+      </span>
+      <span
+        style={{
+          position: "absolute",
+          left: "50%",
+          top: "50%",
+          transform: "translate(-50%, calc(-58% + 2px))",
+          fontFamily: "var(--sans-stack)",
+          fontSize: 13,
+          fontWeight: 500,
+          color: "rgba(255,255,255,0.95)",
+          fontVariantNumeric: "tabular-nums",
+          letterSpacing: "-0.02em",
+          lineHeight: 1,
+          opacity: hover ? 1 : 0,
+          transition: "opacity 180ms ease-out",
+          pointerEvents: "none",
+        }}
+      >
+        {pct}
+      </span>
+    </div>
+  );
+}
+
+function PortfolioPies() {
+  return (
+    <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+      {PORTFOLIO_PIES.map((t) => (
+        <MiniPie key={t.slug} {...t} />
+      ))}
+    </div>
+  );
+}
+
+// Bar track. centerline=true draws the divider for bipolar bars.
+function BarTrack({ children, centerline }: { children: React.ReactNode; centerline?: boolean }) {
+  return (
+    <div
+      style={{
+        position: "relative",
+        height: 6,
+        background: "rgba(255,255,255,0.06)",
+        borderRadius: 999,
+        overflow: "hidden",
+      }}
+    >
+      {centerline && (
+        <div
+          aria-hidden
+          style={{
+            position: "absolute",
+            left: "50%",
+            top: 0,
+            bottom: 0,
+            width: 1,
+            background: "rgba(255,255,255,0.22)",
+            zIndex: 1,
+          }}
+        />
+      )}
+      {children}
+    </div>
+  );
+}
+
+// === Live simulation data — must match the band animation keyframes ===
+// Right-edge price y at each cycle %. Linear interpolation between points.
+const PRICE_KFS: { t: number; y: number }[] = [
+  { t: 0,   y: 124 }, { t: 5,   y: 138 }, { t: 10,  y: 139 }, { t: 14,  y: 153 },
+  { t: 18,  y: 146 }, { t: 22,  y: 149 }, { t: 30,  y: 150 }, { t: 40,  y: 154 },
+  { t: 45,  y: 143 }, { t: 50,  y: 156 }, { t: 60,  y: 152 }, { t: 70,  y: 149 },
+  { t: 75,  y: 151 }, { t: 80,  y: 145 }, { t: 85,  y: 110 }, { t: 88,  y: 100 },
+  { t: 90,  y:  91 }, { t: 92,  y:  93 }, { t: 95,  y:  96 }, { t: 98,  y: 117 },
+  { t: 100, y: 124 },
+];
+// Narrow band keyframes (translateY in px, scaleY).
+const NARROW_KFS = [
+  { t: 0,  ty: -4,  sy: 0.60 }, { t: 5,  ty: 10,  sy: 0.55 },
+  { t: 14, ty: 24,  sy: 0.55 }, { t: 30, ty: 22,  sy: 0.55 },
+  { t: 50, ty: 28,  sy: 0.55 }, { t: 75, ty: 23,  sy: 0.55 },
+  { t: 82, ty: 20,  sy: 0.55 }, { t: 88, ty: 18,  sy: 0.55 },
+  { t: 91, ty: -15, sy: 0.65 }, { t: 95, ty: -28, sy: 0.70 },
+  { t: 99, ty: -3,  sy: 0.60 }, { t: 100, ty: -4, sy: 0.60 },
+];
+const WIDE_KFS = [
+  { t: 0,   ty: 0,   sy: 2.40 }, { t: 18,  ty: 18,  sy: 2.20 },
+  { t: 80,  ty: 18,  sy: 2.20 }, { t: 90,  ty: 18,  sy: 2.20 },
+  { t: 93,  ty: -15, sy: 2.70 }, { t: 98,  ty: -15, sy: 2.70 },
+  { t: 100, ty: 0,   sy: 2.40 },
+];
+
+function lerp(a: number, b: number, p: number) { return a + p * (b - a); }
+function interpKfs<K extends string>(kfs: ({ t: number } & { [k in K]: number })[], t: number, key: K): number {
+  if (t <= kfs[0].t) return kfs[0][key];
+  if (t >= kfs[kfs.length - 1].t) return kfs[kfs.length - 1][key];
+  for (let i = 0; i < kfs.length - 1; i++) {
+    if (kfs[i].t <= t && t <= kfs[i + 1].t) {
+      const p = (t - kfs[i].t) / (kfs[i + 1].t - kfs[i].t);
+      return lerp(kfs[i][key], kfs[i + 1][key], p);
+    }
+  }
+  return kfs[0][key];
+}
+
+// Stepped lookup matching CSS steps(1, end) semantics: value held at the
+// most-recent keyframe whose t ≤ cycle %, snaps to the next at the boundary.
+function steppedKfs<K extends string>(kfs: ({ t: number } & { [k in K]: number })[], t: number, key: K): number {
+  let val = kfs[0][key];
+  for (const kf of kfs) {
+    if (kf.t <= t) val = kf[key];
+    else break;
+  }
+  return val;
+}
+
+// MetricBars — reads the ACTUAL rendered transforms of the band groups
+// and the price-line group via getComputedStyle every frame. Whatever
+// is on screen is what the bars compute against — no separate JS clock,
+// no animation-start mismatch, no easing-curve drift. Pure synchronization
+// with what the eye sees.
+
+// Path waypoints extracted from the price-line d-string. Used to look up
+// the y at the right edge of viewport given the current scroll amount.
+const PATH_POINTS: { x: number; y: number }[] = [
+  { x: 0,     y: 140.9 }, { x: 5.1,   y: 135.6 }, { x: 10.3,  y: 128.4 }, { x: 15.4,  y: 145.5 },
+  { x: 20.6,  y: 156.3 }, { x: 25.7,  y: 165.0 }, { x: 30.9,  y: 170.8 }, { x: 36.0,  y: 165.2 },
+  { x: 41.1,  y: 167.7 }, { x: 46.3,  y: 164.7 }, { x: 51.4,  y: 163.4 }, { x: 56.6,  y: 158.4 },
+  { x: 61.7,  y: 151.8 }, { x: 66.9,  y: 143.0 }, { x: 72.0,  y: 162.0 }, { x: 77.1,  y: 155.0 },
+  { x: 82.3,  y: 132.8 }, { x: 87.4,  y: 130.6 }, { x: 92.6,  y: 142.6 }, { x: 97.7,  y: 141.6 },
+  { x: 102.9, y: 149.5 }, { x: 108.0, y: 146.2 }, { x: 113.1, y: 143.9 }, { x: 118.3, y: 140.6 },
+  { x: 123.4, y: 134.8 }, { x: 128.6, y: 151.3 }, { x: 133.7, y: 154.5 }, { x: 138.9, y: 150.3 },
+  { x: 144.0, y: 148.9 }, { x: 149.1, y: 144.6 }, { x: 154.3, y: 149.6 }, { x: 159.4, y: 141.4 },
+  { x: 164.6, y: 111.9 }, { x: 169.7, y: 117.3 }, { x: 174.9, y:  98.9 }, { x: 180.0, y: 101.6 },
+  { x: 185.1, y: 100.2 }, { x: 190.3, y:  90.7 }, { x: 195.4, y:  91.4 }, { x: 200.6, y: 102.8 },
+  { x: 205.7, y:  95.6 }, { x: 210.9, y:  99.7 }, { x: 216.0, y:  95.8 }, { x: 221.1, y: 112.9 },
+  { x: 226.3, y: 124.9 }, { x: 231.4, y: 128.2 }, { x: 236.6, y: 123.7 }, { x: 241.7, y: 133.3 },
+  { x: 246.9, y: 150.0 }, { x: 252.0, y: 141.3 }, { x: 257.1, y: 137.7 }, { x: 262.3, y: 142.9 },
+  { x: 267.4, y: 153.8 }, { x: 272.6, y: 144.6 }, { x: 277.7, y: 139.2 }, { x: 282.9, y: 140.0 },
+  { x: 288.0, y: 147.3 }, { x: 293.1, y: 155.7 }, { x: 298.3, y: 154.2 }, { x: 303.4, y: 150.0 },
+  { x: 308.6, y: 149.6 }, { x: 313.7, y: 145.9 }, { x: 318.9, y: 152.4 }, { x: 324.0, y: 151.4 },
+  { x: 329.1, y: 148.8 }, { x: 334.3, y: 143.9 }, { x: 339.4, y: 153.5 }, { x: 344.6, y: 151.4 },
+  { x: 349.7, y: 150.5 }, { x: 354.9, y: 150.9 }, { x: 360.0, y: 151.2 }, { x: 365.1, y: 149.7 },
+  { x: 370.3, y: 149.6 }, { x: 375.4, y: 153.7 }, { x: 380.6, y: 152.0 }, { x: 385.7, y: 156.5 },
+  { x: 390.9, y: 155.1 }, { x: 396.0, y: 154.4 }, { x: 401.1, y: 151.2 }, { x: 406.3, y: 154.1 },
+  { x: 411.4, y: 153.6 }, { x: 416.6, y: 151.8 }, { x: 421.7, y: 144.5 }, { x: 426.9, y: 146.2 },
+  { x: 432.0, y: 140.9 },
+];
+
+function pathYAt(x: number): number {
+  // Path is duplicated with second copy at +432, so wrap into [0, 432).
+  const xMod = ((x % 432) + 432) % 432;
+  for (let i = 0; i < PATH_POINTS.length - 1; i++) {
+    const a = PATH_POINTS[i], b = PATH_POINTS[i + 1];
+    if (a.x <= xMod && xMod <= b.x) {
+      const p = (xMod - a.x) / (b.x - a.x || 1);
+      return a.y + p * (b.y - a.y);
+    }
+  }
+  return PATH_POINTS[0].y;
+}
+
+// matrix(a, b, c, d, e, f) → { scaleY: d, translateX: e, translateY: f }
+function readMatrix(transformStr: string): { scaleY: number; translateX: number; translateY: number } {
+  if (!transformStr || transformStr === "none") return { scaleY: 1, translateX: 0, translateY: 0 };
+  const m = transformStr.match(/matrix\(([^)]+)\)/);
+  if (!m) return { scaleY: 1, translateX: 0, translateY: 0 };
+  const p = m[1].split(",").map((s) => parseFloat(s));
+  return { scaleY: p[3] ?? 1, translateX: p[4] ?? 0, translateY: p[5] ?? 0 };
+}
+
+function MetricBars() {
+  const netRef = useRef<HTMLDivElement>(null);
+  const cumRef = useRef<HTMLDivElement>(null);
+  const compoundedRef = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    const net = netRef.current;
+    const cum = cumRef.current;
+    const compounded = compoundedRef.current;
+    if (!net || !cum) return;
+
+    let cumNet = 0;
+    let prevNarrowCenter: number | null = null;
+    let prevWideCenter: number | null = null;
+    let prevTimeMs: number | null = null;
+    let prevRightX = -1;
+    let lastSign = 1;
+    let rafId = 0;
+    let compoundedTimer: ReturnType<typeof setTimeout> | null = null;
+    let lvrShown = 0;   // decaying display value so a 1-frame LVR snap stays visible
+
+    const tick = () => {
+      const priceEl = document.querySelector(".animate-price-drift");
+      if (!priceEl) {
+        rafId = requestAnimationFrame(tick);
+        return;
+      }
+
+      // Derive the cycle % from the price-line's actual translateX (linear
+      // easing → matrix is reliable). Then use that cycle % to look up
+      // band positions from the keyframes via stepped semantics — matching
+      // the visible bands' steps(1, end) snaps exactly.
+      const priceM = readMatrix(window.getComputedStyle(priceEl).transform);
+      const cyclePct = Math.max(0, Math.min(100, (-priceM.translateX / 432) * 100));
+
+      const narrowCenter = 128 + steppedKfs(NARROW_KFS, cyclePct, "ty");
+      const narrowHalf   = 24  * steppedKfs(NARROW_KFS, cyclePct, "sy");
+      const wideCenter   = 128 + steppedKfs(WIDE_KFS,   cyclePct, "ty");
+      const wideHalf     = 24  * steppedKfs(WIDE_KFS,   cyclePct, "sy");
+
+      const rightEdgeX = 236 - priceM.translateX;
+      const price = pathYAt(rightEdgeX);
+
+      // Wrap detection: cyclePct decreases sharply at loop reset.
+      if (rightEdgeX < prevRightX - 100) {
+        cumNet = 0;
+        if (compounded) {
+          compounded.style.opacity = "1";
+          if (compoundedTimer) clearTimeout(compoundedTimer);
+          compoundedTimer = setTimeout(() => {
+            if (compounded) compounded.style.opacity = "0";
+          }, 1400);
+        }
+      }
+      prevRightX = rightEdgeX;
+
+      const inNarrow = Math.abs(price - narrowCenter) <= narrowHalf;
+      const inWide = Math.abs(price - wideCenter) <= wideHalf;
+      const depth = (inNarrow ? 1 : 0) + (inWide ? 1 : 0);
+
+      const fee = depth === 2 ? 30 : depth === 1 ? 15 : 0;
+
+      const dnNarrow = prevNarrowCenter !== null ? Math.abs(narrowCenter - prevNarrowCenter) : 0;
+      const dnWide = prevWideCenter !== null ? Math.abs(wideCenter - prevWideCenter) : 0;
+      const now = performance.now();
+      const dtSec = prevTimeMs !== null ? Math.min(0.05, (now - prevTimeMs) / 1000) : 0.016;
+
+      // Raw LVR for this frame. First-order LP rebalance cost: linear in
+      // |Δcenter|, weighted by concentration (narrow is tighter so the
+      // swap to recenter costs more per unit shift).
+      const lvrThisFrame = dnNarrow * 0.30 + dnWide * 0.12;
+      const lvrInstant = lvrThisFrame / Math.max(dtSec, 0.001);
+
+      // For DISPLAY: faster decay so small snaps fade quickly (visibly
+      // smaller red flash), big snaps persist. Differentiates magnitudes.
+      lvrShown = Math.max(lvrShown * 0.78, lvrInstant);
+
+      const inst = fee - lvrShown;
+
+      // Top bar (smooth transitions added on the element style itself)
+      const w = Math.min(48, Math.abs(inst));
+      const sign = inst >= 0 ? 1 : -1;
+      if (sign !== lastSign) {
+        net.style.background = sign === 1 ? "rgba(74,222,128,0.85)" : "rgba(239,68,68,0.85)";
+        lastSign = sign;
+      }
+      if (sign === 1) {
+        net.style.left = "50%";
+        net.style.right = `calc(50% - ${w.toFixed(2)}%)`;
+      } else {
+        net.style.left = `calc(50% - ${w.toFixed(2)}%)`;
+        net.style.right = "50%";
+      }
+
+      // Bottom bar (Revenue) — accumulate using the RAW lvrInstant (not the
+      // decayed display value), so each LVR event is counted once.
+      cumNet += (fee - lvrInstant) * dtSec * 0.08;
+      const cumW = Math.max(0.5, Math.min(95, cumNet));
+      cum.style.width = `${cumW.toFixed(2)}%`;
+
+      prevNarrowCenter = narrowCenter;
+      prevWideCenter = wideCenter;
+      prevTimeMs = now;
+      rafId = requestAnimationFrame(tick);
+    };
+
+    rafId = requestAnimationFrame(tick);
+    return () => {
+      cancelAnimationFrame(rafId);
+      if (compoundedTimer) clearTimeout(compoundedTimer);
+    };
+  }, []);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14, marginTop: 16 }}>
+      <div>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            marginBottom: 5,
+            fontFamily: "var(--font-radley)",
+            fontSize: 11,
+            color: "rgba(255,255,255,0.55)",
+            lineHeight: 1,
+          }}
+        >
+          <span>LVR</span>
+          <span>Fees</span>
+        </div>
+        <BarTrack centerline>
+          <div
+            ref={netRef}
+            aria-hidden
+            style={{
+              position: "absolute",
+              top: 0,
+              bottom: 0,
+              borderRadius: 999,
+              background: "rgba(74,222,128,0.85)",
+              left: "50%",
+              right: "50%",
+              transition: "left 120ms linear, right 120ms linear, background-color 200ms linear",
+            }}
+          />
+        </BarTrack>
+      </div>
+      <div>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            marginBottom: 5,
+            fontFamily: "var(--font-radley)",
+            fontSize: 11,
+            color: "rgba(255,255,255,0.55)",
+            lineHeight: 1,
+          }}
+        >
+          <span>Revenue</span>
+          <span
+            ref={compoundedRef}
+            style={{
+              color: "rgba(74,222,128,0.95)",
+              opacity: 0,
+              transition: "opacity 320ms ease-out",
+            }}
+          >
+            Compounded
+          </span>
+        </div>
+        <BarTrack>
+          <div
+            ref={cumRef}
+            aria-hidden
+            style={{
+              position: "absolute",
+              top: 0,
+              bottom: 0,
+              left: 0,
+              width: "0.5%",
+              background: "rgba(74,222,128,0.85)",
+              borderRadius: 999,
+              transition: "width 120ms linear",
+            }}
+          />
+        </BarTrack>
+      </div>
+    </div>
+  );
+}
+
 // 3×2 grid (was 4×2) since AERO pairs were dropped. Pair entries render as
 // the overlapping coin pair only; no text label per the user's request.
 function PairsTooltip() {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(3, auto)", gap: "12px 18px" }}>
-      {POOL_PAIRS.map((p, i) => (
+      {POOL_PAIRS.map(([l, r], i) => (
         <span
           key={i}
           style={{ width: 30, height: 20, position: "relative", flexShrink: 0, display: "inline-block" }}
           aria-hidden
         >
-          <Image src={p.left} alt="" width={20} height={20} style={{ borderRadius: 999, position: "absolute", left: 0, top: 0 }} />
-          <Image src={p.right} alt="" width={20} height={20} style={{ borderRadius: 999, position: "absolute", left: 12, top: 0 }} />
+          <span style={{ position: "absolute", left: 0, top: 0 }}>
+            <TokenChip entry={l} size={20} radius={5} />
+          </span>
+          <span style={{ position: "absolute", left: 12, top: 0 }}>
+            <TokenChip entry={r} size={20} radius={5} />
+          </span>
         </span>
       ))}
     </div>
@@ -829,7 +1305,7 @@ function CardLabel({ icon, children }: { icon: string; children: React.ReactNode
         gap: 5,
         padding: "0 8px 0 6px",
         height: 20,
-        borderRadius: 999,
+        borderRadius: 6,
         background: "rgba(255,255,255,0.08)",
         color: "rgba(255,255,255,0.92)",
         fontFamily: "var(--sans-stack)",
@@ -868,27 +1344,33 @@ function Card({ children, style, className }: { children: React.ReactNode; style
 // VaultFlow -orbital basket. Five token chips ring an ALPS center; dashed
 // deposit/yield paths animate continuously. Hovering a chip dims the others
 // and updates the caption beneath the center card.
-const ORBIT_TOKENS = [
-  { slug: "USDC",  src: "/tokens/usdc.png",  pct: "39%", note: "stable leg",      angle: -90  },
-  { slug: "WETH",  src: "/tokens/weth.png",  pct: "28%", note: "ETH/USDC pool",   angle: -18  },
-  { slug: "cbBTC", src: "/tokens/cbbtc.png", pct: "20%", note: "cbBTC/USDC pool", angle:  54  },
-  { slug: "AERO",  src: "/tokens/aero.png",  pct: "8%",  note: "AERO/USDC pool",  angle: 126  },
-  { slug: "DAI",   src: "/tokens/dai.png",   pct: "5%",  note: "stable leg",      angle: -162 },
+type OrbitEntry = PieEntry & { angle: number; note: string };
+const ORBIT_TOKENS: OrbitEntry[] = [
+  { slug: "USDC", kind: "png", src: "/tokens/usdc.png",     pct: 38, color: "#2775CA", note: "stable leg",     angle: -90  },
+  { slug: "ETH",  kind: "svg", src: "/tokens/svg/eth.svg",  pct: 24, color: "#627EEA", note: "ETH/USDC pool",  angle: -18  },
+  { slug: "BTC",  kind: "svg", src: "/tokens/svg/btc.svg",  pct: 18, color: "#F7931A", note: "BTC/USDC pool",  angle:  54  },
+  { slug: "USDT", kind: "svg", src: "/tokens/svg/usdt.svg", pct: 12, color: "#26A17B", note: "stable leg",     angle: 126  },
+  { slug: "UNI",  kind: "png", src: "/tokens/uni.png",      pct:  8, color: "#FF007A", note: "UNI/USDC pool",  angle: -162 },
 ];
 
 function VaultFlow() {
   const [hover, setHover] = useState<string | null>(null);
-  const SIZE = 216;
+  // Scaled-up internal coord space (216 → 240) so the ring + chips fill
+  // more of the card. HEIGHT is shorter than SIZE so the empty padding
+  // under the lowest chips is cropped via overflow:hidden — the viz
+  // itself isn't shrunk.
+  const SIZE = 240;
+  const HEIGHT = 212;
   const CENTER = SIZE / 2;
-  const RADIUS = 76;
-  const CHIP = 30;
+  const RADIUS = 86;
+  const CHIP = 34;
 
   const hovered = ORBIT_TOKENS.find((t) => t.slug === hover);
 
   return (
     <div
       onMouseLeave={() => setHover(null)}
-      style={{ position: "relative", width: SIZE, height: SIZE }}
+      style={{ position: "relative", width: SIZE, height: HEIGHT, overflow: "hidden" }}
     >
       <svg
         width={SIZE}
@@ -908,15 +1390,15 @@ function VaultFlow() {
           strokeDasharray="2 4"
         />
         {/* Spokes — radial connectors that start at the ALPS card edge and
-            end at the chip edge, leaving the squares uncovered. Both squares
-            are 52px (center) and 30px (chip), half-sizes 26 and 15. The
-            distance from a square's center to its edge along an angle θ is
-            half_size / max(|cos θ|, |sin θ|). Adding a 2px breathing gap. */}
+            end at the chip edge, leaving the squares uncovered. ALPS
+            center is 58px and chips are CHIP px (half-sizes 29 and CHIP/2).
+            The distance from a square's center to its edge along an angle
+            θ is half_size / max(|cos θ|, |sin θ|). Adding a 2px gap. */}
         {ORBIT_TOKENS.map((t) => {
           const rad = (t.angle * Math.PI) / 180;
           const m = Math.max(Math.abs(Math.cos(rad)), Math.abs(Math.sin(rad)));
-          const startDist = 26 / m + 2;
-          const endDist = RADIUS - 15 / m - 2;
+          const startDist = 29 / m + 2;
+          const endDist = RADIUS - (CHIP / 2) / m - 2;
           const x1 = CENTER + startDist * Math.cos(rad);
           const y1 = CENTER + startDist * Math.sin(rad);
           const x2 = CENTER + endDist * Math.cos(rad);
@@ -942,10 +1424,10 @@ function VaultFlow() {
       <div
         style={{
           position: "absolute",
-          left: CENTER - 26,
-          top: CENTER - 26,
-          width: 52,
-          height: 52,
+          left: CENTER - 29,
+          top: CENTER - 29,
+          width: 58,
+          height: 58,
           borderRadius: 14,
           background: "rgba(255,255,255,0.10)",
           display: "flex",
@@ -953,7 +1435,7 @@ function VaultFlow() {
           justifyContent: "center",
         }}
       >
-        <div aria-hidden style={{ width: 26, height: 26, ...MASK_STYLE }} />
+        <div aria-hidden style={{ width: 30, height: 30, ...MASK_STYLE }} />
       </div>
 
       {/* Token chips */}
@@ -976,10 +1458,9 @@ function VaultFlow() {
               top: cy - CHIP / 2,
               width: CHIP,
               height: CHIP,
-              borderRadius: 10,
-              background: "rgba(255,255,255,0.10)",
               border: "none",
               padding: 0,
+              background: "transparent",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
@@ -990,32 +1471,45 @@ function VaultFlow() {
               cursor: "pointer",
             }}
           >
-            <Image src={t.src} alt="" width={20} height={20} />
+            <TokenChip entry={t} size={CHIP} radius={9} />
           </button>
         );
       })}
 
-      {/* Caption — only renders the hovered token's info; nothing by default. */}
+      {/* Caption — chip-styled pill at the top of the viz, only visible when
+          a token is hovered. Floating above the orbital ring keeps it from
+          overlapping any of the lower chips. */}
       <div
         style={{
           position: "absolute",
-          left: 0,
-          right: 0,
-          top: CENTER + 34,
-          textAlign: "center",
-          color: "rgba(255,255,255,0.55)",
-          fontFamily: "var(--sans-stack)",
-          fontSize: 11,
-          fontWeight: 500,
-          letterSpacing: "0.02em",
+          left: "50%",
+          top: 6,
+          transform: "translateX(-50%)",
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          height: 22,
+          padding: "0 9px 0 8px",
+          borderRadius: 999,
+          background: "rgba(255,255,255,0.08)",
+          border: "1px solid rgba(255,255,255,0.10)",
+          color: "rgba(255,255,255,0.92)",
+          fontFamily: "var(--font-radley)",
+          fontSize: 12,
+          fontWeight: 400,
           lineHeight: 1,
-          fontVariantNumeric: "tabular-nums",
+          whiteSpace: "nowrap",
           opacity: hovered ? 1 : 0,
           transition: "opacity 220ms cubic-bezier(0.16, 1, 0.3, 1)",
           pointerEvents: "none",
         }}
       >
-        {hovered ? `${hovered.slug} · ${hovered.pct} · ${hovered.note}` : ""}
+        {hovered ? (
+          <>
+            <TokenChip entry={hovered} size={14} radius={4} />
+            {`${hovered.slug} · ${hovered.pct}%`}
+          </>
+        ) : null}
       </div>
     </div>
   );
@@ -1027,30 +1521,81 @@ function VaultFlow() {
 // rebalance event. A fee-tick chip flashes after each snap; the agent dot
 // pulses bright at the same moment, telegraphing cause-and-effect.
 // All four animated layers share a 9s clock so they stay phase-locked.
+// Real ETH/USD price data — 7 days of hourly closes from CoinGecko, sampled
+// every 2nd point (85 waypoints, ~5px between steps for fine granularity),
+// mapped to viewBox y=86..170 (lower y = higher price), then linearly
+// detrended AND seam-slope-matched: |y[1]-y[0]| equals |y[N-1]-y[N-2]|, so
+// the wrap point shows no kink — the price flows continuously across loops.
+// The mid-series rally from ~$2300 to the $2415 peak reads as a real
+// out-of-range breakout above the LP band. Spans x=0..432; rendered twice
+// (second copy translated +432) so translateX(-50%) of the 864-wide group
+// cycles invisibly.
+const PRICE_PATH =
+  "M 0 140.9 L 5.1 135.6 L 10.3 128.4 L 15.4 145.5 L 20.6 156.3 L 25.7 165.0 " +
+  "L 30.9 170.8 L 36.0 165.2 L 41.1 167.7 L 46.3 164.7 L 51.4 163.4 L 56.6 158.4 " +
+  "L 61.7 151.8 L 66.9 143.0 L 72.0 162.0 L 77.1 155.0 L 82.3 132.8 L 87.4 130.6 " +
+  "L 92.6 142.6 L 97.7 141.6 L 102.9 149.5 L 108.0 146.2 L 113.1 143.9 L 118.3 140.6 " +
+  "L 123.4 134.8 L 128.6 151.3 L 133.7 154.5 L 138.9 150.3 L 144.0 148.9 L 149.1 144.6 " +
+  "L 154.3 149.6 L 159.4 141.4 L 164.6 111.9 L 169.7 117.3 L 174.9 98.9 L 180.0 101.6 " +
+  "L 185.1 100.2 L 190.3 90.7 L 195.4 91.4 L 200.6 102.8 L 205.7 95.6 L 210.9 99.7 " +
+  "L 216.0 95.8 L 221.1 112.9 L 226.3 124.9 L 231.4 128.2 L 236.6 123.7 L 241.7 133.3 " +
+  "L 246.9 150.0 L 252.0 141.3 L 257.1 137.7 L 262.3 142.9 L 267.4 153.8 L 272.6 144.6 " +
+  "L 277.7 139.2 L 282.9 140.0 L 288.0 147.3 L 293.1 155.7 L 298.3 154.2 L 303.4 150.0 " +
+  "L 308.6 149.6 L 313.7 145.9 L 318.9 152.4 L 324.0 151.4 L 329.1 148.8 L 334.3 143.9 " +
+  "L 339.4 153.5 L 344.6 151.4 L 349.7 150.5 L 354.9 150.9 L 360.0 151.2 L 365.1 149.7 " +
+  "L 370.3 149.6 L 375.4 153.7 L 380.6 152.0 L 385.7 156.5 L 390.9 155.1 L 396.0 154.4 " +
+  "L 401.1 151.2 L 406.3 154.1 L 411.4 153.6 L 416.6 151.8 L 421.7 144.5 L 426.9 146.2 " +
+  "L 432.0 140.9";
+
+// Particle delays (seconds; all keyframes are 9s loops). 8 USDC particles
+// spread evenly across 0-4.5s so they continuously emit during the
+// price-up phase. 8 ETH particles use the same staggers (their keyframe
+// is dormant 0-50%, active 50-100%).
+const USDC_OUT_DELAYS = [0, 0.55, 1.1, 1.65, 2.2, 2.75, 3.3, 3.85];
+const ETH_OUT_DELAYS  = [0, 0.55, 1.1, 1.65, 2.2, 2.75, 3.3, 3.85];
+// Inbound rebalance: 2 particles each side, 0.18s jitter so they don't
+// look like a single fat blob arriving at the band.
+const REBAL_USDC_DELAYS = [0, 0.18];
+const REBAL_ETH_DELAYS  = [0, 0.18];
+
 function StrategyViz() {
-  // Outer wrapper rendered at 216×216 to match VaultFlow. Internal SVG keeps
-  // its 256×256 viewBox so the price path + frame coords stay valid; SVG
-  // scales automatically.
-  const SIZE = 216;
-  const VIEW = 256;
-  // Price path drawn at 2× window width so translateX(-50%) loops seamlessly.
-  // Smooth quadratic-Bezier sine, period 72, range ±28 around y=128.
-  const PRICE_PATH =
-    "M 0 128 Q 18 100 36 128 Q 54 156 72 128 Q 90 100 108 128 Q 126 156 144 128 " +
-    "Q 162 100 180 128 Q 198 156 216 128 Q 234 100 252 128 Q 270 156 288 128 " +
-    "Q 306 100 324 128 Q 342 156 360 128 Q 378 100 396 128 Q 414 156 432 128";
+  const [hoveredBand, setHoveredBand] = useState<"narrow" | "wide" | null>(null);
+  // Keep the last band label so the callout text doesn't blank out
+  // mid-fade-out — only update on hover-enter, never on hover-leave.
+  const [lastBandLabel, setLastBandLabel] = useState<string>("");
+  const enterBand = (b: "narrow" | "wide") => {
+    setHoveredBand(b);
+    setLastBandLabel(b === "wide" ? "Wide" : "Narrow");
+  };
+  const leaveBand = () => setHoveredBand(null);
+
+  // The SVG's viewBox is 256×256 but only the rectangle x=12..236, y=20..216
+  // contains real content (y-ticks, chart frame, bands, price line). At
+  // 216/256 render scale that's a ~189×166 visible region with ~14px of
+  // empty padding on top, ~34px on bottom, and ~14px on each side. Rather
+  // than re-coord the whole viz, we leave the SVG at 216×216 and translate
+  // it up-and-left inside a smaller wrapper that crops the empty borders —
+  // so content sits flush with the wrapper edge, matching the inner
+  // margin of text in other cards.
+  // Wrapper sized so the chart-frame's outer stroke edge sits flush with
+  // the wrapper edges. Slightly smaller than the prior 184×150 so the
+  // sim card doesn't push Strategy out of proportion.
+  const W = 168;
+  const H = 138;
+  const SHIFT_X = -16;
+  const SHIFT_Y = -33;
 
   return (
     <div
       className="strategy-viz"
       aria-hidden
-      style={{ position: "relative", width: SIZE, height: SIZE }}
+      style={{ position: "relative", width: W, height: H, overflow: "hidden" }}
     >
       <svg
-        width={SIZE}
-        height={SIZE}
-        viewBox={`0 0 ${VIEW} ${VIEW}`}
-        style={{ position: "absolute", inset: 0, overflow: "visible" }}
+        width={216}
+        height={216}
+        viewBox="0 0 256 256"
+        style={{ position: "absolute", left: SHIFT_X, top: SHIFT_Y, overflow: "visible" }}
       >
         <defs>
           <clipPath id="strategy-window">
@@ -1058,65 +1603,102 @@ function StrategyViz() {
           </clipPath>
         </defs>
 
-        {/* Frame -dashed outline of the chart window, vocabulary match w/ VaultFlow ring */}
+        {/* Frame — shaded bg (matches the ALPS center card tint), no
+            border. */}
         <rect
           x={20}
           y={40}
           width={216}
           height={176}
           rx={10}
-          fill="none"
-          stroke="rgba(255,255,255,0.10)"
-          strokeWidth={1}
-          strokeDasharray="2 4"
+          fill="rgba(255,255,255,0.06)"
         />
 
-        {/* Y-axis tick marks (3) */}
-        {[72, 128, 184].map((y) => (
-          <line
-            key={y}
-            x1={16}
-            x2={20}
-            y1={y}
-            y2={y}
-            stroke="rgba(255,255,255,0.20)"
-            strokeWidth={1}
-          />
-        ))}
-
         <g clipPath="url(#strategy-window)">
-          {/* Range band -translucent fill + dashed top/bottom edges. Snaps
-              up at 50%, back at 100%. */}
-          <g className="animate-band-rebal" style={{ transformOrigin: "0 0", transformBox: "fill-box" }}>
+          {/* WIDE range — slow Bollinger (k=3, 40-period). Sits BEHIND
+              the narrow range. Greyscale tint; brightens on hover. */}
+          <g
+            className="animate-band-wide-volatility"
+            onMouseEnter={() => enterBand("wide")}
+            onMouseLeave={leaveBand}
+            style={{ cursor: "pointer" }}
+          >
             <rect
               x={20}
               y={104}
               width={216}
               height={48}
-              fill="rgba(255,255,255,0.06)"
-              rx={4}
+              fill={hoveredBand === "wide" ? "rgba(255,255,255,0.16)" : "rgba(255,255,255,0.06)"}
+              rx={6}
+              style={{ transition: "fill 200ms ease-out" }}
             />
             <line
               x1={20}
               x2={236}
               y1={104}
               y2={104}
-              stroke="rgba(255,255,255,0.40)"
+              stroke={hoveredBand === "wide" ? "rgba(255,255,255,0.55)" : "rgba(255,255,255,0.28)"}
               strokeWidth={1}
-              strokeDasharray="3 4"
+              vectorEffect="non-scaling-stroke"
+              style={{ transition: "stroke 200ms ease-out" }}
             />
             <line
               x1={20}
               x2={236}
               y1={152}
               y2={152}
-              stroke="rgba(255,255,255,0.40)"
+              stroke={hoveredBand === "wide" ? "rgba(255,255,255,0.55)" : "rgba(255,255,255,0.28)"}
               strokeWidth={1}
-              strokeDasharray="3 4"
+              vectorEffect="non-scaling-stroke"
+              style={{ transition: "stroke 200ms ease-out" }}
             />
           </g>
 
-          {/* Price line -drifts continuously leftward */}
+          {/* NARROW range — aggressive Bollinger (k=2, 20-period). Sits on
+              top of WIDE; deeper greyscale shade + dashed edges to read
+              as the tighter inner envelope. Brightens on hover. */}
+          <g
+            className="animate-band-volatility"
+            onMouseEnter={() => enterBand("narrow")}
+            onMouseLeave={leaveBand}
+            style={{ cursor: "pointer" }}
+          >
+            <rect
+              x={20}
+              y={104}
+              width={216}
+              height={48}
+              fill={hoveredBand === "narrow" ? "rgba(255,255,255,0.22)" : "rgba(255,255,255,0.10)"}
+              rx={4}
+              style={{ transition: "fill 200ms ease-out" }}
+            />
+            <line
+              x1={20}
+              x2={236}
+              y1={104}
+              y2={104}
+              stroke={hoveredBand === "narrow" ? "rgba(255,255,255,0.85)" : "rgba(255,255,255,0.50)"}
+              strokeWidth={1}
+              strokeDasharray="3 4"
+              vectorEffect="non-scaling-stroke"
+              style={{ transition: "stroke 200ms ease-out" }}
+            />
+            <line
+              x1={20}
+              x2={236}
+              y1={152}
+              y2={152}
+              stroke={hoveredBand === "narrow" ? "rgba(255,255,255,0.85)" : "rgba(255,255,255,0.50)"}
+              strokeWidth={1}
+              strokeDasharray="3 4"
+              vectorEffect="non-scaling-stroke"
+              style={{ transition: "stroke 200ms ease-out" }}
+            />
+          </g>
+
+          {/* Price line — random walk, drifts continuously leftward. The
+              path is rendered twice (second copy translated by 432 units)
+              so translateX(-50%) of the 864-wide group is a seamless loop. */}
           <g className="animate-price-drift" style={{ transformOrigin: "0 0" }}>
             <path
               d={PRICE_PATH}
@@ -1124,73 +1706,39 @@ function StrategyViz() {
               stroke="rgba(255,255,255,0.85)"
               strokeWidth={1.25}
               strokeLinecap="round"
+              strokeLinejoin="round"
             />
+            <g transform="translate(432 0)">
+              <path
+                d={PRICE_PATH}
+                fill="none"
+                stroke="rgba(255,255,255,0.85)"
+                strokeWidth={1.25}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </g>
           </g>
         </g>
       </svg>
 
-      {/* Top-left label cluster -pair name + agent dot */}
+      {/* Top-right callout — labels which range the user is hovering.
+          Same styling as the corner-UI pills (TotalDeposits' "$3.26M"). */}
       <div
+        aria-hidden
+        className="bg-white/10 text-haze inline-flex items-center justify-center"
         style={{
+          ...PILL_BOX,
           position: "absolute",
-          left: 20,
-          top: 20,
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
+          top: 8,
+          right: 10,
+          opacity: hoveredBand ? 1 : 0,
+          transform: hoveredBand ? "translateY(0)" : "translateY(-4px)",
+          transition: "opacity 180ms ease-out, transform 180ms ease-out",
+          pointerEvents: "none",
         }}
       >
-        <span
-          className="animate-agent-flash"
-          style={{
-            width: 6,
-            height: 6,
-            borderRadius: 999,
-            background: "#fff",
-            display: "inline-block",
-            transformOrigin: "center",
-          }}
-        />
-        <span
-          style={{
-            color: "rgba(255,255,255,0.55)",
-            fontFamily: "var(--sans-stack)",
-            fontSize: 10,
-            fontWeight: 500,
-            letterSpacing: "0.04em",
-            lineHeight: 1,
-            fontVariantNumeric: "tabular-nums",
-          }}
-        >
-          ETH/USDC
-        </span>
-      </div>
-
-      {/* Bottom-right fee-tick chip -fades in just after each rebalance */}
-      <div
-        className="animate-fee-tick"
-        style={{
-          position: "absolute",
-          right: 20,
-          bottom: 20,
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 5,
-          height: 18,
-          padding: "0 7px 0 6px",
-          borderRadius: 999,
-          background: "rgba(255,255,255,0.10)",
-          color: "rgba(255,255,255,0.85)",
-          fontFamily: "var(--sans-stack)",
-          fontSize: 11,
-          fontWeight: 500,
-          lineHeight: 1,
-          fontVariantNumeric: "tabular-nums",
-          letterSpacing: "0.01em",
-        }}
-      >
-        <StrokeIcon kind="spark" size={9} opacity={0.85} />
-        +0.04 fees
+        {lastBandLabel}
       </div>
     </div>
   );
@@ -1241,212 +1789,300 @@ function LearnMoreContent({ open }: { open: boolean }) {
             maxWidth: "calc(50% - 7px)",
           }}
         >
-          Until now, those fees flowed to actively managed positions held by
-          sophisticated Liquidity Providers. Tapping into this yield requires
-          infrastructure and knowledge - <BrandRef /> opens it up to anyone.
+          Most fees flow to actively managed positions held by sophisticated
+          Liquidity Providers. Tapping into this yield requires infrastructure
+          and knowledge - <BrandRef /> opens it up to anyone.
         </p>
       </div>
 
-      {/* Summary card - capped at half-width. Title + subtitle have already
-          posed the gap and the resolution; Summary delivers the concrete
-          mechanism - the user journey from deposit to compounding fees. */}
-      <Card style={{ marginTop: 18, maxWidth: "calc(50% - 7px)" }}>
-        <CardLabel icon="summary">Summary</CardLabel>
-        <p
-          style={{
-            margin: "8px 0 0 0",
-            color: "rgba(255,255,255,0.92)",
-            fontFamily: "var(--font-radley)",
-            fontSize: 18,
-            lineHeight: 1.55,
-          }}
-        >
-          You deposit{" "}
-          <InlinePill iconImage={{ src: "/tokens/usdc.png", alt: "USDC" }}>
-            USDC
-          </InlinePill>{" "}
-          and gain exposure to a{" "}
-          <InlinePill icon="dots" tooltip={<PortfolioTooltip />}>
-            portfolio
-          </InlinePill>{" "}
-          of active positions across high volume{" "}
-          <InlinePill icon="gaming" tooltip={<PairsTooltip />}>
-            pairs
-          </InlinePill>
-          . An{" "}
-          <InlinePill
-            icon="sparkles"
-            tooltip="An agentic backend with rich context across markets, pools, and onchain conditions. Decides where to deploy, when to retighten, and when to rotate capital."
-          >
-            agent
-          </InlinePill>{" "}
-          continuously tightens these positions and rotates capital between
-          pools to maximize fee earnings while managing{" "}
-          <InlinePill
-            icon="fingerprint"
-            tooltip="Impermanent loss, range exits, and capital drift. The agent's rebalancing and rotation are designed to manage all three."
-          >
-            risk
-          </InlinePill>
-          .
-        </p>
-      </Card>
-
-      {/* Subsegments row -vault flow + strategy, side by side. */}
+      {/* Bento — two independent columns. Each card is sized to its own
+          content; nothing stretches to match siblings.
+            left:  Summary on top,    Strategy below it
+            right: Vault flow on top, Open App pinned bottom-right */}
       <div
         style={{
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr",
+          display: "flex",
           gap: 14,
           marginTop: 14,
           flex: 1,
           minHeight: 0,
+          alignItems: "flex-start",
         }}
       >
-        {/* Subsegment 1 -Vault flow */}
-        <Card style={{ display: "flex", flexDirection: "column" }}>
-          <CardLabel icon="vault">Vault flow</CardLabel>
-          <div
-            style={{
-              display: "flex",
-              gap: 18,
-              marginTop: 12,
-              alignItems: "flex-start",
-              flex: 1,
-            }}
-          >
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <h3
-                style={{
-                  color: "#fff",
-                  fontFamily: "var(--font-radley)",
-                  fontSize: 22,
-                  lineHeight: 1.1,
-                  letterSpacing: "-0.005em",
-                  margin: 0,
-                  fontWeight: 400,
-                }}
-              >
-                Where your deposit goes.
-              </h3>
-              <p
-                style={{
-                  marginTop: 8,
-                  color: "rgba(255,255,255,0.62)",
-                  fontFamily: "var(--font-radley)",
-                  fontSize: 15,
-                  lineHeight: 1.55,
-                }}
-              >
-                You deposit USDC. The vault splits it across pools on Base -
-                ETH/USDC, cbBTC/USDC, others - so it sits where trades happen.
-                Every swap routes a fee back into the vault. Withdraw anytime.
-              </p>
-            </div>
-            <div style={{ flexShrink: 0 }}>
-              <VaultFlow />
-            </div>
-          </div>
-        </Card>
-
-        {/* Subsegment 2 -Strategy */}
-        <Card style={{ display: "flex", flexDirection: "column" }}>
-          <CardLabel icon="strategy">Strategy</CardLabel>
-          <div
-            style={{
-              display: "flex",
-              gap: 18,
-              marginTop: 12,
-              alignItems: "flex-start",
-              flex: 1,
-            }}
-          >
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <h3
-                style={{
-                  color: "#fff",
-                  fontFamily: "var(--font-radley)",
-                  fontSize: 22,
-                  lineHeight: 1.1,
-                  letterSpacing: "-0.005em",
-                  margin: 0,
-                  fontWeight: 400,
-                }}
-              >
-                What the agents do.
-              </h3>
-              <p
-                style={{
-                  marginTop: 8,
-                  color: "rgba(255,255,255,0.62)",
-                  fontFamily: "var(--font-radley)",
-                  fontSize: 15,
-                  lineHeight: 1.55,
-                }}
-              >
-                Prices move, and the price band where fees actually get paid
-                moves with them. Agents watch where volume is concentrating,
-                tighten ranges around it, and shift capital between pools when
-                one starts paying more - closing the infrastructure gap.
-              </p>
-            </div>
-            <div style={{ flexShrink: 0 }}>
-              <StrategyViz />
-            </div>
-          </div>
-        </Card>
-      </div>
-
-      {/* CTA -solid white pill, smaller radius, anchored bottom-right.
-          The one high-contrast surface in the overlay. */}
-      <div
-        style={{
-          marginTop: 16,
-          display: "flex",
-          justifyContent: "flex-end",
-          alignItems: "center",
-        }}
-      >
-        <Link
-          href="/app"
+        {/* Left column — Summary on top, Built-on bars filling the rest */}
+        <div
           style={{
-            textDecoration: "none",
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 7,
-            padding: "8px 14px",
-            borderRadius: 12,
-            background: "#fff",
-            color: "#08080a",
-            lineHeight: 1,
-            transition: "background-color 220ms cubic-bezier(0.16, 1, 0.3, 1)",
+            flex: 1,
+            alignSelf: "stretch",
+            display: "flex",
+            flexDirection: "column",
+            gap: 14,
+            minWidth: 0,
           }}
         >
-          <span
+        <Card>
+          <CardLabel icon="summary">Summary</CardLabel>
+          <p
             style={{
+              margin: "8px 0 0 0",
+              color: "rgba(255,255,255,0.92)",
               fontFamily: "var(--font-radley)",
-              fontSize: 14,
-              fontWeight: 400,
-              lineHeight: 1,
+              fontSize: 18,
+              lineHeight: 1.55,
             }}
           >
-            Open App
-          </span>
-          <svg
-            width="12"
-            height="12"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden
-            style={{ display: "block" }}
+            You deposit{" "}
+            <InlinePill iconImage={{ src: "/tokens/usdc.png", alt: "USDC" }}>
+              USDC
+            </InlinePill>{" "}
+            and gain exposure to a{" "}
+            <InlinePill icon="dots" tooltip={<PortfolioTooltip />}>
+              portfolio
+            </InlinePill>{" "}
+            of active positions across high volume{" "}
+            <InlinePill icon="gaming" tooltip={<PairsTooltip />}>
+              pairs
+            </InlinePill>
+            . An{" "}
+            <InlinePill
+              icon="sparkles"
+              tooltip="An agentic backend with rich context across markets, pools, and onchain conditions. Decides where to deploy, when to retighten, and when to rotate capital."
+            >
+              agent
+            </InlinePill>{" "}
+            continuously tightens these positions and rotates capital between
+            pools to maximize fee earnings while managing{" "}
+            <InlinePill
+              icon="fingerprint"
+              tooltip="Impermanent loss, range exits, and capital drift. The agent's rebalancing and rotation are designed to manage all three."
+            >
+              risk
+            </InlinePill>
+            .
+          </p>
+        </Card>
+
+        {/* Built-on protocols — three sponsor/prize tracks ALP integrates
+            with. Container fills the remaining left-column height so the
+            last bar aligns with Open App's bottom. Uniswap takes a double
+            row (flex 2) so the trio reads as a 4-row bento. */}
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 14,
+            flex: 1,
+            minHeight: 0,
+            // Reserve room at the bottom so the last bar lines up with
+            // Strategy's bottom (right column) instead of Open App's bottom.
+            // Open App's outer height (~33px) + the 14px gap above it.
+            marginBottom: 47,
+          }}
+        >
+          {BUILT_ON.map((p, i) => (
+            <div key={p.name} style={{ flex: i === 0 ? 2 : 1, display: "flex" }}>
+              <BuiltOnBar {...p} />
+            </div>
+          ))}
+        </div>
+        </div>
+
+        {/* Right column — Vault flow on top, Strategy/sim row, Open App
+            pinned bottom-right. alignSelf:stretch so the column fills the
+            bento's height (overriding the parent's alignItems:flex-start)
+            — needed for marginTop:auto on Open App to push it to the
+            actual bottom of the LMC, matching the right-edge margin. */}
+        <div
+          style={{
+            flex: 1,
+            alignSelf: "stretch",
+            display: "flex",
+            flexDirection: "column",
+            gap: 14,
+            minWidth: 0,
+          }}
+        >
+          {/* Vault flow — top of right column. The orbital viz is lifted
+              with a negative margin so its rings visually align with the
+              card title row instead of sitting below it. */}
+          <Card>
+            <CardLabel icon="vault">Vault flow</CardLabel>
+            <div
+              style={{
+                display: "flex",
+                gap: 18,
+                marginTop: 12,
+                alignItems: "flex-start",
+                flex: 1,
+              }}
+            >
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <h3
+                  style={{
+                    color: "#fff",
+                    fontFamily: "var(--font-radley)",
+                    fontSize: 22,
+                    lineHeight: 1.1,
+                    letterSpacing: "-0.005em",
+                    margin: 0,
+                    fontWeight: 400,
+                  }}
+                >
+                  Where your deposit goes.
+                </h3>
+                <p
+                  style={{
+                    marginTop: 8,
+                    color: "rgba(255,255,255,0.62)",
+                    fontFamily: "var(--font-radley)",
+                    fontSize: 15,
+                    lineHeight: 1.55,
+                  }}
+                >
+                  The vault deploys capital into our portfolio of active
+                  liquidity positions and idle operative liquidity. An
+                  agent rebalances active positions and uses the idle
+                  reserve for withdrawals and rotations.
+                </p>
+                <PortfolioPies />
+              </div>
+              <div style={{ flexShrink: 0, marginTop: -18 }}>
+                <VaultFlow />
+              </div>
+            </div>
+          </Card>
+
+          {/* Strategy (text) + ETH/USDC sim (square) — split into two
+              side-by-side cards so the row's height isn't dictated by
+              the viz alone. */}
+          <div style={{ display: "flex", gap: 14, alignItems: "stretch" }}>
+            <Card style={{ flex: 1, minWidth: 0 }}>
+              <CardLabel icon="strategy">Strategy</CardLabel>
+              <div style={{ marginTop: 12, flex: 1, minWidth: 0 }}>
+                <h3
+                  style={{
+                    color: "#fff",
+                    fontFamily: "var(--font-radley)",
+                    fontSize: 22,
+                    lineHeight: 1.1,
+                    letterSpacing: "-0.005em",
+                    margin: 0,
+                    fontWeight: 400,
+                  }}
+                >
+                  Beating IL and LVR.
+                </h3>
+                <p
+                  style={{
+                    marginTop: 8,
+                    color: "rgba(255,255,255,0.62)",
+                    fontFamily: "var(--font-radley)",
+                    fontSize: 15,
+                    lineHeight: 1.55,
+                  }}
+                >
+                  Concentrated LPs earn the most fees but bleed to IL and
+                  LVR. Our agents retighten ranges and rotate capital so
+                  fees stay ahead of both costs.
+                </p>
+              </div>
+            </Card>
+
+            <Card
+              style={{
+                flexShrink: 0,
+                padding: 18,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <StrategyViz />
+            </Card>
+          </div>
+
+          {/* Open App — marginTop:auto pushes it to the bottom of the
+              right column regardless of Strategy's content height. */}
+          <div
+            style={{
+              marginTop: "auto",
+              display: "flex",
+              justifyContent: "flex-end",
+              alignItems: "center",
+              gap: 8,
+            }}
           >
-            <path d="M5 12h14M12 5l7 7-7 7" />
-          </svg>
-        </Link>
+            {/* Ghost secondary — GitHub icon square button. Same chrome
+                as the BuiltWith heart-icon (bg-white/10, text-haze). */}
+            <a
+              href="https://github.com/yanisepfl/alp"
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="View source on GitHub"
+              className="bg-white/10 text-haze transition-colors duration-200 ease-out hover:text-mist hover:bg-white/[0.18]"
+              style={{
+                textDecoration: "none",
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: 36,
+                height: 36,
+                borderRadius: 14,
+              }}
+            >
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 32 32"
+                fill="currentColor"
+                aria-hidden
+                style={{ display: "block" }}
+              >
+                <path d="M16,2.345c7.735,0,14,6.265,14,14-.002,6.015-3.839,11.359-9.537,13.282-.7,.14-.963-.298-.963-.665,0-.473,.018-1.978,.018-3.85,0-1.312-.437-2.152-.945-2.59,3.115-.35,6.388-1.54,6.388-6.912,0-1.54-.543-2.783-1.435-3.762,.14-.35,.63-1.785-.14-3.71,0,0-1.173-.385-3.85,1.435-1.12-.315-2.31-.472-3.5-.472s-2.38,.157-3.5,.472c-2.677-1.802-3.85-1.435-3.85-1.435-.77,1.925-.28,3.36-.14,3.71-.892,.98-1.435,2.24-1.435,3.762,0,5.355,3.255,6.563,6.37,6.913-.403,.35-.77,.963-.893,1.872-.805,.368-2.818,.963-4.077-1.155-.263-.42-1.05-1.452-2.152-1.435-1.173,.018-.472,.665,.017,.927,.595,.332,1.277,1.575,1.435,1.978,.28,.787,1.19,2.293,4.707,1.645,0,1.173,.018,2.275,.018,2.607,0,.368-.263,.787-.963,.665-5.719-1.904-9.576-7.255-9.573-13.283,0-7.735,6.265-14,14-14Z" />
+              </svg>
+            </a>
+            <Link
+              href="/app"
+              className="bg-white/[0.20] transition-colors duration-300 ease-out hover:bg-white/[0.32]"
+              style={{
+                textDecoration: "none",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 9,
+                padding: "10px 16px 10px 18px",
+                borderRadius: 14,
+                color: "#fff",
+                lineHeight: 1,
+              }}
+            >
+              <span
+                style={{
+                  fontFamily: "var(--sans-stack)",
+                  fontSize: 13,
+                  fontWeight: 600,
+                  letterSpacing: "-0.005em",
+                  lineHeight: 1,
+                }}
+              >
+                Open App
+              </span>
+              <svg
+                width="13"
+                height="13"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden
+                style={{ display: "block", position: "relative", top: 1 }}
+              >
+                <path d="M5 12h14M12 5l7 7-7 7" />
+              </svg>
+            </Link>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -1498,7 +2134,7 @@ export function LandingFace({
       {/* Single lockup -appears at center large, glides to top-left while shrinking */}
       <div
         className="glide-and-shrink absolute z-30 flex items-center gap-1.5"
-        style={{ top: "24px", left: "24px" }}
+        style={{ top: "calc(20% - 48px)", left: "20%" }}
       >
         <div aria-hidden className="lift h-[36px] w-[36px]" style={MASK_STYLE} />
         <span
@@ -1517,7 +2153,7 @@ export function LandingFace({
         </span>
       </div>
 
-      {/* Catchphrase + arrow -fades out when Learn More takes the center */}
+      {/* Catchphrase + arrow — fades out when Learn-more takes the centre. */}
       <div
         className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center px-6"
         style={{
@@ -1528,11 +2164,13 @@ export function LandingFace({
         <CatchphraseLink disabled={learnMore} />
       </div>
 
+      {/* Bottom-left entry into Learn-more (only in default state). */}
+      <HowItWorks disabled={learnMore} onClick={onToggleLearnMore} />
+
       {/* Learn-more overlay (headline + body + secondary Open App) */}
       <LearnMoreContent open={learnMore} />
 
       <TotalDeposits />
-      <CurrentYield />
       <LearnMore open={learnMore} onClick={onToggleLearnMore} />
       <BuiltWith />
     </>
