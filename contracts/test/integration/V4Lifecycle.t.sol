@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -488,6 +489,187 @@ contract V4LifecycleTest is V4Deployers {
         uint256 received = vault.redeem(sharesToBurn, alice, alice);
         assertGt(received, 0, "auto-unwind should have produced base");
         assertGt(usdc.balanceOf(alice), aliceBefore);
+    }
+
+    // -------- Slippage-protected wrappers --------
+
+    function test_depositWithMin_revertsWhenSharesBelowMin() public {
+        // Demand absurdly many shares from a 100 USDC deposit; reverts.
+        vm.prank(alice);
+        vm.expectRevert();
+        vault.depositWithMin(100e18, alice, type(uint256).max);
+    }
+
+    function test_depositWithMin_passesWhenSharesAboveMin() public {
+        vm.prank(alice);
+        uint256 shares = vault.depositWithMin(100e18, alice, 1);
+        assertGt(shares, 1);
+    }
+
+    function test_redeemWithMin_revertsWhenAssetsBelowMin() public {
+        vm.prank(alice);
+        vault.deposit(1_000e18, alice);
+        vm.roll(block.number + 1);
+        // Demand absurd minimum on the way out. Stash shares first so the
+        // prank survives to the actual redeem.
+        uint256 shares = vault.balanceOf(alice);
+        vm.expectRevert();
+        vm.prank(alice);
+        vault.redeemWithMin(shares, alice, alice, type(uint256).max);
+    }
+
+    function test_withdrawWithMax_revertsWhenSharesAboveMax() public {
+        vm.prank(alice);
+        vault.deposit(1_000e18, alice);
+        vm.roll(block.number + 1);
+        vm.prank(alice);
+        // Cap shares burnt to 1 — withdraw of 100 USDC needs more than that.
+        vm.expectRevert();
+        vault.withdrawWithMax(100e18, alice, alice, 1);
+    }
+
+    function test_mintWithMax_revertsWhenAssetsAboveMax() public {
+        // Mint a tiny share count for at most 1 wei of USDC.
+        vm.prank(alice);
+        vm.expectRevert();
+        vault.mintWithMax(1e24, alice, 1);
+    }
+
+    // -------- Cross-pool routing (swap in pool A, LP in pool B) --------
+
+    function test_crossPool_swapInOnePool_addLiquidityInAnother() public {
+        // Register a SECOND pool — same pair, different fee tier — so we
+        // can prove the agent freely chooses which pool to swap through
+        // vs which pool to LP into.
+        // (V4 supports multiple pools per pair; we use fee=3000 here vs the
+        // default 500 from setUp.)
+        PoolRegistry.Pool memory pool2 = PoolRegistry.Pool({
+            adapter: address(adapter),
+            token0: token0,
+            token1: token1,
+            hooks: address(0),
+            fee: 3000,
+            tickSpacing: 60,
+            maxAllocationBps: 10_000,
+            enabled: true
+        });
+        vm.prank(guardian);
+        bytes32 pool2Hash = registry.addPool(pool2);
+
+        PoolKey memory poolKey2 = PoolKey({
+            currency0: Currency.wrap(token0),
+            currency1: Currency.wrap(token1),
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: IHooks(address(0))
+        });
+        poolManager.initialize(poolKey2, TickMath.getSqrtPriceAtTick(0));
+
+        // Seed deep external liquidity in pool2 so swaps don't slip badly.
+        seedAdapter.addLiquidity(
+            registry.getPool(pool2Hash),
+            500_000e18,
+            500_000e18,
+            0,
+            0,
+            abi.encode(int24(-12_000), int24(12_000), block.timestamp + 600, uint256(0))
+        );
+
+        // Alice deposits 10k USDC.
+        vm.prank(alice);
+        vault.deposit(10_000e18, alice);
+
+        // Agent swaps THROUGH pool2 (deeper) but LPs INTO pool 1 (the
+        // original pool). The vault doesn't constrain the agent to use
+        // the same pool for both legs.
+        vault.executeSwap(pool2Hash, address(usdc), 4_000e18, 1, abi.encode(block.timestamp + 60));
+        (uint256 positionId,,,) = vault.executeAddLiquidity(
+            poolKeyHash,
+            usdc.balanceOf(address(vault)) / 2,
+            weth.balanceOf(address(vault)) / 2,
+            0,
+            0,
+            abi.encode(int24(-6_000), int24(6_000), block.timestamp + 60, uint256(0))
+        );
+        // Position lives under poolKeyHash (the original 0.05% pool), even
+        // though the swap that funded its non-base side ran through pool2.
+        assertEq(IERC721(address(positionManager)).ownerOf(positionId), address(vault));
+        assertEq(vault.positionCount(poolKeyHash), 1);
+        assertEq(vault.positionCount(pool2Hash), 0);
+    }
+
+    // -------- In-kind redemption (illiquid-pool escape hatch) --------
+
+    function test_redeemInKind_paysProRataAcrossEveryToken() public {
+        // Alice in.
+        vm.prank(alice);
+        vault.deposit(20_000e18, alice);
+        // Open a position so the vault holds both base and non-base inside
+        // an LP. Some idle non-base too so the redeemer gets a slice of
+        // both rails.
+        vault.executeSwap(poolKeyHash, address(usdc), 4_000e18, 1, abi.encode(block.timestamp + 60));
+        vault.executeAddLiquidity(
+            poolKeyHash,
+            4_000e18,
+            weth.balanceOf(address(vault)) / 2,
+            0,
+            0,
+            abi.encode(int24(-6_000), int24(6_000), block.timestamp + 60, uint256(0))
+        );
+
+        vm.roll(block.number + 1);
+
+        // Alice redeems half her shares in-kind. She should receive USDC
+        // (idle) + WETH (idle leftover from the swap + the proportional
+        // share of the position's WETH that the peel just released).
+        uint256 sharesToRedeem = vault.balanceOf(alice) / 2;
+        address[] memory expectedTokens = new address[](2);
+        uint256[] memory minAmounts = new uint256[](2);
+        expectedTokens[0] = address(usdc);
+        expectedTokens[1] = address(weth);
+        minAmounts[0] = 1; // any positive amount of USDC
+        minAmounts[1] = 1; // any positive amount of WETH
+
+        uint256 usdcBefore = usdc.balanceOf(alice);
+        uint256 wethBefore = weth.balanceOf(alice);
+
+        vm.prank(alice);
+        vault.redeemInKind(sharesToRedeem, alice, alice, expectedTokens, minAmounts);
+
+        assertGt(usdc.balanceOf(alice), usdcBefore, "alice should receive USDC pro-rata");
+        assertGt(weth.balanceOf(alice), wethBefore, "alice should receive WETH pro-rata from the position");
+    }
+
+    function test_redeemInKind_revertsWhenMinNotMet() public {
+        vm.prank(alice);
+        vault.deposit(10_000e18, alice);
+        vm.roll(block.number + 1);
+
+        address[] memory expectedTokens = new address[](1);
+        uint256[] memory minAmounts = new uint256[](1);
+        expectedTokens[0] = address(usdc);
+        minAmounts[0] = 1_000_000e18; // way more than alice owns
+
+        uint256 shares = vault.balanceOf(alice);
+        vm.expectRevert();
+        vm.prank(alice);
+        vault.redeemInKind(shares, alice, alice, expectedTokens, minAmounts);
+    }
+
+    function test_redeemInKind_arrayMismatch_reverts() public {
+        vm.prank(alice);
+        vault.deposit(10_000e18, alice);
+        vm.roll(block.number + 1);
+
+        address[] memory expectedTokens = new address[](2);
+        uint256[] memory minAmounts = new uint256[](1);
+        expectedTokens[0] = address(usdc);
+        expectedTokens[1] = address(weth);
+        minAmounts[0] = 1;
+
+        vm.expectRevert(ALPVault.InKindArrayMismatch.selector);
+        vm.prank(alice);
+        vault.redeemInKind(1, alice, alice, expectedTokens, minAmounts);
     }
 
     function test_partialRemove_keepsPositionTracked() public {

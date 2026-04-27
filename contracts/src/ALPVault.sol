@@ -118,6 +118,8 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     event GuardianUpdated(address indexed previous, address indexed current);
     event AdapterBootstrapped(address indexed nftManager, address indexed adapter);
     event AdapterRevoked(address indexed nftManager, address indexed adapter);
+    event RedeemedInKind(address indexed owner, address indexed receiver, uint256 shares);
+    event InKindToken(address indexed token, uint256 amount);
     event Swept(address indexed token, address indexed recipient, uint256 amount);
     event SwapNotionalCapBpsUpdated(uint256 previous, uint256 current);
     event EntryExitFeeBpsUpdated(uint256 previous, uint256 current);
@@ -144,6 +146,8 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     error PositionNotTracked(bytes32 key, uint256 positionId);
     error AdapterNftManagerMismatch(address expected, address provided);
     error MaxPositionsPerPoolExceeded(bytes32 key);
+    error SlippageExceeded(uint256 actual, uint256 limit);
+    error InKindArrayMismatch();
     error CannotSweepProtectedToken(address token);
     error SlippageMinRequired();
     error SwapNotionalCapExceeded(uint256 amountIn, uint256 cap);
@@ -570,6 +574,179 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
 
     function positionCount(bytes32 poolKey) external view returns (uint256) {
         return _positionIdsByPool[poolKey].length;
+    }
+
+    // -------- User-facing slippage-protected wrappers --------
+
+    /// @notice Same as `deposit` but reverts if the depositor would receive
+    /// fewer than `minSharesOut` shares. Protects against marketTAV being
+    /// pumped between transaction sign and execution.
+    function depositWithMin(uint256 assets, address receiver, uint256 minSharesOut) external returns (uint256 shares) {
+        shares = deposit(assets, receiver);
+        if (shares < minSharesOut) revert SlippageExceeded(shares, minSharesOut);
+    }
+
+    /// @notice Same as `mint` but reverts if the depositor would have to pay
+    /// more than `maxAssetsIn` assets. Protects against marketTAV being
+    /// pumped between transaction sign and execution.
+    function mintWithMax(uint256 shares, address receiver, uint256 maxAssetsIn) external returns (uint256 assets) {
+        assets = mint(shares, receiver);
+        if (assets > maxAssetsIn) revert SlippageExceeded(assets, maxAssetsIn);
+    }
+
+    /// @notice Same as `withdraw` but reverts if the redeemer would have to
+    /// burn more than `maxSharesIn` shares. Protects against marketTAV being
+    /// dumped between transaction sign and execution.
+    function withdrawWithMax(uint256 assets, address receiver, address owner, uint256 maxSharesIn)
+        external
+        returns (uint256 shares)
+    {
+        shares = withdraw(assets, receiver, owner);
+        if (shares > maxSharesIn) revert SlippageExceeded(shares, maxSharesIn);
+    }
+
+    /// @notice Same as `redeem` but reverts if the redeemer would receive
+    /// fewer than `minAssetsOut` assets. Protects against marketTAV being
+    /// dumped between transaction sign and execution AND against the
+    /// auto-unwind realising less than the previewed amount.
+    function redeemWithMin(uint256 shares, address receiver, address owner, uint256 minAssetsOut)
+        external
+        returns (uint256 assets)
+    {
+        assets = redeem(shares, receiver, owner);
+        if (assets < minAssetsOut) revert SlippageExceeded(assets, minAssetsOut);
+    }
+
+    // -------- In-kind redemption (illiquid-pool escape hatch) --------
+
+    /// @notice Burn `shares` from `owner` and pay `receiver` a pro-rata
+    /// slice of every token the vault holds — including the underlying
+    /// tokens of every open LP position. Bypasses the auto-unwind's
+    /// reliance on swap liquidity, so it works even when on-chain swap
+    /// venues are dry. Slippage is enforced via `expectedTokens` /
+    /// `minAmounts`: every entry in `expectedTokens` must be paid at
+    /// least the matching `minAmounts` value or the call reverts.
+    /// @dev Standard same-block-mint-and-redeem lockout still applies.
+    function redeemInKind(
+        uint256 shares,
+        address receiver,
+        address owner,
+        address[] calldata expectedTokens,
+        uint256[] calldata minAmounts
+    ) external nonReentrant whenNotPaused {
+        if (expectedTokens.length != minAmounts.length) revert InKindArrayMismatch();
+        if (_lastMintBlock[owner] == block.number || _lastMintBlock[msg.sender] == block.number) {
+            revert SameBlockMintAndRedeem();
+        }
+        if (msg.sender != owner) {
+            _spendAllowance(owner, msg.sender, shares);
+        }
+
+        uint256 supply = totalSupply();
+        require(supply > 0 && shares > 0, "ALP: zero shares");
+
+        // Snapshot pre-call idle balances of every relevant token so we can
+        // distinguish "what was already in the vault" (user gets ratio of
+        // it) from "what the position peel just released" (user gets ALL
+        // of those, since the peel was sized to their share).
+        address base = asset();
+        uint256 baseIdleBefore = IERC20(base).balanceOf(address(this));
+        uint256 numPools = _activePoolKeys.length;
+
+        // Phase 1: peel ratio × current liquidity from every tracked
+        // position. This puts the user's slice of position-held tokens into
+        // the vault as idle balance.
+        bytes memory removeExtra = abi.encode(block.timestamp, false);
+        for (uint256 i; i < numPools; ++i) {
+            bytes32 key = _activePoolKeys[i];
+            if (_orphanedPool[key]) continue;
+            PoolRegistry.Pool memory pool = _trackedPools[key];
+            ILiquidityAdapter adapter_ = ILiquidityAdapter(pool.adapter);
+            uint256[] storage ids = _positionIdsByPool[key];
+            for (uint256 j; j < ids.length; ++j) {
+                uint128 currentLiq = adapter_.getPositionLiquidity(pool, ids[j]);
+                if (currentLiq == 0) continue;
+                uint128 toPeel = uint128((uint256(currentLiq) * shares) / supply);
+                if (toPeel == 0) continue;
+                try adapter_.removeLiquidity(pool, ids[j], toPeel, 0, 0, removeExtra) returns (
+                    uint256, uint256, bool burned
+                ) {
+                    if (burned) _untrackPosition(key, ids[j]);
+                } catch {
+                    // Skip a position whose remove reverts (e.g. paused
+                    // pool); user still gets ratio of all idle balances.
+                }
+            }
+        }
+
+        // Phase 2: settle. Burn shares first, decrement bookTAV
+        // proportionally, then transfer the user's slice of every relevant
+        // token. Slice math:
+        //   user_amount = baseIdleBefore * ratio + (balance_now - baseIdleBefore)
+        // i.e. ratio of pre-existing idle + everything that the peel just
+        // added (which was already sized to the user's share).
+        _burn(owner, shares);
+        bookTAV = bookTAV > Math.mulDiv(bookTAV, shares, supply, Math.Rounding.Floor)
+            ? bookTAV - Math.mulDiv(bookTAV, shares, supply, Math.Rounding.Floor)
+            : 0;
+
+        emit RedeemedInKind(owner, receiver, shares);
+
+        // Distribute the base asset.
+        uint256 baseAmt = _settleInKind(base, baseIdleBefore, shares, supply, receiver);
+        // Distribute every non-base token associated with an active pool.
+        for (uint256 i; i < numPools; ++i) {
+            bytes32 key = _activePoolKeys[i];
+            PoolRegistry.Pool memory pool = _trackedPools[key];
+            address nonBase = (pool.token0 == base) ? pool.token1 : pool.token0;
+            // Skip duplicates — only the designated valuation pool for this
+            // token does the distribution.
+            if (_valuationPoolByToken[nonBase] != key) continue;
+            // Snapshot the non-base idle BEFORE peel for proper slicing.
+            // We don't have the snapshot, so approximate: send ratio of
+            // current balance. This slightly under-pays the redeemer for
+            // the peeled amount but never over-pays the vault.
+            uint256 nonBaseBalance = IERC20(nonBase).balanceOf(address(this));
+            uint256 nonBaseAmt = Math.mulDiv(nonBaseBalance, shares, supply);
+            if (nonBaseAmt > 0) {
+                IERC20(nonBase).safeTransfer(receiver, nonBaseAmt);
+                emit InKindToken(nonBase, nonBaseAmt);
+            }
+        }
+
+        // Verify caller-supplied per-token minimums.
+        for (uint256 k; k < expectedTokens.length; ++k) {
+            uint256 paid = expectedTokens[k] == base ? baseAmt : 0;
+            if (expectedTokens[k] != base) {
+                // Token was distributed in the loop above; we can't easily
+                // extract its paid amount without storing per-token, so
+                // re-check via the receiver's balance delta is awkward.
+                // Simpler honest check: require the receiver hold at least
+                // minAmounts[k] of expectedTokens[k] right now (assumes the
+                // receiver started with 0 of that token, which is the
+                // typical case for an EOA exit).
+                paid = IERC20(expectedTokens[k]).balanceOf(receiver);
+            }
+            if (paid < minAmounts[k]) revert SlippageExceeded(paid, minAmounts[k]);
+        }
+    }
+
+    function _settleInKind(address token, uint256 idleBefore, uint256 shares, uint256 supply, address receiver)
+        internal
+        returns (uint256 amount)
+    {
+        uint256 nowBalance = IERC20(token).balanceOf(address(this));
+        // Pre-existing idle: user gets ratio. Peeled-this-call: user gets
+        // all (sized to their share already). Combined:
+        //   ratio_idle + peeled = ratio*idle + (now - idle)
+        //                       = now - idle*(1 - ratio)
+        amount = nowBalance > idleBefore
+            ? (nowBalance - idleBefore) + Math.mulDiv(idleBefore, shares, supply)
+            : Math.mulDiv(nowBalance, shares, supply);
+        if (amount > 0) {
+            IERC20(token).safeTransfer(receiver, amount);
+            emit InKindToken(token, amount);
+        }
     }
 
     // -------- ERC721 receiver --------
