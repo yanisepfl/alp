@@ -1,0 +1,32 @@
+{
+  "lib/erc4626-tests": {
+    "tag": {
+      "name": "v0.1.1",
+      "rev": "232ff9ba8194e406967f52ecc5cb52ed764209e9"
+    }
+  },
+  "lib/forge-std": {
+    "tag": {
+      "name": "v1.16.0",
+      "rev": "8987040ede9553cea20c95ad40d0455930f9c8e0"
+    }
+  },
+  "lib/hookmate": {
+    "tag": {
+      "name": "v0.5.1",
+      "rev": "6c43b0ea438a09782c808a7508f94aaae912ad5f"
+    }
+  },
+  "lib/openzeppelin-contracts": {
+    "tag": {
+      "name": "v5.6.1",
+      "rev": "5fd1781b1454fd1ef8e722282f86f9293cacf256"
+    }
+  },
+  "lib/uniswap-hooks": {
+    "tag": {
+      "name": "v1.2.1",
+      "rev": "acbd604c409a827f7f98c9517236da860c4fca1a"
+    }
+  }
+}

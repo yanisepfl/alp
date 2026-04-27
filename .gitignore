@@ -9,3 +9,10 @@ build/
 next-env.d.ts
 .vscode/
 .idea/
+
+# Foundry
+contracts/lib/
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+.audit-reports/

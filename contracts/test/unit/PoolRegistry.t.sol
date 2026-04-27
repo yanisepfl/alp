@@ -1,0 +1,216 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.26;
+
+import {Test} from "forge-std/Test.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+
+import {PoolRegistry} from "../../src/PoolRegistry.sol";
+
+contract PoolRegistryTest is Test {
+    PoolRegistry internal registry;
+
+    address internal owner = makeAddr("owner");
+    address internal guardian = makeAddr("guardian");
+    address internal stranger = makeAddr("stranger");
+    address internal adapterA = makeAddr("adapterA");
+    address internal adapterB = makeAddr("adapterB");
+
+    address internal token0 = makeAddr("token0");
+    address internal token1 = makeAddr("token1");
+
+    function setUp() public {
+        // ensure token0 < token1 (registry enforces sorted order)
+        if (uint160(token0) >= uint160(token1)) (token0, token1) = (token1, token0);
+        registry = new PoolRegistry(owner, guardian);
+    }
+
+    function _samplePool() internal view returns (PoolRegistry.Pool memory) {
+        return PoolRegistry.Pool({
+            adapter: adapterA,
+            token0: token0,
+            token1: token1,
+            fee: 500,
+            tickSpacing: 10,
+            hooks: address(0),
+            maxAllocationBps: 5_000,
+            enabled: true
+        });
+    }
+
+    // -------- construction --------
+
+    function test_constructor_setsOwnerAndGuardian() public view {
+        assertEq(registry.owner(), owner);
+        assertEq(registry.guardian(), guardian);
+    }
+
+    // -------- guardian rotation --------
+
+    function test_setGuardian_byOwner_updatesGuardian() public {
+        vm.prank(owner);
+        registry.setGuardian(stranger);
+        assertEq(registry.guardian(), stranger);
+    }
+
+    function test_setGuardian_byNonOwner_reverts() public {
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        vm.prank(stranger);
+        registry.setGuardian(stranger);
+    }
+
+    // -------- addPool --------
+
+    function test_addPool_byGuardian_addsAndEmits() public {
+        PoolRegistry.Pool memory p = _samplePool();
+        bytes32 expected = registry.poolKey(p.adapter, p.token0, p.token1, p.fee, p.tickSpacing, p.hooks);
+
+        vm.expectEmit(true, false, false, true);
+        emit PoolRegistry.PoolAdded(expected, p);
+
+        vm.prank(guardian);
+        bytes32 key = registry.addPool(p);
+
+        assertEq(key, expected);
+        assertEq(registry.poolCount(), 1);
+        assertTrue(registry.isWhitelisted(key));
+
+        PoolRegistry.Pool memory got = registry.getPool(key);
+        assertEq(got.adapter, p.adapter);
+        assertEq(got.maxAllocationBps, p.maxAllocationBps);
+    }
+
+    function test_addPool_byNonGuardian_reverts() public {
+        vm.expectRevert(PoolRegistry.NotGuardian.selector);
+        registry.addPool(_samplePool());
+    }
+
+    function test_addPool_unsortedTokens_reverts() public {
+        PoolRegistry.Pool memory p = _samplePool();
+        (p.token0, p.token1) = (p.token1, p.token0);
+        vm.prank(guardian);
+        vm.expectRevert(PoolRegistry.InvalidConfig.selector);
+        registry.addPool(p);
+    }
+
+    function test_addPool_zeroAdapter_reverts() public {
+        PoolRegistry.Pool memory p = _samplePool();
+        p.adapter = address(0);
+        vm.prank(guardian);
+        vm.expectRevert(PoolRegistry.InvalidConfig.selector);
+        registry.addPool(p);
+    }
+
+    function test_addPool_zeroMaxAllocation_reverts() public {
+        PoolRegistry.Pool memory p = _samplePool();
+        p.maxAllocationBps = 0;
+        vm.prank(guardian);
+        vm.expectRevert(PoolRegistry.InvalidConfig.selector);
+        registry.addPool(p);
+    }
+
+    function test_addPool_excessiveMaxAllocation_reverts() public {
+        PoolRegistry.Pool memory p = _samplePool();
+        p.maxAllocationBps = 10_001;
+        vm.prank(guardian);
+        vm.expectRevert(PoolRegistry.InvalidConfig.selector);
+        registry.addPool(p);
+    }
+
+    function test_addPool_withHooks_reverts() public {
+        PoolRegistry.Pool memory p = _samplePool();
+        p.hooks = makeAddr("someHook");
+        vm.prank(guardian);
+        vm.expectRevert(PoolRegistry.HookedPoolsNotAllowed.selector);
+        registry.addPool(p);
+    }
+
+    function test_addPool_duplicate_reverts() public {
+        PoolRegistry.Pool memory p = _samplePool();
+        vm.startPrank(guardian);
+        bytes32 key = registry.addPool(p);
+        vm.expectRevert(abi.encodeWithSelector(PoolRegistry.PoolAlreadyExists.selector, key));
+        registry.addPool(p);
+        vm.stopPrank();
+    }
+
+    function test_addPool_differentAdapter_addsAsSecondPool() public {
+        PoolRegistry.Pool memory p = _samplePool();
+        vm.startPrank(guardian);
+        registry.addPool(p);
+
+        p.adapter = adapterB;
+        registry.addPool(p);
+        vm.stopPrank();
+
+        assertEq(registry.poolCount(), 2);
+    }
+
+    // -------- removePool --------
+
+    function test_removePool_byGuardian_removes() public {
+        vm.startPrank(guardian);
+        bytes32 key = registry.addPool(_samplePool());
+        registry.removePool(key);
+        vm.stopPrank();
+
+        assertEq(registry.poolCount(), 0);
+        assertFalse(registry.isWhitelisted(key));
+    }
+
+    function test_removePool_unknown_reverts() public {
+        bytes32 key = bytes32(uint256(0xdead));
+        vm.prank(guardian);
+        vm.expectRevert(abi.encodeWithSelector(PoolRegistry.UnknownPool.selector, key));
+        registry.removePool(key);
+    }
+
+    function test_removePool_swapAndPop_keepsArrayConsistent() public {
+        PoolRegistry.Pool memory p = _samplePool();
+        vm.startPrank(guardian);
+        bytes32 key1 = registry.addPool(p);
+
+        p.adapter = adapterB;
+        bytes32 key2 = registry.addPool(p);
+        vm.stopPrank();
+
+        vm.prank(guardian);
+        registry.removePool(key1);
+
+        assertEq(registry.poolCount(), 1);
+        assertEq(registry.poolKeys(0), key2);
+        assertTrue(registry.isWhitelisted(key2));
+    }
+
+    // -------- setPoolEnabled --------
+
+    function test_setPoolEnabled_disabledPoolNotWhitelisted() public {
+        vm.startPrank(guardian);
+        bytes32 key = registry.addPool(_samplePool());
+        registry.setPoolEnabled(key, false);
+        vm.stopPrank();
+
+        assertFalse(registry.isWhitelisted(key));
+        // but still retrievable
+        PoolRegistry.Pool memory got = registry.getPool(key);
+        assertEq(got.enabled, false);
+    }
+
+    // -------- setPoolMaxAllocation --------
+
+    function test_setPoolMaxAllocation_updates() public {
+        vm.startPrank(guardian);
+        bytes32 key = registry.addPool(_samplePool());
+        registry.setPoolMaxAllocation(key, 7_500);
+        vm.stopPrank();
+
+        assertEq(registry.getPool(key).maxAllocationBps, 7_500);
+    }
+
+    function test_setPoolMaxAllocation_invalid_reverts() public {
+        vm.startPrank(guardian);
+        bytes32 key = registry.addPool(_samplePool());
+        vm.expectRevert(PoolRegistry.InvalidConfig.selector);
+        registry.setPoolMaxAllocation(key, 0);
+        vm.stopPrank();
+    }
+}
