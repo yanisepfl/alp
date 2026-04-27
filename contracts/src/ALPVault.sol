@@ -749,39 +749,69 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     /// who is exiting; they accept market price). The same-block lockout
     /// already ensures this can't be the second leg of a sandwich.
     function _unwindForWithdraw(uint256 shortfall) internal {
-        uint256 tav = totalAssets();
-        if (tav == 0) return;
         uint256 numPools = _activePoolKeys.length;
+        if (numPools == 0) return;
+        address base = asset();
+        // Target idle balance once we're done. Comparisons throughout the
+        // loop check against this absolute target — much less error-prone
+        // than tracking a "still-short" delta as positions get peeled and
+        // non-base balances get swapped.
+        uint256 startIdle = IERC20(base).balanceOf(address(this));
+        uint256 targetIdle = startIdle + shortfall;
         bytes memory removeExtra = abi.encode(block.timestamp, false);
         bytes memory swapExtra = abi.encode(block.timestamp);
-        for (uint256 i; i < numPools && IERC20(asset()).balanceOf(address(this)) < shortfall + 1; ++i) {
+
+        for (uint256 i; i < numPools && IERC20(base).balanceOf(address(this)) < targetIdle; ++i) {
             bytes32 key = _activePoolKeys[i];
             if (_orphanedPool[key]) continue;
             PoolRegistry.Pool memory pool = _trackedPools[key];
             ILiquidityAdapter adapter_ = ILiquidityAdapter(pool.adapter);
+            bool baseIsToken0 = (pool.token0 == base);
+            uint160 sqrtPriceX96 = adapter_.getSpotSqrtPriceX96(pool);
+
             uint256[] storage ids = _positionIdsByPool[key];
             for (uint256 j; j < ids.length; ++j) {
+                uint256 idleNow = IERC20(base).balanceOf(address(this));
+                if (idleNow >= targetIdle) break;
+                uint256 stillShort = targetIdle - idleNow;
+
                 uint128 currentLiq = adapter_.getPositionLiquidity(pool, ids[j]);
                 if (currentLiq == 0) continue;
-                uint128 toPeel = uint128((uint256(currentLiq) * shortfall) / tav);
-                if (toPeel == 0) toPeel = 1; // round up so dust positions still contribute
-                if (toPeel > currentLiq) toPeel = currentLiq;
 
-                IERC20(pool.token0).forceApprove(pool.adapter, 0); // belt-and-braces
-                IERC20(pool.token1).forceApprove(pool.adapter, 0);
+                // Size the peel against THIS position's value, not vault TAV.
+                // Sizing against TAV under-peels when a position is only a
+                // fraction of total value.
+                (uint256 amount0, uint256 amount1) = adapter_.getPositionAmountsAtPrice(pool, ids[j], sqrtPriceX96);
+                uint256 baseAmt = baseIsToken0 ? amount0 : amount1;
+                uint256 nonBaseAmt = baseIsToken0 ? amount1 : amount0;
+                uint256 positionValue = baseAmt;
+                if (nonBaseAmt > 0) positionValue += _convertToBase(nonBaseAmt, sqrtPriceX96, !baseIsToken0);
+                if (positionValue == 0) continue;
+
+                uint128 toPeel;
+                if (stillShort >= positionValue) {
+                    toPeel = currentLiq;
+                } else {
+                    // Overshoot by 10% to absorb swap slippage on the
+                    // non-base side conversion below.
+                    uint256 scaled = (uint256(currentLiq) * stillShort * 11) / (positionValue * 10);
+                    toPeel = scaled > currentLiq ? currentLiq : uint128(scaled);
+                    if (toPeel == 0) toPeel = 1;
+                }
+
                 (,, bool burned) = adapter_.removeLiquidity(pool, ids[j], toPeel, 0, 0, removeExtra);
                 if (burned) {
                     _untrackPosition(key, ids[j]);
                 }
             }
 
-            // Convert non-base side back to base in this pool so the withdraw
-            // can settle in the vault's asset.
-            address nonBase = (pool.token0 == asset()) ? pool.token1 : pool.token0;
+            // Swap any non-base proceeds in this pool back to base. Skipped
+            // silently on revert (dust below router minimum, etc.).
+            address nonBase = baseIsToken0 ? pool.token1 : pool.token0;
             uint256 nonBaseBal = IERC20(nonBase).balanceOf(address(this));
             if (nonBaseBal > 0) {
                 IERC20(nonBase).forceApprove(pool.adapter, nonBaseBal);
-                adapter_.swapExactIn(pool, nonBase, nonBaseBal, 1, swapExtra);
+                try adapter_.swapExactIn(pool, nonBase, nonBaseBal, 1, swapExtra) {} catch {}
                 IERC20(nonBase).forceApprove(pool.adapter, 0);
             }
         }
