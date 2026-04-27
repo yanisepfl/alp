@@ -434,7 +434,10 @@ contract V4LifecycleTest is V4Deployers {
         vault.deposit(10_000e18, alice);
         weth.mint(address(vault), 10_000e18);
 
-        // Trying to add 50% of TVL into one pool must revert.
+        // The cap is measured against `totalAssets()` which under dual-rail
+        // returns MIN(book, market). bookTAV here is alice's 10k deposit,
+        // so a 5k+5k add (≈ 10k position value) is 100% of the floor and
+        // must revert at the 30% cap.
         vm.expectRevert(abi.encodeWithSelector(ALPVault.MaxAllocationExceeded.selector, poolKeyHash));
         vault.executeAddLiquidity(
             poolKeyHash,
@@ -445,11 +448,11 @@ contract V4LifecycleTest is V4Deployers {
             abi.encode(int24(-6_000), int24(6_000), block.timestamp + 600, uint256(0))
         );
 
-        // Adding within the cap (≈ 20%) is fine.
+        // 1k+1k ≈ 2k position value = 20% of the 10k bookTAV floor — under cap.
         vault.executeAddLiquidity(
             poolKeyHash,
-            2_000e18,
-            2_000e18,
+            1_000e18,
+            1_000e18,
             0,
             0,
             abi.encode(int24(-6_000), int24(6_000), block.timestamp + 600, uint256(0))

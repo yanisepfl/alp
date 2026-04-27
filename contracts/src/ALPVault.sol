@@ -76,6 +76,16 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     /// against the deposit-then-withdraw flash-loan flow.
     mapping(address => uint256) internal _lastMintBlock;
 
+    /// @notice Cost-basis tally — the "book" rail of the dual-rail accounting
+    /// model. Grows on user deposits and on base-asset fee inflows from
+    /// `executeCollectFees`; shrinks on user withdraws. Never moves with pool
+    /// spot, so flash-loan price manipulation cannot shift it. Combined with
+    /// the spot-priced "market" rail in `_marketTAV()` for asymmetric
+    /// settlement: deposits charge MAX(book, market), redeems pay
+    /// MIN(book, market). This makes multi-block manipulation profitless
+    /// because the unmanipulable rail always pins the disadvantaged side.
+    uint256 public bookTAV;
+
     address public agent;
     address public guardian;
 
@@ -254,7 +264,26 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     }
 
     /// @inheritdoc ERC4626
-    function totalAssets() public view override returns (uint256 total) {
+    /// @dev Returns `MIN(bookTAV, marketTAV)` — the always-redeemable floor.
+    /// This is what depositors and redeemers see through every standard
+    /// ERC4626 query (`previewDeposit`, `previewRedeem`, etc.). It is the
+    /// pessimistic rail; the optimistic rail is exposed separately as
+    /// `marketTAV()` for UI-only display of unrealised PnL.
+    function totalAssets() public view override returns (uint256) {
+        uint256 mkt = _marketTAV();
+        return bookTAV < mkt ? bookTAV : mkt;
+    }
+
+    /// @notice Spot-priced view of vault holdings — idle base + idle non-base
+    /// (priced through pool spot) + every open position decomposed into
+    /// token amounts at current spot. Manipulable by flash-loan attackers;
+    /// the dual-rail model uses it only as one side of the asymmetric
+    /// settlement rule, never as the sole source of truth.
+    function marketTAV() external view returns (uint256) {
+        return _marketTAV();
+    }
+
+    function _marketTAV() internal view returns (uint256 total) {
         address base = asset();
         total = IERC20(base).balanceOf(address(this));
 
@@ -266,7 +295,7 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
             if (_orphanedPool[key]) continue;
             // A misbehaving non-base token, broken adapter, or pre-init pool
             // would otherwise brick deposits/redemptions. Skip and continue;
-            // the guardian can `forceUntrackPool` to surface and fix the
+            // the guardian can `setPoolOrphaned` to surface and fix the
             // root cause if needed.
             try this.poolValueExternal(key) returns (uint256 v) {
                 total += v;
@@ -402,6 +431,13 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         PoolRegistry.Pool memory pool = _requireTrackedPool(poolKey);
         if (_positionIndex[poolKey][positionId] == 0) revert PositionNotTracked(poolKey, positionId);
         (amount0, amount1) = ILiquidityAdapter(pool.adapter).collectFees(pool, positionId);
+        // Promote the base-side fee inflow into the book rail. The non-base
+        // side stays as idle non-base — it's only "realised" once the agent
+        // swaps it back to base, at which point it shows up on a future
+        // collect or simply increases marketTAV without book.
+        address base = asset();
+        if (pool.token0 == base) bookTAV += amount0;
+        else if (pool.token1 == base) bookTAV += amount1;
         emit FeesCollected(poolKey, positionId, amount0, amount1);
     }
 
@@ -508,21 +544,75 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
 
     // -------- Pause + reentrancy hooks + anti-MEV layer --------
 
-    /// @dev Apply the entry/exit fee at the share-pricing layer so it
-    /// influences both `previewDeposit` quotes and the actual mint amount
-    /// consistently. Fee bps haircut on incoming asset value: shares minted
-    /// reflect (assets - fee). The fee stays in the vault as donated TAV.
+    /// @dev Raw fee-free share math against the deposit-direction rail
+    /// `MAX(book, market)`. Used by both ERC4626's public `convertToShares`
+    /// and as the math primitive behind `previewDeposit`/`previewWithdraw`.
+    /// Direction-specific fee handling lives in the four `preview*`
+    /// overrides below so that mint and withdraw cannot bypass the fee.
     function _convertToShares(uint256 assets, Math.Rounding rounding) internal view override returns (uint256) {
-        uint256 fee = (assets * entryExitFeeBps) / BPS_DENOM;
-        return super._convertToShares(assets - fee, rounding);
+        uint256 mkt = _marketTAV();
+        uint256 effectiveTAV = bookTAV > mkt ? bookTAV : mkt;
+        return Math.mulDiv(assets, totalSupply() + 10 ** _decimalsOffset(), effectiveTAV + 1, rounding);
     }
 
-    /// @dev Symmetric fee on the redeem path: shares burnt return
-    /// `assets * (1 - fee)` to the user; the haircut stays as TAV.
+    /// @dev Raw fee-free asset math against the redeem-direction rail
+    /// `MIN(book, market)` (returned by `totalAssets()`). Mirror of
+    /// `_convertToShares`.
     function _convertToAssets(uint256 shares, Math.Rounding rounding) internal view override returns (uint256) {
-        uint256 grossAssets = super._convertToAssets(shares, rounding);
-        uint256 fee = (grossAssets * entryExitFeeBps) / BPS_DENOM;
-        return grossAssets - fee;
+        return Math.mulDiv(shares, totalAssets() + 1, totalSupply() + 10 ** _decimalsOffset(), rounding);
+    }
+
+    // -------- ERC-4626 preview overrides with correct fee direction --------
+
+    /// @inheritdoc ERC4626
+    /// @dev `assets` flow IN; user pays the fee, vault keeps it. Net assets
+    /// price the share math so the depositor effectively buys fewer shares
+    /// than they would gross.
+    function previewDeposit(uint256 assets) public view virtual override returns (uint256) {
+        uint256 net = assets - _entryFee(assets);
+        return _convertToShares(net, Math.Rounding.Floor);
+    }
+
+    /// @inheritdoc ERC4626
+    /// @dev User specifies a target share count. We compute the net assets
+    /// needed to mint that many shares, then gross-up so the user pays
+    /// `gross = net / (1 - fee)`. Vault keeps `gross - net` as fee revenue.
+    function previewMint(uint256 shares) public view virtual override returns (uint256) {
+        uint256 net = _convertToAssetsAtDepositRail(shares, Math.Rounding.Ceil);
+        if (entryExitFeeBps == 0) return net;
+        // Gross-up: gross * (BPS_DENOM - fee) / BPS_DENOM = net
+        return Math.mulDiv(net, BPS_DENOM, BPS_DENOM - entryExitFeeBps, Math.Rounding.Ceil);
+    }
+
+    /// @inheritdoc ERC4626
+    /// @dev User specifies a target asset count to receive. We gross-up the
+    /// asset count so the share burn covers `assets + fee`; the fee stays
+    /// in the vault.
+    function previewWithdraw(uint256 assets) public view virtual override returns (uint256) {
+        uint256 grossNeeded = entryExitFeeBps == 0
+            ? assets
+            : Math.mulDiv(assets, BPS_DENOM, BPS_DENOM - entryExitFeeBps, Math.Rounding.Ceil);
+        return _convertToShares(grossNeeded, Math.Rounding.Ceil);
+    }
+
+    /// @inheritdoc ERC4626
+    /// @dev `shares` flow IN, assets flow OUT. Fee charged on the outflow.
+    function previewRedeem(uint256 shares) public view virtual override returns (uint256) {
+        uint256 gross = _convertToAssets(shares, Math.Rounding.Floor);
+        return gross - _entryFee(gross);
+    }
+
+    function _entryFee(uint256 assets) internal view returns (uint256) {
+        return (assets * entryExitFeeBps) / BPS_DENOM;
+    }
+
+    /// @dev Mint pricing uses the deposit-direction rail (MAX); we can't
+    /// reuse `_convertToAssets` directly because that one is pinned to
+    /// `totalAssets()` (= MIN, the redeem rail).
+    function _convertToAssetsAtDepositRail(uint256 shares, Math.Rounding rounding) internal view returns (uint256) {
+        uint256 mkt = _marketTAV();
+        uint256 effectiveTAV = bookTAV > mkt ? bookTAV : mkt;
+        return Math.mulDiv(shares, effectiveTAV + 1, totalSupply() + 10 ** _decimalsOffset(), rounding);
     }
 
     function _deposit(address caller, address receiver, uint256 assets, uint256 shares)
@@ -531,12 +621,17 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         whenNotPaused
         nonReentrant
     {
+        // Book rail bumps before the actual transfer/mint, mirroring how
+        // value flows through the boundary. The fee component (charged
+        // implicitly via _convertToShares) stays in the vault, so the full
+        // gross `assets` is what crossed the door.
+        bookTAV += assets;
         super._deposit(caller, receiver, assets, shares);
-        // Same-block lockout: stamp the receiver's last-mint block so a
-        // subsequent same-block redeem from the same address reverts.
-        // This kills the canonical mint-and-redeem-in-one-transaction
-        // flash-loan flow at near-zero cost to honest users.
+        // Same-block lockout stamps both the receiver and the caller so the
+        // attacker can't bypass by routing the deposit to a fresh address
+        // while still planning to redeem old shares of their own.
         _lastMintBlock[receiver] = block.number;
+        _lastMintBlock[caller] = block.number;
     }
 
     function _withdraw(address caller, address receiver, address owner_, uint256 assets, uint256 shares)
@@ -545,7 +640,9 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         whenNotPaused
         nonReentrant
     {
-        if (_lastMintBlock[owner_] == block.number) revert SameBlockMintAndRedeem();
+        if (_lastMintBlock[owner_] == block.number || _lastMintBlock[caller] == block.number) {
+            revert SameBlockMintAndRedeem();
+        }
         // Auto-unwind: if idle base is short of `assets`, peel pro-rata from
         // every tracked position until either the gap is closed or the loop
         // exhausts itself. Reverts only if the vault genuinely doesn't hold
@@ -555,6 +652,16 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
             _unwindForWithdraw(assets - idle);
             idle = IERC20(asset()).balanceOf(address(this));
             if (idle < assets) revert InsufficientLiquidityAfterUnwind(assets, idle);
+        }
+        // Book rail decrements *proportionally* to share burn rather than by
+        // the absolute asset amount. This keeps book and market in lock-step
+        // ratios across redemptions; an absolute decrement would let book
+        // deplete to zero while market still held value, stranding residual
+        // value un-claimable for late redeemers.
+        uint256 supply = totalSupply();
+        if (supply > 0) {
+            uint256 bookSlice = Math.mulDiv(bookTAV, shares, supply, Math.Rounding.Floor);
+            bookTAV = bookTAV > bookSlice ? bookTAV - bookSlice : 0;
         }
         super._withdraw(caller, receiver, owner_, assets, shares);
     }

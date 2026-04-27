@@ -182,6 +182,133 @@ contract ALPVaultUnitTest is Test {
         assertEq(vault.totalAssets(), 3_000e6);
     }
 
+    // -------- Dual-rail accounting --------
+
+    function test_bookTAV_startsAtZero() public view {
+        assertEq(vault.bookTAV(), 0);
+    }
+
+    function test_bookTAV_growsOnDeposit() public {
+        vm.prank(alice);
+        vault.deposit(1_000e6, alice);
+        assertEq(vault.bookTAV(), 1_000e6);
+
+        vm.prank(bob);
+        vault.deposit(500e6, bob);
+        assertEq(vault.bookTAV(), 1_500e6);
+    }
+
+    function test_bookTAV_shrinksOnWithdraw() public {
+        vm.prank(alice);
+        vault.deposit(1_000e6, alice);
+        vm.roll(block.number + 1);
+        vm.prank(alice);
+        vault.withdraw(400e6, alice, alice);
+        assertEq(vault.bookTAV(), 600e6);
+    }
+
+    function test_marketTAV_matchesIdleBaseWhenNoPositions() public {
+        vm.prank(alice);
+        vault.deposit(1_000e6, alice);
+        // No positions opened; market = idle base = 1_000e6.
+        assertEq(vault.marketTAV(), 1_000e6);
+        // book = market, so totalAssets() returns either.
+        assertEq(vault.totalAssets(), 1_000e6);
+    }
+
+    function test_totalAssets_returnsMinOfBookAndMarket() public {
+        // Donate 500 USDC straight into the vault — bumps market without book.
+        vm.prank(alice);
+        vault.deposit(1_000e6, alice);
+        usdc.mint(address(vault), 500e6);
+
+        // bookTAV stays at 1_000e6, marketTAV is 1_500e6, totalAssets returns the floor.
+        assertEq(vault.bookTAV(), 1_000e6);
+        assertEq(vault.marketTAV(), 1_500e6);
+        assertEq(vault.totalAssets(), 1_000e6);
+    }
+
+    function test_deposit_usesMaxOfBookAndMarket() public {
+        // Alice deposits, then someone donates extra USDC making market > book.
+        vm.prank(alice);
+        vault.deposit(1_000e6, alice);
+        usdc.mint(address(vault), 500e6);
+
+        // Bob now deposits. With market = 1_500 > book = 1_000, the share-pricing
+        // rail is the higher of the two, so bob mints fewer shares than he would
+        // under a book-only model.
+        uint256 bobExpected = vault.previewDeposit(1_500e6);
+        vm.prank(bob);
+        uint256 bobShares = vault.deposit(1_500e6, bob);
+        assertEq(bobShares, bobExpected);
+
+        // The 1_500 USDC bumps both rails by the same gross amount.
+        assertEq(vault.bookTAV(), 2_500e6);
+        assertEq(vault.marketTAV(), 3_000e6);
+        assertEq(vault.totalAssets(), 2_500e6);
+    }
+
+    function test_redeem_usesMinOfBookAndMarket() public {
+        // Same setup: market > book.
+        vm.prank(alice);
+        vault.deposit(1_000e6, alice);
+        usdc.mint(address(vault), 500e6);
+
+        // Alice now redeems all her shares. With min(book, market) = book = 1_000,
+        // she gets back her deposit but NOT the unrealised 500 donation. The
+        // 500 stays in the vault for whoever exits later.
+        vm.roll(block.number + 1);
+        uint256 aliceShares = vault.balanceOf(alice);
+        uint256 before_ = usdc.balanceOf(alice);
+        vm.prank(alice);
+        vault.redeem(aliceShares, alice, alice);
+        uint256 received = usdc.balanceOf(alice) - before_;
+        // Alice should receive at most her deposit.
+        assertLe(received, 1_000e6);
+        // Vault retains at least the donated 500 plus any rounding crumb.
+        assertGe(usdc.balanceOf(address(vault)), 500e6);
+    }
+
+    /// @notice Simulates the "deflate spot, deposit, restore spot, redeem"
+    /// multi-block flash-loan flow without any actual pool. We model
+    /// market-rail manipulation as a direct USDC transfer in/out of the
+    /// vault: it's the cleanest way to prove the dual-rail rule cancels
+    /// the attack in isolation. (Real-pool manipulation is exercised in
+    /// integration tests where the pool is live.)
+    function test_dualRail_neutralisesMarketManipulation() public {
+        // Honest seed: alice deposits 1_000.
+        vm.prank(alice);
+        vault.deposit(1_000e6, alice);
+        uint256 supplyBefore = vault.totalSupply();
+
+        // "Attacker" deflates market — pull 200 USDC out (simulating the pool
+        // crashing 20%). Book stays at 1_000, market drops to 800.
+        vm.prank(address(vault));
+        usdc.transfer(address(0xdead), 200e6);
+        assertEq(vault.bookTAV(), 1_000e6);
+        assertEq(vault.marketTAV(), 800e6);
+
+        // Bob deposits at the manipulated state. Pricing uses MAX(book, market)
+        // = 1_000 (the unmanipulated rail). Bob gets the SAME shares he'd get
+        // honestly — manipulation didn't help him.
+        vm.prank(bob);
+        uint256 bobShares = vault.deposit(500e6, bob);
+        uint256 honestShares = (500e6 * (supplyBefore + 1e6)) / (1_000e6 + 1);
+        assertApproxEqAbs(bobShares, honestShares, 1, "bob got more shares than honest baseline");
+
+        // Restore the market (mint 200 back). Book is now 1_500, market 1_500.
+        usdc.mint(address(vault), 200e6);
+
+        // Bob redeems. Pricing uses MIN(book, market) = 1_500 (both equal now).
+        // He gets back exactly his 500. Zero profit from the manipulation.
+        vm.roll(block.number + 1);
+        uint256 before_ = usdc.balanceOf(bob);
+        vm.prank(bob);
+        vault.redeem(bobShares, bob, bob);
+        uint256 received = usdc.balanceOf(bob) - before_;
+        assertApproxEqAbs(received, 500e6, 2, "bob extracted profit from market manipulation");
+    }
+
     // -------- agent entry-point gating --------
 
     function test_executeAddLiquidity_byNonAgent_reverts() public {
