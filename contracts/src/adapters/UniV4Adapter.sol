@@ -227,12 +227,25 @@ contract UniV4Adapter is ILiquidityAdapter {
         view
         returns (uint256 amount0, uint256 amount1)
     {
-        // Burned tokens revert on `getPoolAndPositionInfo`; swallow so callers
-        // can iterate a position list that may include stale IDs.
+        return _getPositionAmounts(positionId, _poolSqrtPrice(pool));
+    }
+
+    function getPositionAmountsAtPrice(PoolRegistry.Pool calldata, uint256 positionId, uint160 sqrtPriceX96)
+        external
+        view
+        returns (uint256 amount0, uint256 amount1)
+    {
+        return _getPositionAmounts(positionId, sqrtPriceX96);
+    }
+
+    function _getPositionAmounts(uint256 positionId, uint160 sqrtPriceX96)
+        internal
+        view
+        returns (uint256 amount0, uint256 amount1)
+    {
         try positionManager.getPoolAndPositionInfo(positionId) returns (PoolKey memory, PositionInfo info) {
             uint128 liquidity = positionManager.getPositionLiquidity(positionId);
             if (liquidity == 0) return (0, 0);
-            uint160 sqrtPriceX96 = _poolSqrtPrice(pool);
             (amount0, amount1) = LiquidityMath.getAmountsForLiquidity(
                 sqrtPriceX96,
                 TickMath.getSqrtPriceAtTick(info.tickLower()),
@@ -241,6 +254,24 @@ contract UniV4Adapter is ILiquidityAdapter {
             );
         } catch {
             return (0, 0);
+        }
+    }
+
+    function poolKeyForPosition(uint256 positionId) external view returns (bytes32) {
+        try positionManager.getPoolAndPositionInfo(positionId) returns (PoolKey memory key, PositionInfo) {
+            // Match PoolRegistry.poolKey for V4: includes tickSpacing + hooks.
+            return keccak256(
+                abi.encode(
+                    address(this),
+                    Currency.unwrap(key.currency0),
+                    Currency.unwrap(key.currency1),
+                    key.fee,
+                    key.tickSpacing,
+                    address(key.hooks)
+                )
+            );
+        } catch {
+            return bytes32(0);
         }
     }
 

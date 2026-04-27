@@ -63,12 +63,30 @@ interface ILiquidityAdapter {
     /// the pool's current spot price. Returns 0,0 for burned or unknown
     /// positions so the caller can iterate a list without reverting.
     /// @dev Used by `ALPVault.totalAssets` for trustless on-chain valuation.
-    /// Only the principal is reported; uncollected swap fees are intentionally
-    /// excluded so valuation is conservative under fee accrual.
+    /// Includes any cached `tokensOwed` so the value reflects fees that have
+    /// been pushed into the position record by the most recent interaction.
+    /// Live fees that have not been pushed yet are not reflected — the vault
+    /// flushes those by calling `collectFees` before each user interaction.
     function getPositionAmounts(PoolRegistry.Pool calldata pool, uint256 positionId)
         external
         view
         returns (uint256 amount0, uint256 amount1);
+
+    /// @notice Same as `getPositionAmounts` but lets the caller supply the
+    /// pool's current `sqrtPriceX96` so the adapter doesn't have to fetch
+    /// it again. Used by `ALPVault.totalAssets()` to amortise the slot0
+    /// read across every position in a pool.
+    function getPositionAmountsAtPrice(PoolRegistry.Pool calldata pool, uint256 positionId, uint160 sqrtPriceX96)
+        external
+        view
+        returns (uint256 amount0, uint256 amount1);
+
+    /// @notice Returns the PoolKey hash that the adapter would compute for a
+    /// given position. Vault uses this to bind a position id to a registry
+    /// pool key when tracking — preventing a malicious or buggy agent from
+    /// routing one pool's position through another pool's accounting slot.
+    /// Returns `bytes32(0)` for unknown / burned positions.
+    function poolKeyForPosition(uint256 positionId) external view returns (bytes32);
 
     /// @notice Returns the pool's current spot price as a Q64.96 sqrt(token1/token0).
     /// Used by the vault to value non-base tokens in base-asset units.

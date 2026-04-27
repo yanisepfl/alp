@@ -3,6 +3,12 @@ pragma solidity ^0.8.26;
 
 import {Ownable, Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 
+/// @notice Minimal interface implemented by the vault so the registry can
+/// confirm a pool has zero tracked positions before allowing `removePool`.
+interface IPositionGuard {
+    function positionCount(bytes32 poolKey) external view returns (uint256);
+}
+
 /// @notice Guardian-managed whitelist of (Uniswap-version, pool) pairs the
 /// vault is allowed to interact with.
 ///
@@ -34,12 +40,18 @@ contract PoolRegistry is Ownable2Step {
     }
 
     address public guardian;
+    /// @notice Optional position guard the registry consults before letting
+    /// the guardian remove a pool. Owner-set; default unset preserves the
+    /// original "operational discipline" semantics. When set, `removePool`
+    /// reverts unless the guard reports zero positions for the pool key.
+    address public positionGuard;
 
     mapping(bytes32 => Pool) internal _pools;
     bytes32[] public poolKeys;
     mapping(bytes32 => uint256) internal _poolKeyIndex; // 1-based; 0 = absent
 
     event GuardianUpdated(address indexed previous, address indexed current);
+    event PositionGuardUpdated(address indexed previous, address indexed current);
     event PoolAdded(bytes32 indexed key, Pool pool);
     event PoolRemoved(bytes32 indexed key);
     event PoolMaxAllocationUpdated(bytes32 indexed key, uint256 maxAllocationBps);
@@ -50,6 +62,7 @@ contract PoolRegistry is Ownable2Step {
     error PoolAlreadyExists(bytes32 key);
     error InvalidConfig();
     error HookedPoolsNotAllowed();
+    error PoolStillHasPositions(bytes32 key, uint256 count);
 
     modifier onlyGuardian() {
         if (msg.sender != guardian) revert NotGuardian();
@@ -101,6 +114,15 @@ contract PoolRegistry is Ownable2Step {
         uint256 idx = _poolKeyIndex[key];
         if (idx == 0) revert UnknownPool(key);
 
+        // If a position guard is registered, refuse removal while it still
+        // sees positions in this pool. Guard is optional — when unset the
+        // historic operational-discipline semantics apply.
+        address guard = positionGuard;
+        if (guard != address(0)) {
+            uint256 count = IPositionGuard(guard).positionCount(key);
+            if (count != 0) revert PoolStillHasPositions(key, count);
+        }
+
         uint256 last = poolKeys.length - 1;
         if (idx - 1 != last) {
             bytes32 lastKey = poolKeys[last];
@@ -112,6 +134,11 @@ contract PoolRegistry is Ownable2Step {
         delete _pools[key];
 
         emit PoolRemoved(key);
+    }
+
+    function setPositionGuard(address newGuard) external onlyOwner {
+        emit PositionGuardUpdated(positionGuard, newGuard);
+        positionGuard = newGuard;
     }
 
     function setPoolMaxAllocation(bytes32 key, uint256 maxAllocationBps) external onlyGuardian {

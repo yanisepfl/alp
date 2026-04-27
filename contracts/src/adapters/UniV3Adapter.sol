@@ -203,9 +203,22 @@ contract UniV3Adapter is ILiquidityAdapter {
         view
         returns (uint256 amount0, uint256 amount1)
     {
-        // `npm.positions` reverts on burned token IDs. Callers iterate a list
-        // that may include burned positions, so we swallow the revert and
-        // report a zero-value position instead of bubbling.
+        return _getPositionAmounts(pool, positionId, _poolSqrtPrice(pool));
+    }
+
+    function getPositionAmountsAtPrice(PoolRegistry.Pool calldata pool, uint256 positionId, uint160 sqrtPriceX96)
+        external
+        view
+        returns (uint256 amount0, uint256 amount1)
+    {
+        return _getPositionAmounts(pool, positionId, sqrtPriceX96);
+    }
+
+    function _getPositionAmounts(PoolRegistry.Pool calldata, uint256 positionId, uint160 sqrtPriceX96)
+        internal
+        view
+        returns (uint256 amount0, uint256 amount1)
+    {
         try npm.positions(positionId) returns (
             uint96,
             address,
@@ -221,23 +234,37 @@ contract UniV3Adapter is ILiquidityAdapter {
             uint128 tokensOwed1
         ) {
             if (liquidity == 0) {
-                // Even with zero liquidity the position can still hold owed
-                // fees pending collection. Honour them in the valuation.
                 return (uint256(tokensOwed0), uint256(tokensOwed1));
             }
-            uint160 sqrtPriceX96 = _poolSqrtPrice(pool);
             (amount0, amount1) = LiquidityMath.getAmountsForLiquidity(
                 sqrtPriceX96, TickMath.getSqrtPriceAtTick(tickLower), TickMath.getSqrtPriceAtTick(tickUpper), liquidity
             );
-            // Add already-synced owed fees. Fees that have accrued in the
-            // pool but not yet been pushed into `tokensOwed` are still
-            // un-counted; the agent should call `executeCollectFees`
-            // periodically to keep this gap small. V4 has the same
-            // convention; this comment applies to both.
             amount0 += uint256(tokensOwed0);
             amount1 += uint256(tokensOwed1);
         } catch {
             return (0, 0);
+        }
+    }
+
+    function poolKeyForPosition(uint256 positionId) external view returns (bytes32) {
+        try npm.positions(positionId) returns (
+            uint96,
+            address,
+            address token0,
+            address token1,
+            uint24 fee,
+            int24,
+            int24,
+            uint128,
+            uint256,
+            uint256,
+            uint128,
+            uint128
+        ) {
+            // Match PoolRegistry.poolKey for V3: hooks=0, tickSpacing=0.
+            return keccak256(abi.encode(address(this), token0, token1, fee, int24(0), address(0)));
+        } catch {
+            return bytes32(0);
         }
     }
 

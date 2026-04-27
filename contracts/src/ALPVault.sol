@@ -106,6 +106,13 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     bytes32[] internal _activePoolKeys;
     /// @dev poolKey => 1-based index into `_activePoolKeys`.
     mapping(bytes32 => uint256) internal _activePoolKeyIndex;
+    /// @dev nonBaseToken => poolKey designated as that token's "valuation
+    /// pool". The first pool tracked that contains the token wins; any later
+    /// pool that also contains it is skipped during idle-non-base accounting
+    /// to avoid double-counting. Cleared in `_untrackPool` if the orphaned
+    /// pool was the valuation source. O(1) lookup — replaces an earlier
+    /// O(N²) scan.
+    mapping(address => bytes32) internal _valuationPoolByToken;
 
     event AgentUpdated(address indexed previous, address indexed current);
     event GuardianUpdated(address indexed previous, address indexed current);
@@ -315,7 +322,8 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     /// @dev Per-pool value contribution to TAV: idle non-base balance (only
     /// charged once per token, attributed to the lowest-index pool that
     /// contains it) + sum of position values. Always priced through the
-    /// pool's own spot.
+    /// pool's own spot. The slot0 read is amortised across every position
+    /// in the pool (one read per call, not one per position).
     function _poolValueWithIdle(bytes32 key) internal view returns (uint256 value) {
         PoolRegistry.Pool memory pool = _trackedPools[key];
         if (pool.adapter == address(0)) return 0;
@@ -326,7 +334,10 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
 
         uint160 sqrtPriceX96 = adapter_.getSpotSqrtPriceX96(pool);
 
-        if (!_alreadyCounted(nonBase, base, _activePoolKeyIndex[key] - 1)) {
+        // O(1) attribution: only the designated valuation pool for `nonBase`
+        // attributes idle non-base. Matches the historic semantics of
+        // _alreadyCounted but without the per-call O(N) scan.
+        if (_valuationPoolByToken[nonBase] == key) {
             uint256 idleNonBase = IERC20(nonBase).balanceOf(address(this));
             if (idleNonBase > 0) {
                 value += _convertToBase(idleNonBase, sqrtPriceX96, !baseIsToken0);
@@ -336,7 +347,7 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         uint256[] storage ids = _positionIdsByPool[key];
         uint256 numPositions = ids.length;
         for (uint256 j; j < numPositions; ++j) {
-            (uint256 amount0, uint256 amount1) = adapter_.getPositionAmounts(pool, ids[j]);
+            (uint256 amount0, uint256 amount1) = adapter_.getPositionAmountsAtPrice(pool, ids[j], sqrtPriceX96);
             uint256 baseAmount = baseIsToken0 ? amount0 : amount1;
             uint256 nonBaseAmount = baseIsToken0 ? amount1 : amount0;
             value += baseAmount;
@@ -372,6 +383,15 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         // allowlisted; V3 always passes (`hooks == address(0)`).
         if (pool.hooks != address(0)) revert HookedPoolsNotAllowed(poolKey);
 
+        // Bind any agent-supplied existingPositionId (last word of `extra`)
+        // to the supplied poolKey. Without this a buggy or malicious agent
+        // could route increase-liquidity through a position belonging to a
+        // different pool and corrupt tracking.
+        uint256 existingPositionId = _decodeExistingPositionId(extra);
+        if (existingPositionId != 0 && _positionIndex[poolKey][existingPositionId] == 0) {
+            revert PositionNotTracked(poolKey, existingPositionId);
+        }
+
         _trackPoolIfNew(poolKey, pool);
 
         IERC20(pool.token0).forceApprove(pool.adapter, amount0Desired);
@@ -385,17 +405,33 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
 
         _trackPositionIfNew(poolKey, positionId);
 
-        // Per-pool max allocation cap, enforced after the position is added so
-        // we measure against the post-trade allocation.
-        uint256 totalNow = totalAssets();
-        if (totalNow > 0) {
+        // Per-pool max allocation cap measured against the manipulation-proof
+        // book rail (or the post-trade `totalAssets()` floor when book happens
+        // to exceed the floor — pick the smaller, more conservative value).
+        // Using bookTAV here means a flash-loan attacker cannot inflate the
+        // denominator to bypass the cap.
+        uint256 capDenom = bookTAV;
+        uint256 floor_ = totalAssets();
+        if (floor_ < capDenom) capDenom = floor_;
+        if (capDenom > 0) {
             uint256 poolValue = _poolValue(poolKey);
-            if (poolValue * 10_000 > pool.maxAllocationBps * totalNow) {
+            if (poolValue * 10_000 > pool.maxAllocationBps * capDenom) {
                 revert MaxAllocationExceeded(poolKey);
             }
         }
 
         emit LiquidityAdded(poolKey, positionId, amount0Used, amount1Used);
+    }
+
+    /// @dev Lift the trailing `existingPositionId` field out of the agent's
+    /// `extra` payload without re-implementing the entire adapter encoding.
+    /// Both V3 and V4 adapters use
+    /// `abi.encode(int24, int24, uint256, uint256)` so the last word is the
+    /// id. Returns 0 for empty / malformed extra so the call still mints
+    /// fresh positions.
+    function _decodeExistingPositionId(bytes calldata extra) internal pure returns (uint256) {
+        if (extra.length < 128) return 0;
+        return uint256(bytes32(extra[96:128]));
     }
 
     function executeRemoveLiquidity(
@@ -621,6 +657,12 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         whenNotPaused
         nonReentrant
     {
+        // Auto-harvest before pricing the deposit — flushes accrued LP fees
+        // into idle base + bookTAV, so the depositor pays a price that
+        // reflects realised yield rather than missing it on the bookTAV side.
+        // Honest-user UX: the asymmetric MAX(book, market) penalty almost
+        // disappears because book moves up to meet market.
+        _harvestAllPositions();
         // Book rail bumps before the actual transfer/mint, mirroring how
         // value flows through the boundary. The fee component (charged
         // implicitly via _convertToShares) stays in the vault, so the full
@@ -643,6 +685,10 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         if (_lastMintBlock[owner_] == block.number || _lastMintBlock[caller] == block.number) {
             revert SameBlockMintAndRedeem();
         }
+        // Auto-harvest before settling the withdraw — flushes accrued fees
+        // into idle base + bookTAV so the redeemer captures their fair share
+        // of yield even if the agent hasn't run a fee sweep recently.
+        _harvestAllPositions();
         // Auto-unwind: if idle base is short of `assets`, peel pro-rata from
         // every tracked position until either the gap is closed or the loop
         // exhausts itself. Reverts only if the vault genuinely doesn't hold
@@ -664,6 +710,33 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
             bookTAV = bookTAV > bookSlice ? bookTAV - bookSlice : 0;
         }
         super._withdraw(caller, receiver, owner_, assets, shares);
+    }
+
+    // -------- Internal: auto-harvest fees on every user interaction --------
+
+    /// @dev Calls `collectFees` on every tracked position so any accrued LP
+    /// fees flow into the vault as idle balance (and the base-side bumps
+    /// `bookTAV`). Best-effort — a failing position is skipped instead of
+    /// reverting the whole user interaction; the guardian can investigate
+    /// via the events.
+    function _harvestAllPositions() internal {
+        uint256 numPools = _activePoolKeys.length;
+        address base = asset();
+        for (uint256 i; i < numPools; ++i) {
+            bytes32 key = _activePoolKeys[i];
+            if (_orphanedPool[key]) continue;
+            PoolRegistry.Pool memory pool = _trackedPools[key];
+            ILiquidityAdapter adapter_ = ILiquidityAdapter(pool.adapter);
+            uint256[] storage ids = _positionIdsByPool[key];
+            for (uint256 j; j < ids.length; ++j) {
+                try adapter_.collectFees(pool, ids[j]) returns (uint256 a0, uint256 a1) {
+                    if (pool.token0 == base) bookTAV += a0;
+                    else if (pool.token1 == base) bookTAV += a1;
+                } catch {
+                    // intentionally swallowed — see comment above
+                }
+            }
+        }
     }
 
     // -------- Internal: auto unwind on withdraw shortfall --------
@@ -727,7 +800,11 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         _activePoolKeys.push(key);
         _activePoolKeyIndex[key] = _activePoolKeys.length;
         address base = asset();
-        emit PoolTracked(key, pool.token0 == base ? pool.token1 : pool.token0);
+        address nonBase = pool.token0 == base ? pool.token1 : pool.token0;
+        if (_valuationPoolByToken[nonBase] == bytes32(0)) {
+            _valuationPoolByToken[nonBase] = key;
+        }
+        emit PoolTracked(key, nonBase);
     }
 
     function _trackPositionIfNew(bytes32 key, uint256 positionId) internal {
@@ -762,6 +839,16 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         uint256 idx = _activePoolKeyIndex[key];
         if (idx == 0) return;
 
+        // If the pool we're dropping was the valuation source for its
+        // non-base token, clear the mapping. The next pool tracked that
+        // contains the same token will claim the slot.
+        PoolRegistry.Pool memory pool = _trackedPools[key];
+        address base = asset();
+        address nonBase = pool.token0 == base ? pool.token1 : pool.token0;
+        if (_valuationPoolByToken[nonBase] == key) {
+            delete _valuationPoolByToken[nonBase];
+        }
+
         uint256 last = _activePoolKeys.length - 1;
         if (idx - 1 != last) {
             bytes32 lastKey = _activePoolKeys[last];
@@ -776,21 +863,11 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
 
     // -------- Internal: valuation --------
 
-    /// @dev Cheap O(i) check to avoid double-counting an idle non-base
-    /// balance through multiple pools that share the same non-base token.
-    function _alreadyCounted(address nonBase, address base, uint256 currentIndex) internal view returns (bool) {
-        for (uint256 k; k < currentIndex; ++k) {
-            PoolRegistry.Pool memory p = _trackedPools[_activePoolKeys[k]];
-            address other = (p.token0 == base) ? p.token1 : p.token0;
-            if (other == nonBase) return true;
-        }
-        return false;
-    }
-
     /// @dev Value held in `key` (positions only, not idle non-base), used to
     /// enforce per-pool max allocation caps. Idle non-base is excluded so the
     /// cap measures committed liquidity rather than transient balances mid-
-    /// rebalance.
+    /// rebalance. Single slot0 read amortised across all positions in the
+    /// pool.
     function _poolValue(bytes32 key) internal view returns (uint256 value) {
         PoolRegistry.Pool memory pool = _trackedPools[key];
         if (pool.adapter == address(0)) return 0;
@@ -800,7 +877,7 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
 
         uint256[] storage ids = _positionIdsByPool[key];
         for (uint256 j; j < ids.length; ++j) {
-            (uint256 amount0, uint256 amount1) = adapter_.getPositionAmounts(pool, ids[j]);
+            (uint256 amount0, uint256 amount1) = adapter_.getPositionAmountsAtPrice(pool, ids[j], sqrtPriceX96);
             uint256 baseAmount = baseIsToken0 ? amount0 : amount1;
             uint256 nonBaseAmount = baseIsToken0 ? amount1 : amount0;
             value += baseAmount;
