@@ -125,17 +125,58 @@ contract ERC4626ConformanceTest is ERC4626Test {
         assertApproxLeAbs(assetsOut, assetsIn, RT_DELTA);
     }
 
-    /// @dev Skipped — see file header. The dual-rail asymmetry means
-    /// `withdraw(amount_just_deposited)` may require more shares than the
-    /// caller minted. Coverage of the deposit + share-burn relationship is
-    /// preserved by `test_RT_deposit_redeem` above.
-    function test_RT_deposit_withdraw(Init memory, uint256) public override {
-        vm.skip(true);
+    /// @dev Round-trip property under the *no-yield* configuration. With
+    /// `init.yield == 0` the harness leaves bookTAV == marketTAV, so the
+    /// asymmetric MAX/MIN pricing collapses to symmetric and `withdraw(X)`
+    /// after `deposit(X)` requires exactly the shares minted (modulo
+    /// rounding). Yielded configurations are intentionally excluded
+    /// because under dual-rail they make `withdraw(X)` cost MORE shares
+    /// than `deposit(X)` minted — by design (the gap is the yield that
+    /// stays in the vault as donated TAV until the agent harvests it).
+    function test_RT_deposit_withdraw(Init memory init, uint256 assets) public override {
+        vm.assume(init.yield == 0);
+        setUpVault(init);
+        address caller = init.user[0];
+        assets = _bound(assets, 0, _safeMax(caller));
+        _approve(_underlying_, caller, _vault_, assets);
+        vm.prank(caller);
+        uint256 shares = vault.deposit(assets, caller);
+        vm.roll(block.number + 1);
+        vm.prank(caller);
+        uint256 sharesBurned = vault.withdraw(assets, caller, caller);
+        // Burn might be marginally larger than mint due to ceil/floor
+        // crumbs in the share math; upstream uses `assertApproxGeAbs`.
+        assertApproxGeAbs(sharesBurned, shares, RT_DELTA);
     }
 
-    /// @dev Skipped for the same reason as `test_RT_deposit_withdraw`.
-    function test_RT_mint_withdraw(Init memory, uint256) public override {
-        vm.skip(true);
+    /// @dev Same constraint as `test_RT_deposit_withdraw`: requires
+    /// `init.yield == 0` so book and market stay aligned. Other RT tests
+    /// (deposit_redeem, mint_redeem) survive yielded configs because they
+    /// don't ask for an absolute asset-out amount.
+    function test_RT_mint_withdraw(Init memory init, uint256 shares) public override {
+        vm.assume(init.yield == 0);
+        setUpVault(init);
+        address caller = init.user[0];
+        uint256 maxMintBound = _safeMaxMint(caller);
+        if (maxMintBound == 0) return;
+        shares = _bound(shares, 1, maxMintBound);
+        uint256 assetsIn = vault.previewMint(shares);
+        if (assetsIn > _safeMax(caller)) return;
+        _approve(_underlying_, caller, _vault_, assetsIn);
+        vm.prank(caller);
+        vault.mint(shares, caller);
+        vm.roll(block.number + 1);
+        // Standard ERC4626 ceil/floor asymmetry: mint(N) pulls assets rounded
+        // UP for the user; previewWithdraw(those assets) ceils again and may
+        // ask for N+1 shares. Cap the withdraw at maxWithdraw(caller) so the
+        // call never exceeds the share balance we just minted, then assert
+        // the round-trip property on whatever fraction settled.
+        uint256 maxOut = vault.maxWithdraw(caller);
+        uint256 toWithdraw = assetsIn > maxOut ? maxOut : assetsIn;
+        if (toWithdraw == 0) return;
+        vm.prank(caller);
+        uint256 sharesBurned = vault.withdraw(toWithdraw, caller, caller);
+        assertApproxGeAbs(sharesBurned, shares, RT_DELTA);
     }
 
     // -------- Bound-the-fuzz overrides for `mint` / `previewMint` --------

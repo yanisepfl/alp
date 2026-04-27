@@ -23,19 +23,24 @@ interface IPositionGuard {
 ///     vault's `getActivePools`) is required before this is called.
 contract PoolRegistry is Ownable2Step {
     /// @dev Adapter address discriminates V3 vs V4 (and any future versions).
-    /// For V3: `hooks = address(0)`, `tickSpacing` unused, `fee` is the V3
-    /// fee tier.
+    /// For V3: `hooks = address(0)`, `tickSpacing` should match the V3 fee
+    /// tier convention (1 / 10 / 60 / 200) — informational only since the
+    /// V3 adapter routes via the NPM fee field.
     /// For V4: `fee + tickSpacing + hooks` come from the V4 PoolKey.
+    /// Field ordering chosen for storage packing: four addresses in their
+    /// own slots, then a fifth slot holding fee/tickSpacing/maxAllocBps/
+    /// enabled together (24 + 24 + 16 + 8 = 72 bits, fits in one slot).
     struct Pool {
         address adapter;
         address token0;
         address token1;
+        address hooks;
         uint24 fee;
         int24 tickSpacing;
-        address hooks;
         // Cap on the share of vault TVL that may sit in this pool, in basis
-        // points (max 10_000). Enforced at the vault layer.
-        uint256 maxAllocationBps;
+        // points (max 10_000). Enforced at the vault layer. uint16 fits the
+        // 0–10_000 range and packs with neighbouring fields in one slot.
+        uint16 maxAllocationBps;
         bool enabled;
     }
 
@@ -54,7 +59,7 @@ contract PoolRegistry is Ownable2Step {
     event PositionGuardUpdated(address indexed previous, address indexed current);
     event PoolAdded(bytes32 indexed key, Pool pool);
     event PoolRemoved(bytes32 indexed key);
-    event PoolMaxAllocationUpdated(bytes32 indexed key, uint256 maxAllocationBps);
+    event PoolMaxAllocationUpdated(bytes32 indexed key, uint16 maxAllocationBps);
     event PoolEnabledSet(bytes32 indexed key, bool enabled);
 
     error NotGuardian();
@@ -94,6 +99,12 @@ contract PoolRegistry is Ownable2Step {
         if (p.adapter == address(0) || p.token0 == address(0) || p.token1 == address(0)) revert InvalidConfig();
         if (p.token0 >= p.token1) revert InvalidConfig();
         if (p.maxAllocationBps == 0 || p.maxAllocationBps > 10_000) revert InvalidConfig();
+        // tickSpacing must be strictly positive. V4 pools require the live
+        // PoolManager-tracked spacing; V3 pools should pass the convention
+        // for their fee tier (1 / 10 / 60 / 200) — informational only at
+        // the V3 adapter layer but kept consistent so any future tooling
+        // can derive the right step without consulting the adapter.
+        if (p.tickSpacing <= 0) revert InvalidConfig();
         // Hook contracts are blocked at the registry layer too. The vault
         // also rejects them on every routed call (defence in depth) but
         // refusing them at registration time keeps the whitelist itself
@@ -141,7 +152,7 @@ contract PoolRegistry is Ownable2Step {
         positionGuard = newGuard;
     }
 
-    function setPoolMaxAllocation(bytes32 key, uint256 maxAllocationBps) external onlyGuardian {
+    function setPoolMaxAllocation(bytes32 key, uint16 maxAllocationBps) external onlyGuardian {
         if (_poolKeyIndex[key] == 0) revert UnknownPool(key);
         if (maxAllocationBps == 0 || maxAllocationBps > 10_000) revert InvalidConfig();
         _pools[key].maxAllocationBps = maxAllocationBps;

@@ -69,7 +69,7 @@ contract UniV3ForkIntegrationTest is Test {
             token0: token0,
             token1: token1,
             fee: FEE,
-            tickSpacing: 0, // V3 unused
+            tickSpacing: 10, // V3 USDC/WETH 0.05% — informational
             hooks: address(0),
             maxAllocationBps: 10_000,
             enabled: true
@@ -184,7 +184,7 @@ contract UniV3ForkIntegrationTest is Test {
         assertEq(sameId, positionId);
         assertGt(added, 0);
         uint128 liquidityAfter = adapter.getPositionLiquidity(
-            PoolRegistry.Pool(address(0), address(0), address(0), 0, 0, address(0), 0, false), positionId
+            PoolRegistry.Pool(address(0), address(0), address(0), address(0), 0, 0, 0, false), positionId
         );
         // Just confirm liquidity moved in the right direction; the exact value
         // depends on the live spot at fork time.
