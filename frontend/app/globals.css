@@ -41,22 +41,6 @@ button { cursor: pointer; }
 }
 .lift { animation: lift 720ms cubic-bezier(0.6, 0, 0.3, 1) both; }
 
-/* Lockup glides from viewport center to top-left while shrinking — single
-   seamless animation, no crossfade between large/small versions.
-   The "from" transform centers the lockup on viewport (using 50% = half
-   element's natural size) and scales it to ~1.78× so the visual matches the
-   original 64px intro at the 36px natural size. */
-/* Canvas centre = 1150, 650 (2300×1300 / 2). Lockup's resting top-left
-   sits at (460, 212) — 20% × 2300 horizontally, calc(20% − 48px) of 1300
-   vertically (logo bottom 12px above the landscape panel). */
-@keyframes glide-and-shrink {
-  from { transform: translate(calc(1150px - 50% - 460px), calc(650px - 50% - 212px)) scale(1.78); }
-  to   { transform: translate(0, 0) scale(1); }
-}
-.glide-and-shrink {
-  animation: glide-and-shrink 1100ms cubic-bezier(0.83, 0, 0.17, 1) 1500ms both;
-}
-
 /* Soft reveal for delayed UI surfaces (catchphrase, button, badge) */
 @keyframes reveal {
   from { opacity: 0; transform: translateY(8px); }
@@ -64,19 +48,9 @@ button { cursor: pointer; }
 }
 .reveal { animation: reveal 600ms cubic-bezier(0.16, 1, 0.3, 1) both; }
 
-/* Typewriter caret blink */
-@keyframes caret {
-  0%, 100% { opacity: 1; }
-  50%      { opacity: 0; }
-}
-.caret { animation: caret 0.85s steps(1, end) infinite; }
-
-/* Pulsating live indicator dot */
-@keyframes pulse-live {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50%      { opacity: 0.35; transform: scale(0.9); }
-}
-.pulse-live { animation: pulse-live 1.4s ease-in-out infinite; }
+/* The skip-intro override (`.settle, .lift, .reveal { animation: none
+   !important }`) is injected at runtime by the inline script in
+   app/layout.tsx when localStorage flags the intro as already seen. */
 
 /* Hovering the catchphrase link reveals an outer glow on the landscape —
    a blurred copy of the image itself bleeding outward. Pure CSS transitions
@@ -93,231 +67,140 @@ main:has(.catchphrase-portal:hover) .scenery-glow {
   transform: scale(1);
 }
 
-/* Strategy viz — Phase 2.
-   Random-walk price line scrolls left, the range band breathes through
-   stepped volatility regimes, and token particles stream out continuously
-   as fees while inbound rebalance particles fly in at regime boundaries.
-   All seven animations share a 16sphase-locked loop with seamless 0%==100%
-   endpoints so the cycle never visibly resets. */
+/* Strategy viz — three CSS animations make up the simulation:
+     1. price-drift: the random-walk price line scrolls left
+     2. band-volatility: NARROW Bollinger band steps through rebalance moments
+     3. band-wide-volatility: WIDE Bollinger band, fewer/later rebalances
+   All share a 16s phase-locked loop with seamless 0%==100% endpoints so
+   the cycle never visibly resets. */
 
 /* Price polyline: linear horizontal scroll. The path is rendered twice
    (one copy translated +432 viewBox-units), so translateX(-432px) lands
-   the second copy exactly where the first started — seamless loop.
-   Explicit pixels (not -50%) because in SVG, CSS-percentage transforms
-   resolve against the viewBox by default, not the element's bounding box,
-   and we want the latter. */
+   the second copy exactly where the first started — seamless loop. */
 @keyframes price-drift {
   from { transform: translateX(0); }
   to   { transform: translateX(-432px); }
 }
 
 /* WIDE range band: macro envelope, CAUSAL reactions only — rebalances
-   trigger AFTER the right-edge price has clearly moved, with hysteresis.
-   Wide reacts even later than narrow (more anti-thrash, fewer rebalances).
-   Always wide enough to stay in-range during the lag period. */
+   trigger AFTER the right-edge price has clearly moved, with hysteresis. */
 @keyframes band-wide-volatility {
-  0%   { transform: translateY(0px)   scaleY(2.40); }   /* recently rebalanced after peak passed */
-  18%  { transform: translateY(18px)  scaleY(2.20); }   /* slow drift to calm regime as price normalises */
-  80%  { transform: translateY(18px)  scaleY(2.20); }   /* still calm at right edge — no signal yet */
-  90%  { transform: translateY(18px)  scaleY(2.20); }   /* breakout 5% in, anti-thrash counter still incrementing */
-  93%  { transform: translateY(-15px) scaleY(2.70); }   /* AFTER 3% of confirmed vol — rebalance fires */
+  0%   { transform: translateY(0px)   scaleY(2.40); }
+  18%  { transform: translateY(18px)  scaleY(2.20); }
+  80%  { transform: translateY(18px)  scaleY(2.20); }
+  90%  { transform: translateY(18px)  scaleY(2.20); }
+  93%  { transform: translateY(-15px) scaleY(2.70); }
   98%  { transform: translateY(-15px) scaleY(2.70); }
-  100% { transform: translateY(0px)   scaleY(2.40); }   /* matches 0% (post-rebalance settled state) */
+  100% { transform: translateY(0px)   scaleY(2.40); }
 }
 
 /* NARROW range band: CAUSAL Bollinger. The agent only sees price up to
-   "now" (right edge); rebalance trigger requires the EWMA-σ to break past
-   threshold AND a 2-3% anti-thrash hysteresis window before firing. So the
-   band reacts AFTER the move, with visible lag — that's the realistic LP
-   behavior, not prediction.
-   Trajectory of right-edge price y (what the agent observes):
-     - 0%: y=124 (recovering from previous-cycle peak)
-     - 5-80%: y drifts up to 140-156 (calm)
-     - 85-90%: y drops sharply 110→100→91 (breakout entering right edge)
-     - 91%: agent has now seen 6% of confirmed vol → rebalance fires
-     - 95%: y=96 (band at peak position, descent visible)
-     - 99%: y=124 (price recovered → second rebalance back)
-     - 100%: matches 0% */
+   "now" (right edge); rebalance fires after the EWMA-σ break + an anti-
+   thrash hysteresis window — so the band reacts AFTER the move with
+   visible lag (real LP behaviour, not prediction). */
 @keyframes band-volatility {
-  0%   { transform: translateY(-4px)  scaleY(0.60); }   /* post-rebalance settled */
+  0%   { transform: translateY(-4px)  scaleY(0.60); }
   5%   { transform: translateY(10px)  scaleY(0.55); }
-  14%  { transform: translateY(24px)  scaleY(0.55); }   /* calm period entered */
+  14%  { transform: translateY(24px)  scaleY(0.55); }
   30%  { transform: translateY(22px)  scaleY(0.55); }
   50%  { transform: translateY(28px)  scaleY(0.55); }
   75%  { transform: translateY(23px)  scaleY(0.55); }
-  82%  { transform: translateY(20px)  scaleY(0.55); }   /* still calm — no signal yet */
-  88%  { transform: translateY(18px)  scaleY(0.55); }   /* hysteresis counter incrementing */
-  91%  { transform: translateY(-15px) scaleY(0.65); }   /* AFTER move confirmed — rebalance fires */
-  95%  { transform: translateY(-28px) scaleY(0.70); }   /* tracking peak / descent */
-  99%  { transform: translateY(-3px)  scaleY(0.60); }   /* second rebalance as price recovered */
+  82%  { transform: translateY(20px)  scaleY(0.55); }
+  88%  { transform: translateY(18px)  scaleY(0.55); }
+  91%  { transform: translateY(-15px) scaleY(0.65); }
+  95%  { transform: translateY(-28px) scaleY(0.70); }
+  99%  { transform: translateY(-3px)  scaleY(0.60); }
   100% { transform: translateY(-4px)  scaleY(0.60); }
 }
 
-/* USDC fee particle: emits during 0–50% of loop (price-up phase). LP
-   positions earn the stable side when price rises, so USDC is what
-   accrues. Particle drifts up-right out of the chart, fading. Dormant
-   in the second half of the cycle. */
-@keyframes stream-usdc-out {
-  0%   { transform: translate(0, 0); opacity: 0; }
-  6%   { opacity: 1; }
-  35%  { transform: translate(38px, -28px); opacity: 1; }
-  50%  { transform: translate(70px, -54px); opacity: 0; }
-  50.01%, 100% { transform: translate(0, 0); opacity: 0; }
-}
+/* Animation helpers — bands snap discretely between keyframes via
+   steps(1, end); each keyframe = a discrete rebalance event. */
+.animate-price-drift          { animation: price-drift          16s linear infinite; }
+.animate-band-volatility      { transform-box: fill-box; transform-origin: 50% 50%; animation: band-volatility      16s steps(1, end) infinite; }
+.animate-band-wide-volatility { transform-box: fill-box; transform-origin: 50% 50%; animation: band-wide-volatility 16s steps(1, end) infinite; }
 
-/* ETH fee particle: emits during 50–100% (price-down phase). LP positions
-   earn the volatile side when price falls. Particle drifts down-right
-   to visually distinguish from the USDC stream. */
-@keyframes stream-eth-out {
-  0%, 49.99% { transform: translate(0, 0); opacity: 0; }
-  50%  { transform: translate(0, 0); opacity: 0; }
-  56%  { opacity: 1; }
-  85%  { transform: translate(36px, 30px); opacity: 1; }
-  100% { transform: translate(68px, 56px); opacity: 0; }
-}
-
-/* USDC inbound rebalance pulse: at the 25% regime boundary (price up,
-   medium → high vol). Particle starts at lower-left of the viz (the
-   direction of the portfolio pies in the card) and travels into the
-   chart center, dissolving as the band expands. */
-@keyframes rebalance-in-usdc {
-  0%, 19.99%  { transform: translate(-90px, 70px) scale(0.7); opacity: 0; }
-  22%         { opacity: 1; }
-  28%         { transform: translate(0, 0) scale(1); opacity: 0; }
-  28.01%, 100% { transform: translate(-90px, 70px) scale(0.7); opacity: 0; }
-}
-
-/* ETH inbound rebalance pulse: at the 75% regime boundary (price down,
-   high → low vol). Mirrors the USDC inbound but offset to 75% of loop. */
-@keyframes rebalance-in-eth {
-  0%, 69.99%  { transform: translate(-90px, 70px) scale(0.7); opacity: 0; }
-  72%         { opacity: 1; }
-  78%         { transform: translate(0, 0) scale(1); opacity: 0; }
-  78.01%, 100% { transform: translate(-90px, 70px) scale(0.7); opacity: 0; }
-}
-
-/* Agent dot: pulses bright at each regime boundary (25% and 75%) to
-   telegraph that the agent is acting. Idle (0.4 opacity) outside those
-   windows. 0% and 100% match for seamless loop. */
-@keyframes agent-flash {
-  0%, 22%, 28%, 72%, 78%, 100% { opacity: 0.4; }
-  25%, 75%                     { opacity: 1.0; }
-}
-
-/* Animation helper classes. All run 9s, infinite. */
-.animate-price-drift       { animation: price-drift       16s linear infinite; }
-/* Bands snap discretely between keyframe values via steps(1, end). Each
-   keyframe = a discrete rebalance event, no smooth interpolation. The JS
-   metric bars then catch every snap as a real LVR event via the per-frame
-   Δcenter detected through getComputedStyle. */
-.animate-band-volatility       { transform-box: fill-box; transform-origin: 50% 50%; animation: band-volatility       16s steps(1, end) infinite; }
-.animate-band-wide-volatility  { transform-box: fill-box; transform-origin: 50% 50%; animation: band-wide-volatility  16s steps(1, end) infinite; }
-.animate-stream-usdc-out   { animation: stream-usdc-out   16s linear infinite; }
-.animate-stream-eth-out    { animation: stream-eth-out    16s linear infinite; }
-.animate-rebalance-in-usdc { animation: rebalance-in-usdc 16s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
-.animate-rebalance-in-eth  { animation: rebalance-in-eth  16s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
-.animate-agent-flash       { animation: agent-flash       16s ease-in-out infinite; }
-
-/* Pause every animation when the viz is hovered so the user can inspect
-   the frame statically. */
+/* Pause the viz when hovered so the user can inspect a frame statically. */
 .strategy-viz:hover .animate-price-drift,
 .strategy-viz:hover .animate-band-volatility,
-.strategy-viz:hover .animate-band-wide-volatility,
-.strategy-viz:hover .animate-stream-usdc-out,
-.strategy-viz:hover .animate-stream-eth-out,
-.strategy-viz:hover .animate-rebalance-in-usdc,
-.strategy-viz:hover .animate-rebalance-in-eth,
-.strategy-viz:hover .animate-agent-flash {
+.strategy-viz:hover .animate-band-wide-volatility {
   animation-play-state: paused;
 }
 
-/* Metric bars driven by the right-edge price + actual band rebalance
-   moments. Two bars total:
-
-   TOP bar — single bipolar fill: Net = Fees − LVR (instantaneous rate).
-     Fills RIGHT (green) when fees > LVR (most of cycle).
-     Fills LEFT  (red)   when LVR > fees (the rebalance windows).
-   Phase-locked to band rebalances:
-     - 88–91%: narrow rebalances UP   → LVR realised, fees still 0  → RED
-     - 91–93%: wide rebalances UP     → LVR adds, fees recovering    → still red, smaller
-     - 93–96%: both in-range, peak vol → fees explode > LVR          → BIG GREEN
-     - 96–99%: narrow rebalances back → small LVR, fees normalising  → green
-     - 99–100%: wide rebalances back  → small LVR                    → near zero
-
-   BOTTOM bar — cumulative Net Profit. Single direction (left→right),
-   monotonically growing through the cycle with brief stalls during
-   out-of-range and a tiny dip when LVR is realised, then accelerated
-   growth during the fee harvest. Snaps back at 100% (next 24h begins). */
-
-/* Bars derived from a 0.5%-resolution simulation of fee/LVR/net evolution.
-   Sharp keyframes at depth-transition boundaries (81.4→81.5%, 89.9→90.0%,
-   90.4→90.5%, 92.4→92.5%) force step-changes — no smoothing of moments
-   that should be discrete. */
-@keyframes bar-net-instant {
-  0%     { left: 50%;             right: calc(50% - 30.70%); background: rgba(74,222,128,0.85); }
-  0.5%   { left: 50%;             right: calc(50% - 25.38%); background: rgba(74,222,128,0.85); }
-  10.5%  { left: 50%;             right: calc(50% - 31.11%); background: rgba(74,222,128,0.85); }
-  40.5%  { left: 50%;             right: calc(50% - 34.17%); background: rgba(74,222,128,0.85); }
-  50.5%  { left: 50%;             right: calc(50% - 30.83%); background: rgba(74,222,128,0.85); }
-  80.5%  { left: 50%;             right: calc(50% - 43.55%); background: rgba(74,222,128,0.85); }
-  81.4%  { left: 50%;             right: calc(50% - 43.55%); background: rgba(74,222,128,0.85); }
-  81.5%  { left: 50%;             right: calc(50% -  9.78%); background: rgba(74,222,128,0.85); }
-  88.5%  { left: calc(50% - 28.01%); right: 50%;            background: rgba(239,68,68,0.85); }
-  89.9%  { left: calc(50% - 28.01%); right: 50%;            background: rgba(239,68,68,0.85); }
-  90.0%  { left: calc(50% - 37.99%); right: 50%;            background: rgba(239,68,68,0.85); }
-  90.4%  { left: calc(50% - 37.99%); right: 50%;            background: rgba(239,68,68,0.85); }
-  90.5%  { left: calc(50% - 45.00%); right: 50%;            background: rgba(239,68,68,0.85); }
-  91.5%  { left: calc(50% - 18.23%); right: 50%;            background: rgba(239,68,68,0.85); }
-  92.4%  { left: calc(50% - 18.23%); right: 50%;            background: rgba(239,68,68,0.85); }
-  92.5%  { left: 50%;             right: calc(50% -  6.33%); background: rgba(74,222,128,0.85); }
-  93.5%  { left: 50%;             right: calc(50% - 21.52%); background: rgba(74,222,128,0.85); }
-  98.5%  { left: 50%;             right: calc(50% -  5.92%); background: rgba(74,222,128,0.85); }
-  99.5%  { left: 50%;             right: calc(50% - 24.05%); background: rgba(74,222,128,0.85); }
-  100%   { left: 50%;             right: calc(50% - 30.70%); background: rgba(74,222,128,0.85); }
-}
-
-@keyframes bar-net-cumulative {
-  0%     { width:  1.00%; }
-  11%    { width: 11.00%; }
-  19.5%  { width: 21.00%; }
-  28.5%  { width: 31.00%; }
-  37.5%  { width: 41.00%; }
-  45.5%  { width: 51.00%; }
-  54%    { width: 61.00%; }
-  63%    { width: 71.00%; }
-  72%    { width: 81.00%; }
-  80.5%  { width: 91.00%; }
-  90.5%  { width: 91.00%; }   /* plateau: breakout window stalls growth */
-  99.5%  { width: 95.00%; }
-  99.9%  { width: 95.00%; }
-  100%   { width:  1.00%; }   /* loop reset: next 24h begins */
-}
-
-/* Bar fills are now driven by JavaScript (requestAnimationFrame in
-   MetricBars). The keyframes above are kept for documentation but are not
-   referenced — the .animate-bar-* classes are gone. JS reads the same
-   keyframe arrays for price + narrow + wide bands and computes fees, LVR,
-   and net live, so what shows in the bars matches what's visible on the
-   chart frame-by-frame. */
-
-/* Reduced motion: kill every animation, hide particles entirely (their
-   meaning depends on motion), park the band at medium volatility. */
+/* Reduced motion: kill the strategy viz animations, park the bands at a
+   neutral mid-volatility scale. */
 @media (prefers-reduced-motion: reduce) {
   .animate-price-drift,
   .animate-band-volatility,
-  .animate-band-wide-volatility,
-  .animate-stream-usdc-out,
-  .animate-stream-eth-out,
-  .animate-rebalance-in-usdc,
-  .animate-rebalance-in-eth,
-  .animate-agent-flash {
+  .animate-band-wide-volatility {
     animation: none !important;
   }
   .animate-band-volatility { transform: scaleY(1); }
   .animate-band-wide-volatility { transform: scaleY(1.5); }
-  .animate-stream-usdc-out,
-  .animate-stream-eth-out,
-  .animate-rebalance-in-usdc,
-  .animate-rebalance-in-eth { opacity: 0; }
-  .animate-agent-flash { opacity: 1; }
 }
+
+/* Stack preview — diagonal wave across the active panel. Each cell is
+   a small dot rendered as its own DOM element; React assigns each an
+   animation-delay of (col + row) * stagger, so the brightness pulse
+   propagates diagonally from top-left to bottom-right and loops.
+   The opacity curve holds dim for most of the cycle and only spikes
+   briefly around the peak — that narrows the bright span across the
+   grid so the wave reads as a focused stripe rather than a uniform
+   shimmer. */
+@keyframes ai-wave {
+  0%, 42%, 58%, 100% { opacity: 0.30; }
+  50%                { opacity: 0.85; }
+}
+.ai-wave-cell { animation: ai-wave 2.4s ease-in-out infinite; }
+
+/* Context-phase bullet list — scrolls linearly upward through the
+   active panel. The whole 8-row column translates from below the
+   panel (50px = panel height) to above it (-128px = list height).
+   Linear timing keeps the scroll uniform; the typing inside is
+   independent and faster on average, so lines are typed before they
+   reach the top. forwards holds the final state once scroll ends. */
+@keyframes ai-context-flow {
+  from { transform: translateY(50px); }
+  to   { transform: translateY(-128px); }
+}
+.ai-context-flow { animation: ai-context-flow 2.9s linear forwards; }
+
+/* StackViz panel pulse — applied to the panel that matches the active
+   phase in the StackPreview row. The keyframes override the panel's
+   inline background + boxShadow, brightening both at the peak so the
+   panel reads as "working". When the panel transitions to its green
+   success state the React side flips off this class, the keyframe
+   stops applying, and the inline green styles take over via their own
+   transition. */
+@keyframes stackviz-panel-pulse {
+  0%, 100% {
+    background: rgba(255, 255, 255, 0.05);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+  }
+  50% {
+    background: rgba(255, 255, 255, 0.10);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.32);
+  }
+}
+.stackviz-panel-pulse {
+  animation: stackviz-panel-pulse 2.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-wave-cell,
+  .ai-context-flow,
+  .stackviz-panel-pulse { animation: none !important; }
+}
+
+/* Landing alps lockup — slides up from behind the scenery panel on
+   entry, back down behind it on exit (lockup z-10 < panel z-15). */
+@keyframes lockup-enter {
+  from { transform: translateY(120px); opacity: 1; }
+  to   { transform: translateY(0);     opacity: 1; }
+}
+.lockup-enter { animation: lockup-enter 760ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+@keyframes lockup-exit {
+  from { transform: translateY(0);     opacity: 1; }
+  to   { transform: translateY(120px); opacity: 1; }
+}
+.lockup-exit { animation: lockup-exit 760ms cubic-bezier(0.16, 1, 0.3, 1) forwards; }

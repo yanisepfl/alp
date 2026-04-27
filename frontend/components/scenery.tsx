@@ -28,8 +28,9 @@ export function Scenery({ muted = false }: { muted?: boolean }) {
         />
       </div>
 
-      {/* Main landscape panel. Desaturates + dims when `muted` is true so
-          overlaid Learn-more copy reads cleanly on top. */}
+      {/* Main landscape panel. Desaturates + dims when `muted` is true.
+          z-15 so the alps lockup (z-10) tucks behind during its
+          slide-up entry / slide-down exit. */}
       <div
         aria-hidden
         className="scenery-panel pointer-events-none absolute overflow-hidden"
@@ -39,6 +40,7 @@ export function Scenery({ muted = false }: { muted?: boolean }) {
           bottom: "20%",
           left: "20%",
           borderRadius: "20px",
+          zIndex: 15,
           filter: muted
             ? "grayscale(0.85) saturate(0.35) contrast(0.85) brightness(0.55)"
             : "none",

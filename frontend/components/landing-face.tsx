@@ -2,10 +2,18 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 const WORDS = "Start earning from onchain volume".split(" ");
 const ARROW_DELAY_MS = 2600 + (WORDS.length - 1) * 180 + 600 + 80;
+
+// Cmd/ctrl/shift/alt-click and middle-click bypass our click handlers
+// so they still behave as normal links.
+function isPlainLeftClick(e: React.MouseEvent): boolean {
+  return !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey && e.button === 0;
+}
 
 const MASK_STYLE = {
   backgroundColor: "#fff",
@@ -25,7 +33,7 @@ const DEPOSITS = [
   { slug: "ETH",  src: "/tokens/eth.png",      color: "#627EEA", amount: "$850K"  },
   { slug: "BTC",  src: "/tokens/btc.png",      color: "#F7931A", amount: "$620K"  },
   { slug: "USDT", src: "/tokens/usdt.png",     color: "#26A17B", amount: "$245K"  },
-  { slug: "UNI",  src: "/tokens/uni.png",      color: "#FF007A", amount: "$145K"  },
+  { slug: "UNI",  src: "/tokens/svg/uni.svg",  color: "#FF007A", amount: "$145K"  },
 ];
 
 // Inline `color` is intentionally omitted -color must come from a Tailwind
@@ -39,10 +47,21 @@ const PILL_BOX = {
   lineHeight: 1,
 };
 
-function CatchphraseLink({ disabled = false }: { disabled?: boolean }) {
+function CatchphraseLink({
+  disabled = false,
+  onAppNav,
+}: {
+  disabled?: boolean;
+  onAppNav?: () => void;
+}) {
   return (
     <Link
       href="/app"
+      onClick={(e) => {
+        if (disabled || !isPlainLeftClick(e)) return;
+        e.preventDefault();
+        onAppNav?.();
+      }}
       className="catchphrase-portal group pointer-events-auto inline-flex items-center gap-4"
       style={{
         textDecoration: "none",
@@ -217,85 +236,1579 @@ function TotalDeposits() {
   );
 }
 
-// "Built on top of" bars under the Summary card. Each entry maps to a
-// prize track from ETHGlobal Open Agents that ALP integrates with. Colored
-// rounded-square chip on the left (white glyph), name + descriptor stacked
-// to the right.
-const BUILT_ON = [
-  { name: "Uniswap",   label: "Best Uniswap API integration",    color: "#FF007A", glyph: "U" },
-  { name: "KeeperHub", label: "Best agent execution layer use",  color: "#00D26A", glyph: "K" },
-  { name: "ENS",       label: "Best ENS integration for agents", color: "#5298FF", glyph: "E" },
+// "Built on top of" stack — 3 prize tracks. Two architectural layers:
+//   AGENT layer: Gensyn (P2P comms between agent nodes) + KeeperHub
+//                (trustless keeper that fires signed agent actions).
+//   EXECUTION layer: Uniswap v4 hooks where the vault holds positions.
+// Brand colour is used ONLY in the small chip, never as a row background
+// (matches Vault flow's vocabulary — coloured chips on neutral chrome).
+type BuiltOnEntry = {
+  name: string;
+  role: string;
+  color: string;
+  logoColor?: string;
+  logoSrc?: string;
+  logoSvg?: React.ReactNode;
+  logoSvgViewBox?: string;
+  link?: string;
+};
+const BUILT_ON: Record<"Uniswap" | "KeeperHub" | "Gensyn" | "X", BuiltOnEntry> = {
+  X: {
+    name: "X",
+    role: "social context",
+    color: "#000000",
+    logoColor: "#FFFFFF",
+    link: "https://x.com",
+    logoSvgViewBox: "0 0 24 24",
+    logoSvg: (
+      <path
+        fill="currentColor"
+        d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"
+      />
+    ),
+  },
+  Uniswap: {
+    name: "Uniswap",
+    role: "v4 hook + position manager",
+    color: "#FF007A",
+    logoSrc: "/tokens/svg/uni.svg",
+    link: "https://developers.uniswap.org/docs",
+  },
+  KeeperHub: {
+    name: "KeeperHub",
+    role: "trustless trigger",
+    color: "#00FF4F",
+    logoColor: "#0B2A6B",
+    link: "https://keeperhub.com",
+    logoSvgViewBox: "0 0 318 500",
+    logoSvg: (
+      <>
+        <path d="M317.77 204.279H226.98V295.069H317.77V204.279Z" fill="currentColor" />
+        <path d="M204.28 90.79V0H113.49V90.79C113.456 120.879 101.488 149.725 80.2115 171.002C58.9355 192.278 30.0889 204.246 0 204.28V295.07C30.0889 295.104 58.9355 307.072 80.2115 328.348C101.488 349.625 113.456 378.471 113.49 408.56V499.35H204.28V408.56C204.28 378.075 197.445 347.977 184.279 320.482C171.113 292.987 151.95 268.793 128.2 249.68C151.948 230.563 171.109 206.367 184.275 178.871C197.441 151.374 204.277 121.276 204.28 90.79Z" fill="currentColor" />
+      </>
+    ),
+  },
+  Gensyn: {
+    name: "Gensyn",
+    role: "P2P node comms",
+    color: "#F3B295",
+    logoColor: "#1A1A1A",
+    link: "https://gensyn.ai",
+    logoSvgViewBox: "0 0 54 54",
+    logoSvg: (
+      <path
+        fillRule="evenodd"
+        clipRule="evenodd"
+        fill="currentColor"
+        d="M53.2794 19.6761h-6.368v-6.4573h-6.3681v-6.45729h-6.3681v-6.438085h-14.1387v6.457305h-6.368v6.45727h-6.36811v6.4573h-6.330175v14.3368h6.368085v6.4573h6.3681v6.4573h6.3681v6.4573h14.1386v-6.4573h6.3681v-6.4573h6.3681v-6.4573h6.3681v-14.3368zm-13.4374 20.0638h-6.368v6.4573h-12.7173v-6.4573h-6.368v-6.4573h-6.36811v-12.8954h6.36811v-6.4573h6.368v-6.45731h12.7173v6.45731h6.368v6.4573h6.3681v12.8954h-6.3681z"
+      />
+    ),
+  },
+};
+
+function StackViz({
+  phaseIndex = -1,
+  innerPhase = "title",
+  completedPhases = new Set<number>(),
+  barFillPercent = 40,
+  poolRatios = [0.5, 0.5, 0.5],
+}: {
+  phaseIndex?: number;
+  innerPhase?: "title" | "list" | "done" | "confirmed";
+  completedPhases?: Set<number>;
+  barFillPercent?: number;
+  poolRatios?: number[];
+} = {}) {
+  const W = 200;
+  const TOP_H = 116;
+  const PANEL_W = 56;
+  const EXEC_H = 74;
+  const GAP = 16;
+  const CHIP = 36;
+
+  // Per-phase highlight state — mirrors the StackPreview row so the
+  // panels (Context / Agent / Execution) and the chip-row visualisation
+  // stay in lockstep with the typing animation on the left.
+  const panelState = (i: number) => {
+    const isActive = i === phaseIndex;
+    const isGreen =
+      completedPhases.has(i) || (isActive && innerPhase === "confirmed");
+    // Only "pulse" the active panel during its working states (title /
+    // list / done) — once green takes over the panel sits steady.
+    return { isPulsing: isActive && !isGreen, isGreen };
+  };
+
+  const TOP_TOTAL = PANEL_W * 3 + GAP * 2;
+  const TOP_OFFSET = (W - TOP_TOTAL) / 2;
+  const ctxLeft = TOP_OFFSET;
+  const ctxRight = ctxLeft + PANEL_W;
+  const agtLeft = ctxRight + GAP;
+  const agtRight = agtLeft + PANEL_W;
+  const execLeft = agtRight + GAP;
+  const execCx = execLeft + PANEL_W / 2;
+  const execTop = TOP_H - EXEC_H;
+
+  const chipArrowY = TOP_H / 2;
+  const elbowY = 12;
+  const ARROW = "rgba(255,255,255,0.62)";
+
+  return (
+    <div style={{ width: W, display: "flex", flexDirection: "column" }}>
+      <div style={{ position: "relative", width: W, height: TOP_H }}>
+        <div style={{ position: "absolute", left: ctxLeft, top: 0 }}>
+          <TopPanel width={PANEL_W} height={TOP_H} label="Context" {...panelState(0)}>
+            <BuiltOnChip entry={BUILT_ON.X} size={CHIP} tooltip="Twitter" />
+            <BuiltOnChip entry={BUILT_ON.Uniswap} size={CHIP} tooltip="Uniswap API" />
+          </TopPanel>
+        </div>
+        <div style={{ position: "absolute", left: agtLeft, top: 0 }}>
+          <TopPanel width={PANEL_W} height={TOP_H} label="Agent" {...panelState(1)}>
+            <BuiltOnChip entry={BUILT_ON.Gensyn} size={CHIP} tooltip="Gensyn AXL" />
+            <BuiltOnChip entry={BUILT_ON.KeeperHub} size={CHIP} tooltip="KeeperHub" />
+          </TopPanel>
+        </div>
+        <div style={{ position: "absolute", left: execLeft, top: execTop }}>
+          <TopPanel width={PANEL_W} height={EXEC_H} label="Execution" {...panelState(2)}>
+            <BuiltOnChip entry={BUILT_ON.Uniswap} size={CHIP} tooltip="Uniswap API" />
+          </TopPanel>
+        </div>
+
+        <svg
+          width={W}
+          height={TOP_H}
+          viewBox={`0 0 ${W} ${TOP_H}`}
+          aria-hidden
+          style={{ position: "absolute", inset: 0, pointerEvents: "none", overflow: "visible" }}
+        >
+          <polyline
+            points={`${(ctxRight + agtLeft) / 2 - 2},${chipArrowY - 3} ${(ctxRight + agtLeft) / 2 + 2},${chipArrowY} ${(ctxRight + agtLeft) / 2 - 2},${chipArrowY + 3}`}
+            fill="none"
+            stroke={ARROW}
+            strokeWidth={1.5}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+
+          <path
+            d={`M${agtRight + 6} ${elbowY} L${execCx - 10} ${elbowY} Q${execCx} ${elbowY} ${execCx} ${elbowY + 10} L${execCx} ${execTop - 9}`}
+            fill="none"
+            stroke="rgba(255,255,255,0.20)"
+            strokeWidth={1.25}
+            strokeDasharray="2 4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <polyline
+            points={`${execCx - 3},${execTop - 9} ${execCx},${execTop - 5} ${execCx + 3},${execTop - 9}`}
+            fill="none"
+            stroke={ARROW}
+            strokeWidth={1.5}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </div>
+
+      <svg
+        width={W}
+        height={44}
+        viewBox={`0 0 ${W} 44`}
+        aria-hidden
+        style={{ display: "block", overflow: "visible" }}
+      >
+        <path
+          d={`M${execCx} 6 L${execCx} 10 Q${execCx} 20 ${execCx - 10} 20 L${W / 2 + 10} 20 Q${W / 2} 20 ${W / 2} 30 L${W / 2} 35`}
+          fill="none"
+          stroke="rgba(255,255,255,0.20)"
+          strokeWidth={1.25}
+          strokeDasharray="2 4"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        <polyline
+          points={`${W / 2 - 3},35 ${W / 2},39 ${W / 2 + 3},35`}
+          fill="none"
+          stroke={ARROW}
+          strokeWidth={1.5}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+
+      <div
+        style={{
+          width: W,
+          background: "rgba(255,255,255,0.05)",
+          backdropFilter: "blur(6px)",
+          WebkitBackdropFilter: "blur(6px)",
+          // Real border (not inset shadow): backdrop-filter clips an inset stroke inside the curve.
+          // border-box keeps outer width = W to stay flush with panels above.
+          border: "1px solid rgba(255,255,255,0.06)",
+          boxSizing: "border-box",
+          borderRadius: 10,
+          padding: 8,
+          display: "flex",
+          alignItems: "center",
+          gap: 14,
+        }}
+      >
+        <HoverChip label="Portfolio">
+          <span
+            aria-hidden
+            style={{
+              width: 52,
+              height: 52,
+              borderRadius: 11,
+              background: "rgba(255,255,255,0.10)",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+            }}
+          >
+            <span aria-hidden style={{ width: 30, height: 30, ...MASK_STYLE }} />
+          </span>
+        </HoverChip>
+
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 5, height: 18 }}>
+            <HoverChip label={USDC_VAULT_ENTRY.name}>
+              {renderChipFace(USDC_VAULT_ENTRY, 18)}
+            </HoverChip>
+            <span
+              aria-hidden
+              style={{
+                flex: 1,
+                height: 12,
+                borderRadius: 4,
+                background: "rgba(255,255,255,0.08)",
+                position: "relative",
+              }}
+            >
+              <span
+                aria-hidden
+                style={{
+                  position: "absolute",
+                  left: 0,
+                  top: 0,
+                  height: "100%",
+                  // Width is driven by the cycle pointer — fills change
+                  // during phase 2's "confirmed" hold; transition gives
+                  // a ~1.5s slide so the bar visibly rebalances.
+                  width: `${barFillPercent}%`,
+                  borderRadius: 4,
+                  background: USDC_VAULT_ENTRY.color,
+                  transition: "width 1500ms cubic-bezier(0.4, 0, 0.2, 1)",
+                }}
+              />
+            </span>
+          </div>
+          <span
+            aria-hidden
+            style={{
+              height: 1,
+              background: "rgba(255,255,255,0.08)",
+              borderRadius: 999,
+            }}
+          />
+          <div style={{ display: "flex", alignItems: "center", gap: 5, height: 18 }}>
+            {POOL_PAIRS.slice(0, 3).map(([l, r], i) => (
+              <PoolPairChip key={i} left={l} right={r} leftRatio={poolRatios[i] ?? 0.5} />
+            ))}
+            <PoolPlus />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Plain-language summary of what the agent has surfaced for each
+// phase of the cycle: Twitter+Uniswap context, internal reasoning, and
+// the resulting onchain actions. Module scope so the typing effect's
+// closure has a stable reference.
+const CONTEXT_BULLETS = [
+  "• ETH bull thesis trending on Twitter",
+  "• 12k posts mention $4K target by Friday",
+  "• Major accounts shifting bullish",
+  "• ETH/USDC volume up 12% in the last hour",
+  "• Liquidity tightening near current price",
+  "• BTC dominance debate intensifying",
+  "• USDT/USDC arbitrage opportunity opening",
+  "• Stablecoin pool fees holding steady",
+];
+const AGENT_BULLETS = [
+  "• ETH momentum confirms bullish bias",
+  "• Volume spike supports tighter ranges",
+  "• USDT/USDC arb worth pursuing now",
+  "• BTC correlation stable, safe to rotate",
+  "• Liquidity squeeze favors concentrated LP",
+  "• Tighten ETH/USDC range to 25 bps",
+  "• Rotate 8% from UNI to BTC pool",
+  "• Hold USDT/USDC peg arb for 20 min",
+];
+const EXECUTION_BULLETS = [
+  "• Pulling ETH/USDC range 2180-2340",
+  "• Burning LP token #48291, claiming fees",
+  "• Swapping 2.4 ETH to USDC at 2287",
+  "• Routing 8% to BTC/USDC pool",
+  "• Minting new range 2270-2305, 25 bps",
+  "• Opening USDT/USDC arb, 4 bps spread",
+  "• Block 18249482, gas 24 gwei",
+  "• Tx 0x9f3a confirmed, 2 blocks",
 ];
 
-function BuiltOnBar({
-  name,
-  label,
-  color,
-  glyph,
+// Per-phase done-state icon. Two states only: a solid default colour
+// while showing alongside the done message or as a preview in
+// upcoming panels, and solid green once the phase is confirmed
+// completed. Pen and Stars icons are fully solid; Performance keeps
+// its outer rectangle at 0.4 for visual hierarchy between the frame
+// and the chart line.
+const PEN_ICON = (
+  <>
+    <path d="M5.493 3.49204L4.547 3.17704L4.23101 2.23005C4.12901 1.92405 3.622 1.92405 3.52 2.23005L3.20401 3.17704L2.25801 3.49204C2.10501 3.54304 2.00101 3.68603 2.00101 3.84803C2.00101 4.01003 2.10501 4.15305 2.25801 4.20405L3.20401 4.51905L3.52 5.46604C3.571 5.61904 3.71401 5.72202 3.87501 5.72202C4.03601 5.72202 4.18001 5.61804 4.23001 5.46604L4.54601 4.51905L5.492 4.20405C5.645 4.15305 5.74901 4.01003 5.74901 3.84803C5.74901 3.68603 5.646 3.54304 5.493 3.49204Z" />
+    <path d="M16.658 12.99L15.395 12.569L14.974 11.306C14.837 10.898 14.162 10.898 14.025 11.306L13.604 12.569L12.341 12.99C12.137 13.058 11.999 13.249 11.999 13.464C11.999 13.679 12.137 13.87 12.341 13.938L13.604 14.359L14.025 15.622C14.093 15.826 14.285 15.964 14.5 15.964C14.715 15.964 14.906 15.826 14.975 15.622L15.396 14.359L16.659 13.938C16.863 13.87 17.001 13.679 17.001 13.464C17.001 13.249 16.862 13.058 16.658 12.99Z" />
+    <path d="M7.75 2.5C8.164 2.5 8.5 2.164 8.5 1.75C8.5 1.336 8.164 1 7.75 1C7.336 1 7 1.336 7 1.75C7 2.164 7.336 2.5 7.75 2.5Z" />
+    <path d="M11.414 2.84802L3.605 10.657C2.742 11.521 2.204 14.063 2.012 15.116C1.968 15.358 2.046 15.607 2.22 15.781C2.362 15.923 2.553 16.001 2.75 16.001C2.794 16.001 2.839 15.997 2.884 15.989C3.937 15.798 6.479 15.26 7.343 14.396L15.152 6.58702C16.182 5.55602 16.182 3.88002 15.152 2.84902C14.154 1.85102 12.412 1.85102 11.414 2.84802Z" />
+  </>
+);
+const STARS_ICON = (
+  <>
+    <path d="M4.743 2.492L3.797 2.17699L3.481 1.22999C3.379 0.923988 2.872 0.923988 2.77 1.22999L2.45399 2.17699L1.508 2.492C1.355 2.543 1.25101 2.686 1.25101 2.848C1.25101 3.01 1.355 3.15299 1.508 3.20399L2.45399 3.51899L2.77 4.466C2.821 4.619 2.964 4.72199 3.125 4.72199C3.286 4.72199 3.43 4.618 3.48 4.466L3.79601 3.51899L4.742 3.20399C4.895 3.15299 4.99899 3.01 4.99899 2.848C4.99899 2.686 4.896 2.543 4.743 2.492Z" />
+    <path d="M8.999 13.9639C8.999 13.1016 9.54881 12.3389 10.3672 12.0669L10.918 11.8833L11.1026 11.3311C11.3692 10.5342 12.1319 10 12.9991 10C13.3584 10 13.6887 10.1096 13.984 10.2732L16.7735 7.5542C16.9776 7.355 17.0518 7.0566 16.963 6.7852C16.8751 6.5137 16.6407 6.316 16.3575 6.2749L11.7384 5.6035L9.67301 1.418C9.41911 0.9063 8.58121 0.9063 8.32731 1.418L6.26191 5.6035L1.64281 6.2749C1.35961 6.3159 1.1252 6.5137 1.0373 6.7852C0.948397 7.0567 1.02271 7.355 1.22681 7.5542L4.5696 10.8125L3.77961 15.4131C3.73171 15.6943 3.847 15.979 4.0775 16.147C4.308 16.314 4.6146 16.3365 4.8675 16.2041L9.00031 14.0322L9.01101 14.0378C9.01001 14.0124 8.999 13.9896 8.999 13.9639Z" />
+    <path d="M15.158 13.49L13.895 13.069L13.474 11.806C13.337 11.398 12.662 11.398 12.525 11.806L12.104 13.069L10.841 13.49C10.637 13.558 10.499 13.749 10.499 13.964C10.499 14.179 10.637 14.37 10.841 14.438L12.104 14.859L12.525 16.122C12.593 16.326 12.785 16.464 13 16.464C13.215 16.464 13.406 16.326 13.475 16.122L13.896 14.859L15.159 14.438C15.363 14.37 15.501 14.179 15.501 13.964C15.501 13.749 15.362 13.558 15.158 13.49Z" />
+    <path d="M14.25 4C14.6642 4 15 3.66421 15 3.25C15 2.83579 14.6642 2.5 14.25 2.5C13.8358 2.5 13.5 2.83579 13.5 3.25C13.5 3.66421 13.8358 4 14.25 4Z" />
+  </>
+);
+const PERFORMANCE_ICON = (
+  <>
+    <path
+      fillOpacity="0.4"
+      d="M3.75 2C2.23079 2 1 3.23079 1 4.75V13.25C1 14.7692 2.23079 16 3.75 16H14.25C15.7692 16 17 14.7692 17 13.25V4.75C17 3.23079 15.7692 2 14.25 2H3.75Z"
+    />
+    <path
+      fillRule="evenodd"
+      clipRule="evenodd"
+      d="M13.5854 5.07916C13.9559 5.2644 14.1061 5.71491 13.9208 6.08539L11.6708 10.5854C11.5484 10.8302 11.3023 10.9889 11.0288 10.9994C10.7553 11.0099 10.4977 10.8706 10.3569 10.6359L9.5158 9.23403L8.15119 11.6221C8.02796 11.8377 7.80594 11.9784 7.5583 11.9977C7.31066 12.017 7.06953 11.9125 6.91436 11.7185L6.47425 11.1684L5.31444 12.4939C5.04168 12.8056 4.56786 12.8372 4.25613 12.5644C3.9444 12.2917 3.91282 11.8178 4.18558 11.5061L5.93558 9.5061C6.0818 9.33899 6.29455 9.24527 6.51654 9.25016C6.73854 9.25506 6.94695 9.35807 7.08566 9.53146L7.39631 9.91978L8.84883 7.37788C8.98095 7.14667 9.22576 7.00286 9.49203 7.00002C9.75831 6.99719 10.0061 7.13577 10.1431 7.36411L10.9402 8.69256L12.5792 5.41457C12.7644 5.04409 13.2149 4.89392 13.5854 5.07916Z"
+    />
+    <path d="M4.25 6C4.664 6 5 5.664 5 5.25C5 4.836 4.664 4.5 4.25 4.5C3.836 4.5 3.5 4.836 3.5 5.25C3.5 5.664 3.836 6 4.25 6Z" />
+    <path d="M6.75 6C7.164 6 7.5 5.664 7.5 5.25C7.5 4.836 7.164 4.5 6.75 4.5C6.336 4.5 6 4.836 6 5.25C6 5.664 6.336 6 6.75 6Z" />
+  </>
+);
+
+const PHASE_CONFIGS: {
+  title: string;
+  bullets: string[];
+  doneText: string;
+  icon: React.ReactNode;
+}[] = [
+  {
+    title: "Gathering context...",
+    bullets: CONTEXT_BULLETS,
+    doneText: "Context.md updated",
+    icon: PEN_ICON,
+  },
+  {
+    title: "Thinking...",
+    bullets: AGENT_BULLETS,
+    doneText: "Strategy.md updated",
+    icon: STARS_ICON,
+  },
+  {
+    title: "Executing...",
+    bullets: EXECUTION_BULLETS,
+    doneText: "Position rebalanced",
+    icon: PERFORMANCE_ICON,
+  },
+];
+
+// USDC vault bar fill — 3 values cycled across 3 cycles. The first
+// and last are identical so after a full loop the bar lands back where
+// it started; the middle two are the "rebalanced" intermediate states.
+const BAR_VALUES = [40, 56, 22];
+
+// Per-pool left-token balance ratio across the 3-cycle loop.
+// Shape: number[poolIndex][cycleIndex] — three pools (ETH/USDC,
+// BTC/USDC, USDC/USDT) × three cycles. Cycle 0 is the 0.5/0.5 norm
+// for every pool; cycles 1 and 2 drift to plausible LP imbalances.
+// Because barIdx wraps 0→1→2→0, the chips return to the norm after
+// every full loop. Each pool follows its own pattern so the three
+// chips don't move in lockstep.
+const POOL_RATIOS: number[][] = [
+  [0.5, 0.58, 0.46], // ETH/USDC — ETH up then under
+  [0.5, 0.44, 0.62], // BTC/USDC — BTC under then over
+  [0.5, 0.52, 0.48], // USDC/USDT — gentle peg drift
+];
+
+// Three preview panels animating through the Context → Agent →
+// Execution cycle. The active phase's panel grows from a square to
+// fill the remaining row width, surfacing a title; the inactive two
+// stay square. ResizeObserver measures the row so the active width
+// adapts to the text column's actual rendered width. Cycle state
+// (phaseIndex / innerPhase / completedPhases) is owned by the parent
+// `StackBody` so the StackViz on the right can share it; this
+// component is purely presentational for the preview row.
+function StackPreview({
+  open,
+  phaseIndex,
+  innerPhase,
+  completedPhases,
 }: {
-  name: string;
-  label: string;
-  color: string;
-  glyph: string;
+  open: boolean;
+  phaseIndex: number;
+  innerPhase: "title" | "list" | "done" | "confirmed";
+  completedPhases: Set<number>;
 }) {
+  const rowRef = useRef<HTMLDivElement>(null);
+  const [rowWidth, setRowWidth] = useState(0);
+
+  useLayoutEffect(() => {
+    if (!rowRef.current) return;
+    const el = rowRef.current;
+    const measure = () => setRowWidth(el.getBoundingClientRect().width);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // Typing animation — when the "list" phase starts, walk through the
+  // joined bullet text one character at a time. Base typing is fast
+  // (a few ms per letter) but each char rolls a 5% chance of a
+  // "thinking" lag, plus longer beats on newlines and punctuation, so
+  // the cadence varies naturally without ever being mechanical.
+  const [typedChars, setTypedChars] = useState(0);
+  useEffect(() => {
+    if (!open || innerPhase !== "list") {
+      setTypedChars(0);
+      return;
+    }
+    const fullText = PHASE_CONFIGS[phaseIndex].bullets.join("\n");
+    let idx = 0;
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      // Batch 1–2 chars per tick. Below ~4ms single-char delays the
+      // browser's timer minimum kicks in, so batching keeps typing
+      // visibly fast without monotony. Random batch size + variable
+      // delays preserve a streaming-like rhythm.
+      const batch = 1 + Math.floor(Math.random() * 2);
+      idx = Math.min(idx + batch, fullText.length);
+      setTypedChars(idx);
+      if (idx >= fullText.length) return;
+      const justTyped = fullText[idx - 1];
+      let delay: number;
+      if (justTyped === "\n") delay = 10 + Math.random() * 21;
+      else if (/[.,;:!?$/]/.test(justTyped)) delay = 3 + Math.random() * 11;
+      else delay = 1 + Math.random() * 5.5;
+      // Occasional "thinking" lag — adds a longer pause to ~5% of
+      // ticks so the typing rhythm has natural irregularity.
+      if (Math.random() < 0.05) delay += 19 + Math.random() * 34;
+      timeoutId = setTimeout(tick, delay);
+    };
+    timeoutId = setTimeout(tick, 60);
+    return () => clearTimeout(timeoutId);
+  }, [innerPhase, open, phaseIndex]);
+
+  // Gate the done-area exit transitions. On entry to "done", styles
+  // (text width, opacity, gap) snap to their done values with no
+  // transition (avoids the icon-shift jump while the wrapper fades
+  // in). After 100ms — once the entry has painted — transitions are
+  // re-enabled, so the eventual done → check transition (when the
+  // phase advances) animates text fade + gap collapse + icon green
+  // together as a single combined motion. We deliberately don't
+  // reset readyToExit when innerPhase leaves "done": flipping the
+  // transition rule back to "none" mid-flight would cancel the very
+  // animation we're trying to play.
+  const [readyToExit, setReadyToExit] = useState(false);
+  useEffect(() => {
+    if (innerPhase !== "done") return;
+    setReadyToExit(false);
+    const id = setTimeout(() => setReadyToExit(true), 100);
+    return () => clearTimeout(id);
+  }, [innerPhase]);
+
+  const SQUARE = 42;
+  const CHEVRON_W = 4;
+  const GAP = 6;
+  const activeWidth = Math.max(
+    SQUARE,
+    rowWidth - 2 * SQUARE - 2 * CHEVRON_W - 4 * GAP,
+  );
+  const titles = PHASE_CONFIGS.map((p) => p.title);
+  // CONTEXT_BULLETS is at module scope (above this component) so the
+  // typing effect's setTimeout closure has a stable reference.
+  const ease = "cubic-bezier(0.4, 0, 0.2, 1)";
+  const dur = 800;
+
+  // Pre-sliced bullet text for the typed list rendering. Scroll is
+  // CSS-driven (.ai-context-flow), so the column glides linearly
+  // upward over 6s; typing is calibrated to finish well before that,
+  // so lines reach the top fully typed.
+  const visibleText =
+    innerPhase === "list"
+      ? PHASE_CONFIGS[phaseIndex].bullets.join("\n").slice(0, typedChars)
+      : "";
+
+  // Cell grid for the diagonal wave. Each dot is 1px (integer pixel
+  // — the previous 1.5px size combined with fractional offsetX/Y
+  // values from the centring math made some dots straddle pixel
+  // boundaries, so the browser anti-aliased them as 1px in some
+  // positions and 2px in others). Centred at the 8px cell midpoint,
+  // with animation-delay = (col + row) * 30ms so the brightness
+  // pulse rolls from top-left to bottom-right. PAD cells extend past
+  // the panel — overflow:hidden masks the overhang. Math.round on
+  // each x/y locks dots to the integer pixel grid.
+  const CELL = 8;
+  const DOT = 1;
+  const PAD = 2;
+  const baseCols = activeWidth > 0 ? Math.floor(activeWidth / CELL) : 0;
+  const baseRows = Math.floor(SQUARE / CELL);
+  const cols = baseCols + 2 * PAD;
+  const rows = baseRows + 2 * PAD;
+  const offsetX = (activeWidth - cols * CELL) / 2;
+  const offsetY = (SQUARE - rows * CELL) / 2;
+  const cells: { x: number; y: number; delay: number }[] = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      cells.push({
+        x: Math.round(offsetX + c * CELL + CELL / 2 - DOT / 2),
+        y: Math.round(offsetY + r * CELL + CELL / 2 - DOT / 2),
+        delay: (c + r) * 30,
+      });
+    }
+  }
+
+  const renderPanel = (i: number) => {
+    const isActive = i === phaseIndex && rowWidth > 0;
+    // Three "green" trigger conditions: an inactive panel that's
+    // completed (showCheck), and the active phase-2 panel sitting in
+    // its "confirmed" hold state (showConfirmed). Either way the
+    // panel + icon + text all flip to the green palette with the
+    // same delayed pop animation.
+    const showConfirmed = isActive && innerPhase === "confirmed";
+    const showCheck = !isActive && completedPhases.has(i);
+    const isGreen = showConfirmed || showCheck;
+    return (
+      <div
+        style={{
+          width: isActive ? activeWidth : SQUARE,
+          height: SQUARE,
+          // Subtle green-tint on the panel bg + a soft inset border in
+          // the green family when the phase has completed. Tints fade
+          // in with the same delayed timing as the icon's white→green
+          // pop, and snap back instantly on cycle reset.
+          background: isGreen
+            ? "rgba(74, 222, 128, 0.06)"
+            : "rgba(255,255,255,0.04)",
+          boxShadow: isGreen
+            ? "inset 0 0 0 1px rgba(74, 222, 128, 0.18)"
+            : "inset 0 0 0 1px rgba(255,255,255,0.06)",
+          borderRadius: 10,
+          flexShrink: 0,
+          transition: isGreen
+            ? `width ${dur}ms ${ease}, background 450ms ${ease} ${dur}ms, box-shadow 450ms ${ease} ${dur}ms`
+            : `width ${dur}ms ${ease}, background 180ms cubic-bezier(0.4, 0, 1, 1), box-shadow 180ms cubic-bezier(0.4, 0, 1, 1)`,
+          overflow: "hidden",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          position: "relative",
+        }}
+      >
+        {/* Diagonal wave — wrapper is ALWAYS mounted so the opacity
+            transition fires when a panel becomes active or when the
+            phase enters "done". Without this, the wave snapped in at
+            full brightness on every panel switch, which read as
+            "incredibly sharp and white". Cells themselves are only
+            instantiated when isActive (saves ~190 absolute spans on
+            the two inactive panels). */}
+        <div
+          aria-hidden
+          style={{
+            position: "absolute",
+            inset: 0,
+            opacity:
+              isActive &&
+              innerPhase !== "done" &&
+              innerPhase !== "confirmed"
+                ? 1
+                : 0,
+            // Asymmetric transition: fade-in is delayed by 750ms so
+            // the wave doesn't slam in at full brightness when a
+            // panel switches from square to rectangle. Fade-out runs
+            // immediately so the wave is gone before the panel
+            // collapses, enters done, or holds in confirmed.
+            transition:
+              isActive &&
+              innerPhase !== "done" &&
+              innerPhase !== "confirmed"
+                ? `opacity ${dur}ms ${ease} 750ms`
+                : `opacity ${dur}ms ${ease}`,
+            pointerEvents: "none",
+          }}
+        >
+          {isActive &&
+            cells.map((cell, k) => (
+              <span
+                key={k}
+                className="ai-wave-cell"
+                style={{
+                  position: "absolute",
+                  left: cell.x,
+                  top: cell.y,
+                  width: DOT,
+                  height: DOT,
+                  borderRadius: "50%",
+                  background: "rgba(255,255,255,0.7)",
+                  animationDelay: `${cell.delay}ms`,
+                }}
+              />
+            ))}
+        </div>
+        <span
+          style={{
+            opacity: isActive && innerPhase === "title" ? 1 : 0,
+            transition: `opacity ${dur}ms ${ease}`,
+            fontFamily: "var(--sans-stack)",
+            fontSize: 12,
+            fontWeight: 500,
+            color: "rgba(255,255,255,0.62)",
+            whiteSpace: "nowrap",
+            letterSpacing: "-0.005em",
+            lineHeight: 1,
+            position: "absolute",
+            zIndex: 1,
+          }}
+        >
+          {titles[i]}
+        </span>
+        {/* Typed bullet list — fixed-height 8-row column. translateY is
+            JS-driven from typedChars so the line being typed is always
+            pinned to the panel bottom; the scroll never outruns the
+            typing. Smooth CSS transition between line bumps gives a
+            steady, lined-up feel that's still kinetic. */}
+        {isActive && innerPhase === "list" && (
+          <div
+            aria-hidden
+            style={{
+              position: "absolute",
+              inset: 0,
+              padding: "0 10px",
+              overflow: "hidden",
+              pointerEvents: "none",
+              zIndex: 1,
+            }}
+          >
+            <div
+              className="ai-context-flow"
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 10,
+                right: 10,
+                fontFamily: "var(--sans-stack)",
+                fontSize: 10,
+                lineHeight: "16px",
+                color: "rgba(255,255,255,0.62)",
+                letterSpacing: "-0.005em",
+              }}
+            >
+              {(() => {
+                const lines = visibleText.split("\n");
+                return PHASE_CONFIGS[phaseIndex].bullets.map((_, k) => (
+                  <div
+                    key={k}
+                    style={{
+                      height: 16,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                    }}
+                  >
+                    {lines[k] ?? ""}
+                  </div>
+                ));
+              })()}
+            </div>
+          </div>
+        )}
+        {/* Done / confirmed / check / preview area — same icon in four
+            contexts:
+            • "done"      : panel is in done phase; muted text + icon.
+            • "confirmed" : phase 2 only — active panel has finished
+                            its cycle and is holding the green
+                            success state for 3s before the cycle
+                            wraps. Text + icon both green and scaled.
+            • "check"     : a previous phase has collapsed back to a
+                            square; icon green, no text.
+            • "preview"   : phase hasn't reached this panel yet; icon
+                            in default colour as an upcoming-step hint. */}
+        {(() => {
+          const showDone = isActive && innerPhase === "done";
+          const showText = showDone || showConfirmed;
+          const showPreview = !isActive && !completedPhases.has(i);
+          const visible = showDone || showConfirmed || showCheck || showPreview;
+          return (
+            <div
+              aria-hidden
+              style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                opacity: visible ? 1 : 0,
+                transition: "opacity 400ms cubic-bezier(0.2, 0, 0.2, 1)",
+                pointerEvents: "none",
+                zIndex: 1,
+              }}
+            >
+              <div
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: showText ? 6 : 0,
+                  // Whole inline-flex scales when entering green so
+                  // both text + icon "pop" together. Asymmetric
+                  // timing matches the icon-colour transition: long
+                  // delay + bouncy spring on entry, fast snap on exit.
+                  transform: isGreen ? "scale(1.12)" : "scale(1)",
+                  transition: isGreen
+                    ? `gap 400ms cubic-bezier(0.2, 0, 0.2, 1), transform 450ms cubic-bezier(0.34, 1.56, 0.64, 1) ${dur}ms`
+                    : readyToExit
+                      ? "gap 400ms cubic-bezier(0.2, 0, 0.2, 1), transform 180ms cubic-bezier(0.4, 0, 1, 1)"
+                      : "transform 180ms cubic-bezier(0.4, 0, 1, 1)",
+                }}
+              >
+                <span
+                  style={{
+                    opacity: showText ? 1 : 0,
+                    maxWidth: showText ? 200 : 0,
+                    overflow: "hidden",
+                    whiteSpace: "nowrap",
+                    transition: readyToExit
+                      ? `opacity 220ms cubic-bezier(0.4, 0, 1, 1), max-width 380ms cubic-bezier(0.4, 0, 0.2, 1), color ${isGreen ? `450ms cubic-bezier(0.34, 1.56, 0.64, 1) ${dur}ms` : "180ms cubic-bezier(0.4, 0, 1, 1)"}`
+                      : "none",
+                    fontFamily: "var(--sans-stack)",
+                    fontSize: 12,
+                    fontWeight: isGreen ? 600 : 400,
+                    color: isGreen
+                      ? "rgb(74, 222, 128)"
+                      : "rgba(255,255,255,0.62)",
+                    letterSpacing: "-0.005em",
+                    // lineHeight 1.3 leaves room for descenders ("g",
+                    // "p", "y") that were previously clipped by the
+                    // overflow:hidden used for the max-width collapse.
+                    lineHeight: 1.3,
+                  }}
+                >
+                  {PHASE_CONFIGS[i].doneText}
+                </span>
+                <svg
+                  width={14}
+                  height={14}
+                  viewBox="0 0 18 18"
+                  fill="currentColor"
+                  aria-hidden
+                  style={{
+                    display: "block",
+                    flexShrink: 0,
+                    color: isGreen
+                      ? "rgb(74, 222, 128)"
+                      : "rgba(255,255,255,0.62)",
+                    // Scale lives on the parent inline-flex (so text
+                    // + icon scale together); here just colour. Same
+                    // delay-on-entry / instant-on-exit asymmetry.
+                    transition: isGreen
+                      ? `color 450ms cubic-bezier(0.34, 1.56, 0.64, 1) ${dur}ms`
+                      : "color 180ms cubic-bezier(0.4, 0, 1, 1)",
+                  }}
+                >
+                  {PHASE_CONFIGS[i].icon}
+                </svg>
+              </div>
+            </div>
+          );
+        })()}
+      </div>
+    );
+  };
+
+  const chevron = (
+    <svg
+      width={CHEVRON_W}
+      height={6}
+      viewBox="0 0 4 6"
+      aria-hidden
+      style={{ display: "block", flexShrink: 0 }}
+    >
+      <polyline
+        points="0,0 4,3 0,6"
+        fill="none"
+        stroke="rgba(255,255,255,0.62)"
+        strokeWidth={1.5}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+
+  return (
+    <div
+      ref={rowRef}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: GAP,
+        // Equal margins on both sides — auto/auto centers the row
+        // vertically in the remaining space below the description, so
+        // the gap to the description above matches the gap to the
+        // card's bottom edge.
+        marginTop: "auto",
+        marginBottom: "auto",
+        // 10% narrower than the column — shrinks rowWidth → activeWidth
+        // tracks automatically (computed from rowWidth in the layout
+        // math above).
+        width: "90%",
+      }}
+    >
+      {renderPanel(0)}
+      {chevron}
+      {renderPanel(1)}
+      {chevron}
+      {renderPanel(2)}
+    </div>
+  );
+}
+
+// Wraps the Stack card's body — text column on the left (with the
+// preview row at the bottom) and StackViz on the right — and owns the
+// shared cycle state that drives both. Lifting state here is what
+// keeps the StackPreview animation in sync with the StackViz panel
+// highlights and the USDC bar fill.
+function StackBody({ open }: { open: boolean }) {
+  const [phaseIndex, setPhaseIndex] = useState(0);
+  const [innerPhase, setInnerPhase] = useState<
+    "title" | "list" | "done" | "confirmed"
+  >("title");
+  const [completedPhases, setCompletedPhases] = useState<Set<number>>(
+    () => new Set(),
+  );
+  // Cycle pointer for the USDC bar fill — advances at each phase 2
+  // "confirmed" entry, wraps mod 3 so after 3 cycles the bar lands
+  // back where it started.
+  const [barIdx, setBarIdx] = useState(0);
+
+  useEffect(() => {
+    if (!open) {
+      setInnerPhase("title");
+      setCompletedPhases(new Set());
+      setPhaseIndex(0);
+      setBarIdx(0);
+      return;
+    }
+    if (phaseIndex === 0) setCompletedPhases(new Set());
+    setInnerPhase("title");
+    const t1 = setTimeout(() => setInnerPhase("list"), 2000);
+    const t2 = setTimeout(() => setInnerPhase("done"), 5000);
+
+    if (phaseIndex === 2) {
+      const t3 = setTimeout(() => {
+        setInnerPhase("confirmed");
+        setBarIdx((i) => (i + 1) % BAR_VALUES.length);
+      }, 6000);
+      const t4 = setTimeout(() => {
+        setInnerPhase("title");
+        setPhaseIndex(0);
+      }, 9000);
+      return () => {
+        clearTimeout(t1);
+        clearTimeout(t2);
+        clearTimeout(t3);
+        clearTimeout(t4);
+      };
+    }
+
+    const t3 = setTimeout(() => {
+      setCompletedPhases((prev) => {
+        const next = new Set(prev);
+        next.add(phaseIndex);
+        return next;
+      });
+      setInnerPhase("title");
+      setPhaseIndex((p) => (p + 1) % 3);
+    }, 6000);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
+    };
+  }, [phaseIndex, open]);
+
   return (
     <div
       style={{
         display: "flex",
-        alignItems: "center",
-        gap: 10,
-        padding: "10px 14px",
-        background: "rgba(255,255,255,0.04)",
-        border: "1px solid rgba(255,255,255,0.06)",
-        borderRadius: 14,
+        gap: 18,
         flex: 1,
-        minWidth: 0,
+        minHeight: 0,
+      }}
+    >
+      <div
+        style={{
+          flex: 1,
+          minWidth: 0,
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
+        <CardLabel icon="stack">Stack</CardLabel>
+        <h3
+          style={{
+            color: "#fff",
+            fontFamily: "var(--font-radley)",
+            fontSize: 22,
+            lineHeight: 1.1,
+            letterSpacing: "-0.005em",
+            margin: "12px 0 0 0",
+            fontWeight: 400,
+          }}
+        >
+          What happens behind the scenes.
+        </h3>
+        <p
+          style={{
+            marginTop: 8,
+            color: "rgba(255,255,255,0.62)",
+            fontFamily: "var(--font-radley)",
+            fontSize: 15,
+            lineHeight: 1.55,
+          }}
+        >
+          Our agent layer has continuous access to enriched context
+          spanning categories like social narrative, price action,
+          and real-world events. These informations are digested
+          into an operative decision which is executed onchain.
+        </p>
+        <StackPreview
+          open={open}
+          phaseIndex={phaseIndex}
+          innerPhase={innerPhase}
+          completedPhases={completedPhases}
+        />
+      </div>
+      <div style={{ flexShrink: 0 }}>
+        <StackViz
+          phaseIndex={phaseIndex}
+          innerPhase={innerPhase}
+          completedPhases={completedPhases}
+          barFillPercent={BAR_VALUES[barIdx]}
+          poolRatios={POOL_RATIOS.map((p) => p[barIdx])}
+        />
+      </div>
+    </div>
+  );
+}
+
+// Panel keeps overflow:visible (so chip tooltips can extend above it) — footer owns its own bottom-corner radius.
+// `isPulsing` adds a slow white-border pulse via the .stackviz-panel-pulse class (active phase, working).
+// `isGreen` swaps to a green tint + green border with the same delayed transition the StackPreview uses.
+function TopPanel({
+  children,
+  width,
+  height,
+  label,
+  isPulsing = false,
+  isGreen = false,
+}: {
+  children: React.ReactNode;
+  width: number | string;
+  height?: number | string;
+  label: string;
+  isPulsing?: boolean;
+  isGreen?: boolean;
+}) {
+  // Diagonal wave grid covering the body (panel - footer). Mirrors the
+  // StackPreview pattern: CELL=8 spacing, DOT=1 dots, animation-delay
+  // = (col + row) * 30ms so the brightness ramp travels top-left to
+  // bottom-right. Only computed when width/height resolve to numbers
+  // (always the case in current usage).
+  const FOOTER_H = 18;
+  const numericW = typeof width === "number" ? width : 0;
+  const numericH = typeof height === "number" ? height : 0;
+  const bodyH = Math.max(0, numericH - FOOTER_H);
+  const CELL = 8;
+  const DOT = 1;
+  const PAD = 2;
+  const baseCols = numericW > 0 ? Math.floor(numericW / CELL) : 0;
+  const baseRows = bodyH > 0 ? Math.floor(bodyH / CELL) : 0;
+  const cols = baseCols + 2 * PAD;
+  const rows = baseRows + 2 * PAD;
+  const offsetX = (numericW - cols * CELL) / 2;
+  const offsetY = (bodyH - rows * CELL) / 2;
+  const cells: { x: number; y: number; delay: number }[] = [];
+  if (numericW > 0 && bodyH > 0) {
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        cells.push({
+          x: Math.round(offsetX + c * CELL + CELL / 2 - DOT / 2),
+          y: Math.round(offsetY + r * CELL + CELL / 2 - DOT / 2),
+          delay: (c + r) * 30,
+        });
+      }
+    }
+  }
+  const showWave = isPulsing && !isGreen && cells.length > 0;
+  return (
+    <div
+      className={isPulsing ? "stackviz-panel-pulse" : undefined}
+      style={{
+        width,
+        height,
+        position: "relative",
+        // Body bg + inset border drive both the pulse animation
+        // (white) and the success state (green). When the pulse class
+        // is active, its keyframes override the inline boxShadow /
+        // background; when isGreen takes over, the inline values pin
+        // the panel to its green palette and the (delayed) transition
+        // animates the swap. Cycle reset → instant snap back.
+        background: isGreen
+          ? "rgba(74, 222, 128, 0.06)"
+          : "rgba(255,255,255,0.04)",
+        boxShadow: isGreen
+          ? "inset 0 0 0 1px rgba(74, 222, 128, 0.18)"
+          : "inset 0 0 0 1px rgba(255,255,255,0.06)",
+        transition: isGreen
+          ? "background 450ms cubic-bezier(0.34, 1.56, 0.64, 1) 800ms, box-shadow 450ms cubic-bezier(0.34, 1.56, 0.64, 1) 800ms"
+          : "background 180ms cubic-bezier(0.4, 0, 1, 1), box-shadow 180ms cubic-bezier(0.4, 0, 1, 1)",
+        borderRadius: 10,
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
+      {/* Wave layer — clipped to the body region (panel minus footer)
+          and to the panel's top-corner radius so dots don't bleed past
+          the rounded edges. Asymmetric fade: 750ms delay on entry
+          (matches StackPreview) so the wave doesn't slam in alongside
+          the panel switch; instant fade on exit when the phase wraps
+          to green or the panel becomes inactive. */}
+      <div
+        aria-hidden
+        style={{
+          position: "absolute",
+          left: 0,
+          right: 0,
+          top: 0,
+          bottom: FOOTER_H,
+          overflow: "hidden",
+          borderRadius: "10px 10px 0 0",
+          opacity: showWave ? 1 : 0,
+          transition: showWave
+            ? "opacity 220ms cubic-bezier(0.16, 1, 0.3, 1) 750ms"
+            : "opacity 220ms cubic-bezier(0.16, 1, 0.3, 1)",
+          pointerEvents: "none",
+        }}
+      >
+        {showWave &&
+          cells.map((cell, k) => (
+            <span
+              key={k}
+              className="ai-wave-cell"
+              style={{
+                position: "absolute",
+                left: cell.x,
+                top: cell.y,
+                width: DOT,
+                height: DOT,
+                borderRadius: "50%",
+                background: "rgba(255,255,255,0.7)",
+                animationDelay: `${cell.delay}ms`,
+              }}
+            />
+          ))}
+      </div>
+      <div
+        style={{
+          flex: 1,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 6,
+          padding: 10,
+          position: "relative",
+        }}
+      >
+        {children}
+      </div>
+      <div
+        style={{
+          background: isGreen
+            ? "rgba(74, 222, 128, 0.10)"
+            : "rgba(255,255,255,0.06)",
+          padding: "4px 4px 5px",
+          textAlign: "center",
+          fontFamily: "var(--sans-stack)",
+          fontSize: 9,
+          fontWeight: 400,
+          color: isGreen
+            ? "rgb(74, 222, 128)"
+            : "rgba(255,255,255,0.62)",
+          lineHeight: 1,
+          borderRadius: "0 0 10px 10px",
+          transition: isGreen
+            ? "background 450ms cubic-bezier(0.34, 1.56, 0.64, 1) 800ms, color 450ms cubic-bezier(0.34, 1.56, 0.64, 1) 800ms"
+            : "background 180ms cubic-bezier(0.4, 0, 1, 1), color 180ms cubic-bezier(0.4, 0, 1, 1)",
+        }}
+      >
+        {label}
+      </div>
+    </div>
+  );
+}
+
+
+const USDC_VAULT_ENTRY: BuiltOnEntry = {
+  name: "USDC",
+  role: "",
+  color: "#2775CA",
+  logoSrc: "/tokens/usdc.png",
+};
+
+function HoverChip({
+  label,
+  children,
+  onHoverChange,
+}: {
+  label: React.ReactNode;
+  children: React.ReactNode;
+  onHoverChange?: (hover: boolean) => void;
+}) {
+  const [hover, setHover] = useState(false);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const ref = useRef<HTMLSpanElement>(null);
+
+  // Tooltip is portalled to <body> to escape ancestor backdrop-filter, which would otherwise blank it out.
+  useLayoutEffect(() => {
+    if (!hover || !ref.current) return;
+    const update = () => {
+      if (!ref.current) return;
+      const r = ref.current.getBoundingClientRect();
+      setPos({ left: r.left + r.width / 2, top: r.top });
+    };
+    update();
+    window.addEventListener("scroll", update, true);
+    window.addEventListener("resize", update);
+    return () => {
+      window.removeEventListener("scroll", update, true);
+      window.removeEventListener("resize", update);
+    };
+  }, [hover]);
+
+  const set = (v: boolean) => {
+    setHover(v);
+    onHoverChange?.(v);
+  };
+
+  return (
+    <span
+      ref={ref}
+      onMouseEnter={() => set(true)}
+      onMouseLeave={() => set(false)}
+      onFocus={() => set(true)}
+      onBlur={() => set(false)}
+      tabIndex={0}
+      style={{
+        position: "relative",
+        display: "inline-flex",
+        flexShrink: 0,
+        zIndex: hover ? 5 : 1,
+        outline: "none",
       }}
     >
       <span
+        style={{
+          display: "inline-flex",
+          transform: hover ? "scale(1.10)" : "scale(1)",
+          transition: "transform 220ms cubic-bezier(0.16, 1, 0.3, 1)",
+          willChange: "transform",
+        }}
+      >
+        {children}
+      </span>
+      {hover && pos && typeof document !== "undefined"
+        ? createPortal(
+            <span
+              aria-hidden
+              style={{
+                position: "fixed",
+                left: pos.left,
+                top: pos.top,
+                transform: "translate(-50%, calc(-100% - 6px))",
+                display: "inline-flex",
+                alignItems: "center",
+                height: 20,
+                padding: "0 8px",
+                borderRadius: 999,
+                background: "rgba(255,255,255,0.05)",
+                backdropFilter: "blur(24px)",
+                WebkitBackdropFilter: "blur(24px)",
+                color: "rgba(255,255,255,0.92)",
+                fontFamily: "var(--sans-stack)",
+                fontSize: 11,
+                fontWeight: 500,
+                lineHeight: 1,
+                letterSpacing: "-0.005em",
+                whiteSpace: "nowrap",
+                pointerEvents: "none",
+                zIndex: 9999,
+              }}
+            >
+              {label}
+            </span>,
+            document.body,
+          )
+        : null}
+    </span>
+  );
+}
+
+function PoolPairChip({
+  left,
+  right,
+  leftRatio = 0.5,
+}: {
+  left: TokenEntry;
+  right: TokenEntry;
+  leftRatio?: number;
+}) {
+  const SIZE = 18;
+  const OFFSET = 10;
+  const [hoverLeft, setHoverLeft] = useState(false);
+  const [hoverRight, setHoverRight] = useState(false);
+  const rightRatio = 1 - leftRatio;
+  return (
+    <span
+      style={{
+        position: "relative",
+        width: SIZE + OFFSET,
+        height: SIZE,
+        display: "inline-block",
+        flexShrink: 0,
+      }}
+    >
+      {/* display:flex on absolute wrappers prevents inline-flex children inheriting line-height as padding. */}
+      <span style={{ position: "absolute", left: 0, top: 0, display: "flex", zIndex: hoverLeft ? 6 : 1 }}>
+        <HoverChip label={left.slug} onHoverChange={setHoverLeft}>
+          <RatioChip entry={left} size={SIZE} radius={4} ratio={leftRatio} />
+        </HoverChip>
+      </span>
+      <span style={{ position: "absolute", left: OFFSET, top: 0, display: "flex", zIndex: hoverRight ? 6 : 2 }}>
+        <HoverChip label={right.slug} onHoverChange={setHoverRight}>
+          <RatioChip entry={right} size={SIZE} radius={4} ratio={rightRatio} />
+        </HoverChip>
+      </span>
+    </span>
+  );
+}
+
+// Two-layer chip: a greyscale base sits at full size (always visible),
+// a coloured copy of the same TokenChip overlays it clipped from the
+// bottom up to `ratio * height`. Reads as a fill-level / liquidity
+// gauge for the token's share of the pool. clip-path is animated so
+// ratio changes glide in lockstep with the USDC bar's transition.
+function RatioChip({
+  entry,
+  size,
+  radius,
+  ratio,
+}: {
+  entry: TokenEntry;
+  size: number;
+  radius: number;
+  ratio: number;
+}) {
+  const clamped = Math.max(0, Math.min(1, ratio));
+  const topInset = `${(1 - clamped) * 100}%`;
+  return (
+    <span
+      aria-hidden
+      style={{
+        position: "relative",
+        width: size,
+        height: size,
+        display: "inline-block",
+        flexShrink: 0,
+      }}
+    >
+      <span
+        style={{
+          position: "absolute",
+          inset: 0,
+          display: "flex",
+          // Half-saturation base — the unfilled portion still reads as
+          // the token's own colour, just dimmer than the full-saturation
+          // overlay clipped on top.
+          filter: "saturate(0.5)",
+        }}
+      >
+        <TokenChip entry={entry} size={size} radius={radius} />
+      </span>
+      <span
+        style={{
+          position: "absolute",
+          inset: 0,
+          display: "flex",
+          clipPath: `inset(${topInset} 0 0 0)`,
+          WebkitClipPath: `inset(${topInset} 0 0 0)`,
+          transition:
+            "clip-path 1500ms cubic-bezier(0.4, 0, 0.2, 1), -webkit-clip-path 1500ms cubic-bezier(0.4, 0, 0.2, 1)",
+        }}
+      >
+        <TokenChip entry={entry} size={size} radius={radius} />
+      </span>
+    </span>
+  );
+}
+
+function PoolPlus() {
+  const SIZE = 18;
+  return (
+    <span
+      aria-hidden
+      style={{
+        width: SIZE,
+        height: SIZE,
+        boxSizing: "border-box",
+        borderRadius: 4,
+        background: "rgba(255,255,255,0.04)",
+        border: "1px dashed rgba(255,255,255,0.22)",
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        color: "rgba(255,255,255,0.55)",
+        flexShrink: 0,
+      }}
+    >
+      <svg width={10} height={10} viewBox="0 0 10 10" aria-hidden style={{ display: "block" }}>
+        <line
+          x1={5}
+          y1={2}
+          x2={5}
+          y2={8}
+          stroke="currentColor"
+          strokeWidth={1.3}
+          strokeLinecap="round"
+        />
+        <line
+          x1={2}
+          y1={5}
+          x2={8}
+          y2={5}
+          stroke="currentColor"
+          strokeWidth={1.3}
+          strokeLinecap="round"
+        />
+      </svg>
+    </span>
+  );
+}
+
+function BuiltOnChip({
+  entry,
+  size = 26,
+  tooltip,
+}: {
+  entry: BuiltOnEntry;
+  size?: number;
+  tooltip?: string;
+}) {
+  const [hover, setHover] = useState(false);
+  const interactive = !!entry.link;
+  const label = tooltip ?? entry.name;
+  const chipNode = renderChipFace(entry, size);
+
+  if (!interactive) {
+    return chipNode;
+  }
+
+  return (
+    <span
+      style={{
+        position: "relative",
+        display: "inline-flex",
+        flexShrink: 0,
+        // Lift above sibling chips so the tooltip clears them on hover.
+        zIndex: hover ? 5 : 1,
+      }}
+    >
+      <a
+        href={entry.link}
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label={label}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        onFocus={() => setHover(true)}
+        onBlur={() => setHover(false)}
+        style={{
+          display: "inline-flex",
+          textDecoration: "none",
+          cursor: "pointer",
+          transform: hover ? "scale(1.10)" : "scale(1)",
+          transition: "transform 220ms cubic-bezier(0.16, 1, 0.3, 1)",
+          willChange: "transform",
+          outline: "none",
+        }}
+      >
+        {chipNode}
+      </a>
+      <span
         aria-hidden
         style={{
-          width: 26,
-          height: 26,
-          borderRadius: 6,
-          background: color,
+          position: "absolute",
+          left: "50%",
+          bottom: "100%",
+          marginBottom: 6,
+          transform: "translateX(-50%)",
+          display: "inline-flex",
+          alignItems: "center",
+          height: 20,
+          padding: "0 8px",
+          borderRadius: 999,
+          background: "rgba(255,255,255,0.05)",
+          backdropFilter: "blur(24px)",
+          WebkitBackdropFilter: "blur(24px)",
+          color: "rgba(255,255,255,0.92)",
+          fontFamily: "var(--sans-stack)",
+          fontSize: 11,
+          fontWeight: 500,
+          lineHeight: 1,
+          letterSpacing: "-0.005em",
+          whiteSpace: "nowrap",
+          opacity: hover ? 1 : 0,
+          transition: "opacity 220ms cubic-bezier(0.16, 1, 0.3, 1)",
+          pointerEvents: "none",
+          zIndex: 20,
+        }}
+      >
+        {label}
+      </span>
+    </span>
+  );
+}
+
+// White circle layered behind a Uniswap chip's silhouette. 85% of the
+// chip's box, centered. Parent must be position:relative.
+function Moon() {
+  return (
+    <span
+      aria-hidden
+      style={{
+        position: "absolute",
+        left: "50%",
+        top: "50%",
+        transform: "translate(-50%, -50%)",
+        width: "85%",
+        height: "85%",
+        borderRadius: "50%",
+        background: "white",
+        pointerEvents: "none",
+      }}
+    />
+  );
+}
+
+// Recoloured silhouette layered on top of Moon — masks the unicorn SVG
+// in the chip's brand colour at 62% of the box so it sits inside the
+// moon. Parent must be position:relative.
+function Silhouette({ src, color }: { src: string; color: string }) {
+  return (
+    <span
+      aria-hidden
+      style={{
+        position: "absolute",
+        left: "50%",
+        top: "50%",
+        transform: "translate(-50%, -50%)",
+        width: "62%",
+        height: "62%",
+        backgroundColor: color,
+        WebkitMaskImage: `url(${src})`,
+        maskImage: `url(${src})`,
+        WebkitMaskSize: "contain",
+        maskSize: "contain",
+        WebkitMaskRepeat: "no-repeat",
+        maskRepeat: "no-repeat",
+        WebkitMaskPosition: "center",
+        maskPosition: "center",
+        pointerEvents: "none",
+      }}
+    />
+  );
+}
+
+function renderChipFace(entry: BuiltOnEntry, size: number) {
+  const radius = Math.max(5, Math.round(size * 0.22));
+  if (entry.logoSrc) {
+    const withMoon = entry.name === "Uniswap";
+    return (
+      <span
+        aria-hidden
+        style={{
+          width: size,
+          height: size,
+          borderRadius: radius,
+          background: entry.color,
+          overflow: "hidden",
           display: "inline-flex",
           alignItems: "center",
           justifyContent: "center",
-          color: "#fff",
-          fontFamily: "var(--sans-stack)",
-          fontSize: 14,
-          fontWeight: 600,
-          lineHeight: 1,
           flexShrink: 0,
-          letterSpacing: "-0.02em",
+          position: "relative",
         }}
       >
-        {glyph}
+        {withMoon ? (
+          <>
+            <Moon />
+            <Silhouette src={entry.logoSrc} color={entry.color} />
+          </>
+        ) : (
+          <Image src={entry.logoSrc} alt="" width={size} height={size} style={{ display: "block" }} />
+        )}
       </span>
-      <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
-        <span
-          style={{
-            fontFamily: "var(--font-radley)",
-            fontSize: 14,
-            color: "rgba(255,255,255,0.92)",
-            lineHeight: 1.1,
-          }}
-        >
-          {name}
-        </span>
-        <span
-          style={{
-            fontFamily: "var(--font-radley)",
-            fontSize: 11,
-            color: "rgba(255,255,255,0.55)",
-            lineHeight: 1.1,
-          }}
-        >
-          {label}
-        </span>
-      </div>
-    </div>
+    );
+  }
+  const glyphSize = Math.round(size * 0.55);
+  return (
+    <span
+      aria-hidden
+      style={{
+        width: size,
+        height: size,
+        borderRadius: radius,
+        background: entry.color,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        color: entry.logoColor ?? "#fff",
+        fontFamily: "var(--sans-stack)",
+        fontSize: Math.round(size * 0.5),
+        fontWeight: 600,
+        lineHeight: 1,
+        flexShrink: 0,
+        letterSpacing: "-0.02em",
+      }}
+    >
+      <svg
+        viewBox={entry.logoSvgViewBox || "0 0 32 32"}
+        width={glyphSize}
+        height={glyphSize}
+        style={{ display: "block" }}
+        aria-hidden
+      >
+        {entry.logoSvg}
+      </svg>
+    </span>
   );
 }
 
@@ -344,28 +1857,40 @@ function LearnMore({ open, onClick }: { open: boolean; onClick: () => void }) {
 
 // "How it works?" — primary entry into the Learn-more overlay. Same
 // text + chip-arrow style as the Back button and same position too
-// (bottom-left, just below the panel — outside the bg). They occupy the
-// same slot mutually exclusively. Always rendered so the reveal animation
-// only plays on first mount; toggling via opacity avoids the delayed
-// re-fade-in when returning from Learn-more.
+// (bottom-left, just below the panel). They occupy the same slot
+// mutually exclusively, toggled via display:none.
+//
+// The `reveal` entry animation must only play once on initial page load.
+// Browsers restart CSS animations when an element flips from `display:none`
+// back to a visible display value, so leaving the class on would re-fire
+// the 2700ms delayed reveal every time the user clicks Back from the
+// Learn-more overlay. Once the initial reveal has completed we strip the
+// class entirely — the button's resting state (opacity 1, no transform)
+// matches the animation's final keyframe, so there is no visual snap.
+const REVEAL_DELAY_MS = 2700;
+const REVEAL_DURATION_MS = 600;
 function HowItWorks({ disabled, onClick }: { disabled?: boolean; onClick: () => void }) {
+  const [revealed, setRevealed] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setRevealed(true), REVEAL_DELAY_MS + REVEAL_DURATION_MS);
+    return () => clearTimeout(t);
+  }, []);
+
   return (
     <button
       type="button"
       onClick={onClick}
       aria-label="How it works"
-      className="reveal absolute z-30 flex items-center gap-1.5 text-xs text-haze transition-opacity hover:text-mist"
+      className={`${revealed ? "" : "reveal "}absolute z-30 items-center gap-1.5 text-xs text-haze transition-colors hover:text-mist`}
       style={{
         top: "calc(80% + 12px)",
         left: "20%",
-        animationDelay: "2700ms",
+        ...(revealed ? null : { animationDelay: `${REVEAL_DELAY_MS}ms` }),
         background: "transparent",
         border: "none",
         padding: 0,
-        cursor: disabled ? "default" : "pointer",
-        opacity: disabled ? 0 : 1,
-        pointerEvents: disabled ? "none" : "auto",
-        transition: "opacity 350ms cubic-bezier(0.16, 1, 0.3, 1), color 200ms",
+        cursor: "pointer",
+        display: disabled ? "none" : "flex",
       }}
     >
       <span>How it works?</span>
@@ -391,9 +1916,6 @@ function HowItWorks({ disabled, onClick }: { disabled?: boolean; onClick: () => 
     </button>
   );
 }
-
-const LEARN_FADE =
-  "opacity 700ms cubic-bezier(0.16, 1, 0.3, 1), transform 700ms cubic-bezier(0.16, 1, 0.3, 1)";
 
 // Tiny stroke icons used inside inline pills + card labels. 24x24 viewBox so
 // stroke-width stays consistent regardless of render size.
@@ -581,6 +2103,13 @@ const FILLED_ICONS: Record<string, React.ReactNode> = {
       <path d="M2.75099 16C2.72269 16 2.69439 15.9985 2.66509 15.9951C2.25399 15.9482 1.9581 15.5766 2.0049 15.165C2.0186 15.0439 3.52049 3.02341 15.1846 2.00291C15.5918 1.96481 15.961 2.27191 15.9971 2.68451C16.0332 3.09711 15.7276 3.46091 15.3155 3.49701C4.85848 4.41201 3.50789 15.2255 3.49519 15.3349C3.45129 15.7177 3.12689 16 2.75099 16Z" />
     </>
   ),
+  stack: (
+    <>
+      <path fillOpacity="0.4" d="M15.6856 7.67326L9.8165 4.58299C9.3058 4.31299 8.69539 4.31251 8.18469 4.58251L2.3156 7.67326V7.6743C1.8215 7.9346 1.5148 8.44289 1.5148 9.00139C1.5148 9.55989 1.8214 10.0683 2.3156 10.3285L8.18381 13.4179C8.43971 13.5532 8.7199 13.6205 9.0007 13.6205C9.2805 13.6205 9.5608 13.5531 9.8156 13.4184L15.6857 10.3276C16.1798 10.0673 16.4865 9.55897 16.4865 9.00047C16.4865 8.44197 16.1798 7.93346 15.6856 7.67326Z" />
+      <path fillOpacity="0.2" d="M15.6856 10.9233L15.1199 10.6254L9.81552 13.4184C9.56062 13.5532 9.28031 13.6205 9.00061 13.6205C8.71981 13.6205 8.43962 13.5531 8.18372 13.4179L2.88031 10.6259L2.31552 10.9233V10.9243C1.82142 11.1846 1.51471 11.6929 1.51471 12.2514C1.51471 12.8099 1.82132 13.3183 2.31552 13.5785L8.18372 16.6679C8.43962 16.8032 8.71981 16.8705 9.00061 16.8705C9.28041 16.8705 9.56072 16.8031 9.81552 16.6684L15.6856 13.5776C16.1797 13.3173 16.4864 12.809 16.4864 12.2505C16.4864 11.692 16.1798 11.1835 15.6856 10.9233Z" />
+      <path d="M15.6856 4.42241L9.8165 1.33208C9.3058 1.06208 8.69539 1.06159 8.18469 1.33159L2.3156 4.42241C1.8215 4.68271 1.5148 5.19197 1.5148 5.75047C1.5148 6.30897 1.8214 6.81736 2.3156 7.07756L8.18381 10.167C8.43971 10.3023 8.7199 10.3696 9.0007 10.3696C9.2805 10.3696 9.5608 10.3022 9.8156 10.1675L15.6857 7.07671C16.1798 6.81641 16.4865 6.30806 16.4865 5.74956C16.4865 5.19106 16.1798 4.68261 15.6856 4.42241Z" />
+    </>
+  ),
 };
 
 function FilledIcon({ kind, size = 12 }: { kind: keyof typeof FILLED_ICONS | string; size?: number }) {
@@ -731,7 +2260,7 @@ const TOKENS: Record<string, TokenEntry> = {
   ETH:  { slug: "ETH",  kind: "svg", src: "/tokens/svg/eth.svg",  color: "#627EEA" },
   BTC:  { slug: "BTC",  kind: "svg", src: "/tokens/svg/btc.svg",  color: "#F7931A" },
   USDT: { slug: "USDT", kind: "svg", src: "/tokens/svg/usdt.svg", color: "#26A17B" },
-  UNI:  { slug: "UNI",  kind: "png", src: "/tokens/uni.png",      color: "#FF007A" },
+  UNI:  { slug: "UNI",  kind: "png", src: "/tokens/svg/uni.svg",  color: "#FF007A" },
 };
 const PORTFOLIO_TOKENS: TokenEntry[] = [
   TOKENS.USDC,
@@ -764,13 +2293,10 @@ function PortfolioTooltip() {
   );
 }
 
-// Portfolio breakdown - Apple-Health-style mini donut charts. Each pie
-// represents one token's allocation; the filled arc is the % of vault TVL
-// in that token. Token PNG sits in the center for instant recognition.
 // Gauge-style allocation cells + shared TokenChip helper. Each chip is a
 // brand-color rounded square with the token glyph inside: ETH/BTC/USDT use
 // single-path SVGs masked white; USDC/UNI overlay their PNG (their SVG
-// sources are missing/404).
+// sources don't exist).
 type PiePngEntry = { slug: string; pct: number; color: string; kind: "png"; src: string };
 type PieSvgEntry = { slug: string; pct: number; color: string; kind: "svg"; src: string };
 type PieEntry = PiePngEntry | PieSvgEntry;
@@ -788,6 +2314,7 @@ function TokenChip({
 }) {
   const gs = glyphSize ?? Math.round(size * 0.62);
   const r = radius ?? Math.max(3, Math.round(size * 0.26));
+  const withMoon = entry.kind === "png" && entry.src.endsWith("/uni.svg");
   return (
     <span
       aria-hidden
@@ -800,9 +2327,15 @@ function TokenChip({
         alignItems: "center",
         justifyContent: "center",
         overflow: "hidden",
+        position: "relative",
       }}
     >
-      {entry.kind === "svg" ? (
+      {withMoon ? (
+        <>
+          <Moon />
+          <Silhouette src={entry.src} color={entry.color} />
+        </>
+      ) : entry.kind === "svg" ? (
         <span
           style={{
             width: gs,
@@ -837,7 +2370,7 @@ const PORTFOLIO_PIES: PieEntry[] = [
   { slug: "ETH",  kind: "svg", src: "/tokens/svg/eth.svg",  pct: 24, color: "#627EEA" },
   { slug: "BTC",  kind: "svg", src: "/tokens/svg/btc.svg",  pct: 18, color: "#F7931A" },
   { slug: "USDT", kind: "svg", src: "/tokens/svg/usdt.svg", pct: 12, color: "#26A17B" },
-  { slug: "UNI",  kind: "png", src: "/tokens/uni.png",      pct:  8, color: "#FF007A" },
+  { slug: "UNI",  kind: "png", src: "/tokens/svg/uni.svg",  pct:  8, color: "#FF007A" },
 ];
 
 function MiniPie(entry: PieEntry) {
@@ -940,333 +2473,6 @@ function PortfolioPies() {
   );
 }
 
-// Bar track. centerline=true draws the divider for bipolar bars.
-function BarTrack({ children, centerline }: { children: React.ReactNode; centerline?: boolean }) {
-  return (
-    <div
-      style={{
-        position: "relative",
-        height: 6,
-        background: "rgba(255,255,255,0.06)",
-        borderRadius: 999,
-        overflow: "hidden",
-      }}
-    >
-      {centerline && (
-        <div
-          aria-hidden
-          style={{
-            position: "absolute",
-            left: "50%",
-            top: 0,
-            bottom: 0,
-            width: 1,
-            background: "rgba(255,255,255,0.22)",
-            zIndex: 1,
-          }}
-        />
-      )}
-      {children}
-    </div>
-  );
-}
-
-// === Live simulation data — must match the band animation keyframes ===
-// Right-edge price y at each cycle %. Linear interpolation between points.
-const PRICE_KFS: { t: number; y: number }[] = [
-  { t: 0,   y: 124 }, { t: 5,   y: 138 }, { t: 10,  y: 139 }, { t: 14,  y: 153 },
-  { t: 18,  y: 146 }, { t: 22,  y: 149 }, { t: 30,  y: 150 }, { t: 40,  y: 154 },
-  { t: 45,  y: 143 }, { t: 50,  y: 156 }, { t: 60,  y: 152 }, { t: 70,  y: 149 },
-  { t: 75,  y: 151 }, { t: 80,  y: 145 }, { t: 85,  y: 110 }, { t: 88,  y: 100 },
-  { t: 90,  y:  91 }, { t: 92,  y:  93 }, { t: 95,  y:  96 }, { t: 98,  y: 117 },
-  { t: 100, y: 124 },
-];
-// Narrow band keyframes (translateY in px, scaleY).
-const NARROW_KFS = [
-  { t: 0,  ty: -4,  sy: 0.60 }, { t: 5,  ty: 10,  sy: 0.55 },
-  { t: 14, ty: 24,  sy: 0.55 }, { t: 30, ty: 22,  sy: 0.55 },
-  { t: 50, ty: 28,  sy: 0.55 }, { t: 75, ty: 23,  sy: 0.55 },
-  { t: 82, ty: 20,  sy: 0.55 }, { t: 88, ty: 18,  sy: 0.55 },
-  { t: 91, ty: -15, sy: 0.65 }, { t: 95, ty: -28, sy: 0.70 },
-  { t: 99, ty: -3,  sy: 0.60 }, { t: 100, ty: -4, sy: 0.60 },
-];
-const WIDE_KFS = [
-  { t: 0,   ty: 0,   sy: 2.40 }, { t: 18,  ty: 18,  sy: 2.20 },
-  { t: 80,  ty: 18,  sy: 2.20 }, { t: 90,  ty: 18,  sy: 2.20 },
-  { t: 93,  ty: -15, sy: 2.70 }, { t: 98,  ty: -15, sy: 2.70 },
-  { t: 100, ty: 0,   sy: 2.40 },
-];
-
-function lerp(a: number, b: number, p: number) { return a + p * (b - a); }
-function interpKfs<K extends string>(kfs: ({ t: number } & { [k in K]: number })[], t: number, key: K): number {
-  if (t <= kfs[0].t) return kfs[0][key];
-  if (t >= kfs[kfs.length - 1].t) return kfs[kfs.length - 1][key];
-  for (let i = 0; i < kfs.length - 1; i++) {
-    if (kfs[i].t <= t && t <= kfs[i + 1].t) {
-      const p = (t - kfs[i].t) / (kfs[i + 1].t - kfs[i].t);
-      return lerp(kfs[i][key], kfs[i + 1][key], p);
-    }
-  }
-  return kfs[0][key];
-}
-
-// Stepped lookup matching CSS steps(1, end) semantics: value held at the
-// most-recent keyframe whose t ≤ cycle %, snaps to the next at the boundary.
-function steppedKfs<K extends string>(kfs: ({ t: number } & { [k in K]: number })[], t: number, key: K): number {
-  let val = kfs[0][key];
-  for (const kf of kfs) {
-    if (kf.t <= t) val = kf[key];
-    else break;
-  }
-  return val;
-}
-
-// MetricBars — reads the ACTUAL rendered transforms of the band groups
-// and the price-line group via getComputedStyle every frame. Whatever
-// is on screen is what the bars compute against — no separate JS clock,
-// no animation-start mismatch, no easing-curve drift. Pure synchronization
-// with what the eye sees.
-
-// Path waypoints extracted from the price-line d-string. Used to look up
-// the y at the right edge of viewport given the current scroll amount.
-const PATH_POINTS: { x: number; y: number }[] = [
-  { x: 0,     y: 140.9 }, { x: 5.1,   y: 135.6 }, { x: 10.3,  y: 128.4 }, { x: 15.4,  y: 145.5 },
-  { x: 20.6,  y: 156.3 }, { x: 25.7,  y: 165.0 }, { x: 30.9,  y: 170.8 }, { x: 36.0,  y: 165.2 },
-  { x: 41.1,  y: 167.7 }, { x: 46.3,  y: 164.7 }, { x: 51.4,  y: 163.4 }, { x: 56.6,  y: 158.4 },
-  { x: 61.7,  y: 151.8 }, { x: 66.9,  y: 143.0 }, { x: 72.0,  y: 162.0 }, { x: 77.1,  y: 155.0 },
-  { x: 82.3,  y: 132.8 }, { x: 87.4,  y: 130.6 }, { x: 92.6,  y: 142.6 }, { x: 97.7,  y: 141.6 },
-  { x: 102.9, y: 149.5 }, { x: 108.0, y: 146.2 }, { x: 113.1, y: 143.9 }, { x: 118.3, y: 140.6 },
-  { x: 123.4, y: 134.8 }, { x: 128.6, y: 151.3 }, { x: 133.7, y: 154.5 }, { x: 138.9, y: 150.3 },
-  { x: 144.0, y: 148.9 }, { x: 149.1, y: 144.6 }, { x: 154.3, y: 149.6 }, { x: 159.4, y: 141.4 },
-  { x: 164.6, y: 111.9 }, { x: 169.7, y: 117.3 }, { x: 174.9, y:  98.9 }, { x: 180.0, y: 101.6 },
-  { x: 185.1, y: 100.2 }, { x: 190.3, y:  90.7 }, { x: 195.4, y:  91.4 }, { x: 200.6, y: 102.8 },
-  { x: 205.7, y:  95.6 }, { x: 210.9, y:  99.7 }, { x: 216.0, y:  95.8 }, { x: 221.1, y: 112.9 },
-  { x: 226.3, y: 124.9 }, { x: 231.4, y: 128.2 }, { x: 236.6, y: 123.7 }, { x: 241.7, y: 133.3 },
-  { x: 246.9, y: 150.0 }, { x: 252.0, y: 141.3 }, { x: 257.1, y: 137.7 }, { x: 262.3, y: 142.9 },
-  { x: 267.4, y: 153.8 }, { x: 272.6, y: 144.6 }, { x: 277.7, y: 139.2 }, { x: 282.9, y: 140.0 },
-  { x: 288.0, y: 147.3 }, { x: 293.1, y: 155.7 }, { x: 298.3, y: 154.2 }, { x: 303.4, y: 150.0 },
-  { x: 308.6, y: 149.6 }, { x: 313.7, y: 145.9 }, { x: 318.9, y: 152.4 }, { x: 324.0, y: 151.4 },
-  { x: 329.1, y: 148.8 }, { x: 334.3, y: 143.9 }, { x: 339.4, y: 153.5 }, { x: 344.6, y: 151.4 },
-  { x: 349.7, y: 150.5 }, { x: 354.9, y: 150.9 }, { x: 360.0, y: 151.2 }, { x: 365.1, y: 149.7 },
-  { x: 370.3, y: 149.6 }, { x: 375.4, y: 153.7 }, { x: 380.6, y: 152.0 }, { x: 385.7, y: 156.5 },
-  { x: 390.9, y: 155.1 }, { x: 396.0, y: 154.4 }, { x: 401.1, y: 151.2 }, { x: 406.3, y: 154.1 },
-  { x: 411.4, y: 153.6 }, { x: 416.6, y: 151.8 }, { x: 421.7, y: 144.5 }, { x: 426.9, y: 146.2 },
-  { x: 432.0, y: 140.9 },
-];
-
-function pathYAt(x: number): number {
-  // Path is duplicated with second copy at +432, so wrap into [0, 432).
-  const xMod = ((x % 432) + 432) % 432;
-  for (let i = 0; i < PATH_POINTS.length - 1; i++) {
-    const a = PATH_POINTS[i], b = PATH_POINTS[i + 1];
-    if (a.x <= xMod && xMod <= b.x) {
-      const p = (xMod - a.x) / (b.x - a.x || 1);
-      return a.y + p * (b.y - a.y);
-    }
-  }
-  return PATH_POINTS[0].y;
-}
-
-// matrix(a, b, c, d, e, f) → { scaleY: d, translateX: e, translateY: f }
-function readMatrix(transformStr: string): { scaleY: number; translateX: number; translateY: number } {
-  if (!transformStr || transformStr === "none") return { scaleY: 1, translateX: 0, translateY: 0 };
-  const m = transformStr.match(/matrix\(([^)]+)\)/);
-  if (!m) return { scaleY: 1, translateX: 0, translateY: 0 };
-  const p = m[1].split(",").map((s) => parseFloat(s));
-  return { scaleY: p[3] ?? 1, translateX: p[4] ?? 0, translateY: p[5] ?? 0 };
-}
-
-function MetricBars() {
-  const netRef = useRef<HTMLDivElement>(null);
-  const cumRef = useRef<HTMLDivElement>(null);
-  const compoundedRef = useRef<HTMLSpanElement>(null);
-
-  useEffect(() => {
-    const net = netRef.current;
-    const cum = cumRef.current;
-    const compounded = compoundedRef.current;
-    if (!net || !cum) return;
-
-    let cumNet = 0;
-    let prevNarrowCenter: number | null = null;
-    let prevWideCenter: number | null = null;
-    let prevTimeMs: number | null = null;
-    let prevRightX = -1;
-    let lastSign = 1;
-    let rafId = 0;
-    let compoundedTimer: ReturnType<typeof setTimeout> | null = null;
-    let lvrShown = 0;   // decaying display value so a 1-frame LVR snap stays visible
-
-    const tick = () => {
-      const priceEl = document.querySelector(".animate-price-drift");
-      if (!priceEl) {
-        rafId = requestAnimationFrame(tick);
-        return;
-      }
-
-      // Derive the cycle % from the price-line's actual translateX (linear
-      // easing → matrix is reliable). Then use that cycle % to look up
-      // band positions from the keyframes via stepped semantics — matching
-      // the visible bands' steps(1, end) snaps exactly.
-      const priceM = readMatrix(window.getComputedStyle(priceEl).transform);
-      const cyclePct = Math.max(0, Math.min(100, (-priceM.translateX / 432) * 100));
-
-      const narrowCenter = 128 + steppedKfs(NARROW_KFS, cyclePct, "ty");
-      const narrowHalf   = 24  * steppedKfs(NARROW_KFS, cyclePct, "sy");
-      const wideCenter   = 128 + steppedKfs(WIDE_KFS,   cyclePct, "ty");
-      const wideHalf     = 24  * steppedKfs(WIDE_KFS,   cyclePct, "sy");
-
-      const rightEdgeX = 236 - priceM.translateX;
-      const price = pathYAt(rightEdgeX);
-
-      // Wrap detection: cyclePct decreases sharply at loop reset.
-      if (rightEdgeX < prevRightX - 100) {
-        cumNet = 0;
-        if (compounded) {
-          compounded.style.opacity = "1";
-          if (compoundedTimer) clearTimeout(compoundedTimer);
-          compoundedTimer = setTimeout(() => {
-            if (compounded) compounded.style.opacity = "0";
-          }, 1400);
-        }
-      }
-      prevRightX = rightEdgeX;
-
-      const inNarrow = Math.abs(price - narrowCenter) <= narrowHalf;
-      const inWide = Math.abs(price - wideCenter) <= wideHalf;
-      const depth = (inNarrow ? 1 : 0) + (inWide ? 1 : 0);
-
-      const fee = depth === 2 ? 30 : depth === 1 ? 15 : 0;
-
-      const dnNarrow = prevNarrowCenter !== null ? Math.abs(narrowCenter - prevNarrowCenter) : 0;
-      const dnWide = prevWideCenter !== null ? Math.abs(wideCenter - prevWideCenter) : 0;
-      const now = performance.now();
-      const dtSec = prevTimeMs !== null ? Math.min(0.05, (now - prevTimeMs) / 1000) : 0.016;
-
-      // Raw LVR for this frame. First-order LP rebalance cost: linear in
-      // |Δcenter|, weighted by concentration (narrow is tighter so the
-      // swap to recenter costs more per unit shift).
-      const lvrThisFrame = dnNarrow * 0.30 + dnWide * 0.12;
-      const lvrInstant = lvrThisFrame / Math.max(dtSec, 0.001);
-
-      // For DISPLAY: faster decay so small snaps fade quickly (visibly
-      // smaller red flash), big snaps persist. Differentiates magnitudes.
-      lvrShown = Math.max(lvrShown * 0.78, lvrInstant);
-
-      const inst = fee - lvrShown;
-
-      // Top bar (smooth transitions added on the element style itself)
-      const w = Math.min(48, Math.abs(inst));
-      const sign = inst >= 0 ? 1 : -1;
-      if (sign !== lastSign) {
-        net.style.background = sign === 1 ? "rgba(74,222,128,0.85)" : "rgba(239,68,68,0.85)";
-        lastSign = sign;
-      }
-      if (sign === 1) {
-        net.style.left = "50%";
-        net.style.right = `calc(50% - ${w.toFixed(2)}%)`;
-      } else {
-        net.style.left = `calc(50% - ${w.toFixed(2)}%)`;
-        net.style.right = "50%";
-      }
-
-      // Bottom bar (Revenue) — accumulate using the RAW lvrInstant (not the
-      // decayed display value), so each LVR event is counted once.
-      cumNet += (fee - lvrInstant) * dtSec * 0.08;
-      const cumW = Math.max(0.5, Math.min(95, cumNet));
-      cum.style.width = `${cumW.toFixed(2)}%`;
-
-      prevNarrowCenter = narrowCenter;
-      prevWideCenter = wideCenter;
-      prevTimeMs = now;
-      rafId = requestAnimationFrame(tick);
-    };
-
-    rafId = requestAnimationFrame(tick);
-    return () => {
-      cancelAnimationFrame(rafId);
-      if (compoundedTimer) clearTimeout(compoundedTimer);
-    };
-  }, []);
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 14, marginTop: 16 }}>
-      <div>
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            marginBottom: 5,
-            fontFamily: "var(--font-radley)",
-            fontSize: 11,
-            color: "rgba(255,255,255,0.55)",
-            lineHeight: 1,
-          }}
-        >
-          <span>LVR</span>
-          <span>Fees</span>
-        </div>
-        <BarTrack centerline>
-          <div
-            ref={netRef}
-            aria-hidden
-            style={{
-              position: "absolute",
-              top: 0,
-              bottom: 0,
-              borderRadius: 999,
-              background: "rgba(74,222,128,0.85)",
-              left: "50%",
-              right: "50%",
-              transition: "left 120ms linear, right 120ms linear, background-color 200ms linear",
-            }}
-          />
-        </BarTrack>
-      </div>
-      <div>
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            marginBottom: 5,
-            fontFamily: "var(--font-radley)",
-            fontSize: 11,
-            color: "rgba(255,255,255,0.55)",
-            lineHeight: 1,
-          }}
-        >
-          <span>Revenue</span>
-          <span
-            ref={compoundedRef}
-            style={{
-              color: "rgba(74,222,128,0.95)",
-              opacity: 0,
-              transition: "opacity 320ms ease-out",
-            }}
-          >
-            Compounded
-          </span>
-        </div>
-        <BarTrack>
-          <div
-            ref={cumRef}
-            aria-hidden
-            style={{
-              position: "absolute",
-              top: 0,
-              bottom: 0,
-              left: 0,
-              width: "0.5%",
-              background: "rgba(74,222,128,0.85)",
-              borderRadius: 999,
-              transition: "width 120ms linear",
-            }}
-          />
-        </BarTrack>
-      </div>
-    </div>
-  );
-}
 
 // 3×2 grid (was 4×2) since AERO pairs were dropped. Pair entries render as
 // the overlapping coin pair only; no text label per the user's request.
@@ -1350,7 +2556,7 @@ const ORBIT_TOKENS: OrbitEntry[] = [
   { slug: "ETH",  kind: "svg", src: "/tokens/svg/eth.svg",  pct: 24, color: "#627EEA", note: "ETH/USDC pool",  angle: -18  },
   { slug: "BTC",  kind: "svg", src: "/tokens/svg/btc.svg",  pct: 18, color: "#F7931A", note: "BTC/USDC pool",  angle:  54  },
   { slug: "USDT", kind: "svg", src: "/tokens/svg/usdt.svg", pct: 12, color: "#26A17B", note: "stable leg",     angle: 126  },
-  { slug: "UNI",  kind: "png", src: "/tokens/uni.png",      pct:  8, color: "#FF007A", note: "UNI/USDC pool",  angle: -162 },
+  { slug: "UNI",  kind: "png", src: "/tokens/svg/uni.svg",  pct:  8, color: "#FF007A", note: "UNI/USDC pool",  angle: -162 },
 ];
 
 function VaultFlow() {
@@ -1468,6 +2674,7 @@ function VaultFlow() {
               transform: isHover ? "scale(1.08)" : "scale(1)",
               transition:
                 "opacity 260ms cubic-bezier(0.16, 1, 0.3, 1), transform 260ms cubic-bezier(0.16, 1, 0.3, 1)",
+              willChange: "transform",
               cursor: "pointer",
             }}
           >
@@ -1488,16 +2695,18 @@ function VaultFlow() {
           display: "inline-flex",
           alignItems: "center",
           gap: 6,
-          height: 22,
+          height: 20,
           padding: "0 9px 0 8px",
           borderRadius: 999,
-          background: "rgba(255,255,255,0.08)",
-          border: "1px solid rgba(255,255,255,0.10)",
+          background: "rgba(255,255,255,0.05)",
+          backdropFilter: "blur(24px)",
+          WebkitBackdropFilter: "blur(24px)",
           color: "rgba(255,255,255,0.92)",
-          fontFamily: "var(--font-radley)",
-          fontSize: 12,
-          fontWeight: 400,
+          fontFamily: "var(--sans-stack)",
+          fontSize: 11,
+          fontWeight: 500,
           lineHeight: 1,
+          letterSpacing: "-0.005em",
           whiteSpace: "nowrap",
           opacity: hovered ? 1 : 0,
           transition: "opacity 220ms cubic-bezier(0.16, 1, 0.3, 1)",
@@ -1546,17 +2755,6 @@ const PRICE_PATH =
   "L 370.3 149.6 L 375.4 153.7 L 380.6 152.0 L 385.7 156.5 L 390.9 155.1 L 396.0 154.4 " +
   "L 401.1 151.2 L 406.3 154.1 L 411.4 153.6 L 416.6 151.8 L 421.7 144.5 L 426.9 146.2 " +
   "L 432.0 140.9";
-
-// Particle delays (seconds; all keyframes are 9s loops). 8 USDC particles
-// spread evenly across 0-4.5s so they continuously emit during the
-// price-up phase. 8 ETH particles use the same staggers (their keyframe
-// is dormant 0-50%, active 50-100%).
-const USDC_OUT_DELAYS = [0, 0.55, 1.1, 1.65, 2.2, 2.75, 3.3, 3.85];
-const ETH_OUT_DELAYS  = [0, 0.55, 1.1, 1.65, 2.2, 2.75, 3.3, 3.85];
-// Inbound rebalance: 2 particles each side, 0.18s jitter so they don't
-// look like a single fat blob arriving at the band.
-const REBAL_USDC_DELAYS = [0, 0.18];
-const REBAL_ETH_DELAYS  = [0, 0.18];
 
 function StrategyViz() {
   const [hoveredBand, setHoveredBand] = useState<"narrow" | "wide" | null>(null);
@@ -1744,7 +2942,7 @@ function StrategyViz() {
   );
 }
 
-function LearnMoreContent({ open }: { open: boolean }) {
+function LearnMoreContent({ open, onAppNav }: { open: boolean; onAppNav?: () => void }) {
   return (
     <div
       className="absolute z-[25]"
@@ -1862,29 +3060,17 @@ function LearnMoreContent({ open }: { open: boolean }) {
           </p>
         </Card>
 
-        {/* Built-on protocols — three sponsor/prize tracks ALP integrates
-            with. Container fills the remaining left-column height so the
-            last bar aligns with Open App's bottom. Uniswap takes a double
-            row (flex 2) so the trio reads as a 4-row bento. */}
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 14,
-            flex: 1,
-            minHeight: 0,
-            // Reserve room at the bottom so the last bar lines up with
-            // Strategy's bottom (right column) instead of Open App's bottom.
-            // Open App's outer height (~33px) + the 14px gap above it.
-            marginBottom: 47,
-          }}
-        >
-          {BUILT_ON.map((p, i) => (
-            <div key={p.name} style={{ flex: i === 0 ? 2 : 1, display: "flex" }}>
-              <BuiltOnBar {...p} />
-            </div>
-          ))}
-        </div>
+        {/* Stack — single card. Unlike Strategy/Vault flow which have a
+            CardLabel pill at top followed by a side-by-side row, here the
+            CardLabel lives INSIDE the left column so the viz can start
+            at the same Y as the pill (aligned to card top-padding).
+            Height + paddingBottom are fixed (264 / 12) so the bottom
+            edge lines up exactly with Strategy's bottom in the right
+            column — measured via DevTools, not a flex/stretch trick,
+            because the two cards live in independent columns. */}
+        <Card style={{ paddingBottom: 12, height: 264, display: "flex", flexDirection: "column" }}>
+          <StackBody open={open} />
+        </Card>
         </div>
 
         {/* Right column — Vault flow on top, Strategy/sim row, Open App
@@ -1970,7 +3156,7 @@ function LearnMoreContent({ open }: { open: boolean }) {
                     fontWeight: 400,
                   }}
                 >
-                  Beating IL and LVR.
+                  Outpacing IL and LVR.
                 </h3>
                 <p
                   style={{
@@ -1981,9 +3167,9 @@ function LearnMoreContent({ open }: { open: boolean }) {
                     lineHeight: 1.55,
                   }}
                 >
-                  Concentrated LPs earn the most fees but bleed to IL and
-                  LVR. Our agents retighten ranges and rotate capital so
-                  fees stay ahead of both costs.
+                  Concentrated positions earn the most fees but bleed
+                  the most to IL and LVR. Agents retighten ranges and
+                  rotate capital to keep yield ahead of both.
                 </p>
               </div>
             </Card>
@@ -2043,6 +3229,11 @@ function LearnMoreContent({ open }: { open: boolean }) {
             </a>
             <Link
               href="/app"
+              onClick={(e) => {
+                if (!isPlainLeftClick(e)) return;
+                e.preventDefault();
+                onAppNav?.();
+              }}
               className="bg-white/[0.20] transition-colors duration-300 ease-out hover:bg-white/[0.32]"
               style={{
                 textDecoration: "none",
@@ -2129,11 +3320,24 @@ export function LandingFace({
   learnMore: boolean;
   onToggleLearnMore: () => void;
 }) {
+  const router = useRouter();
+  const [exiting, setExiting] = useState(false);
+
+  // Trigger lockup-exit and fire navigation in parallel — animation
+  // runs on the still-mounted landing until the route swaps in.
+  const handleAppNav = () => {
+    if (exiting) return;
+    setExiting(true);
+    router.push("/app");
+  };
+
   return (
     <>
-      {/* Single lockup -appears at center large, glides to top-left while shrinking */}
+      {/* Lockup. Slides up from behind the muted scenery panel on
+          entry, back down behind it on exit. z-10 so scenery-panel
+          (z-15) covers it during the slide. */}
       <div
-        className="glide-and-shrink absolute z-30 flex items-center gap-1.5"
+        className={`absolute z-10 flex items-center gap-1.5 ${exiting ? "lockup-exit" : "lockup-enter"}`}
         style={{ top: "calc(20% - 48px)", left: "20%" }}
       >
         <div aria-hidden className="lift h-[36px] w-[36px]" style={MASK_STYLE} />
@@ -2161,14 +3365,14 @@ export function LandingFace({
           transition: "opacity 500ms cubic-bezier(0.16, 1, 0.3, 1)",
         }}
       >
-        <CatchphraseLink disabled={learnMore} />
+        <CatchphraseLink disabled={learnMore} onAppNav={handleAppNav} />
       </div>
 
       {/* Bottom-left entry into Learn-more (only in default state). */}
       <HowItWorks disabled={learnMore} onClick={onToggleLearnMore} />
 
       {/* Learn-more overlay (headline + body + secondary Open App) */}
-      <LearnMoreContent open={learnMore} />
+      <LearnMoreContent open={learnMore} onAppNav={handleAppNav} />
 
       <TotalDeposits />
       <LearnMore open={learnMore} onClick={onToggleLearnMore} />

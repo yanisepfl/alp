@@ -29,6 +29,21 @@ export function Shell() {
     return () => window.removeEventListener("resize", compute);
   }, []);
 
+  // Mark the entry choreography as seen on this browser. An inline script
+  // in app/layout.tsx reads this flag on the next load (synchronously,
+  // before React hydrates) and sets `data-intro-played` on <html>, which
+  // globals.css uses to skip the lockup glide and word-by-word reveal.
+  // Set on first mount — even a partial first view counts as "seen".
+  // localStorage (not sessionStorage) so the flag survives new tabs and
+  // browser restarts; clear it via DevTools to rewatch the intro.
+  useEffect(() => {
+    try {
+      localStorage.setItem("alp:intro-played", "1");
+    } catch {
+      /* localStorage unavailable (privacy mode) — intro will replay, fine. */
+    }
+  }, []);
+
   return (
     <div className="fixed inset-0 overflow-hidden bg-obsidian flex items-center justify-center">
       <main

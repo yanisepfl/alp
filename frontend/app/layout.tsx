@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Inter, Radley } from "next/font/google";
 import "./globals.css";
+import { PersistentBackdrop } from "@/components/persistent-backdrop";
 
 const sans = Inter({
   subsets: ["latin"],
@@ -29,6 +30,21 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${sans.variable} ${radley.variable}`}>
       <body>
+        {/* Skip the entry animations on subsequent loads. Inlined as the
+            first body node so it runs before React hydrates — a script-
+            injected <style> in <head> sits outside React's tree, so
+            hydration can't strip it (an earlier data-attribute approach
+            on <html> got reverted post-hydration). Clear the
+            `alp:intro-played` localStorage key to re-watch the intro. */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              "try{if(localStorage.getItem('alp:intro-played')==='1'){var s=document.createElement('style');s.id='alp-skip-intro';s.textContent='.settle,.lift,.reveal{animation:none!important}';document.head.appendChild(s);}}catch(e){}",
+          }}
+        />
+        {/* Shared muted-landscape backdrop at the LMC panel rect — keeps
+            the bg from reloading on landing → /app navigation. */}
+        <PersistentBackdrop />
         {children}
         <div
           aria-hidden
