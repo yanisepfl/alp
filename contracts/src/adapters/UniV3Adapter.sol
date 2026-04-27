@@ -276,6 +276,19 @@ contract UniV3Adapter is ILiquidityAdapter {
         return address(npm);
     }
 
+    /// @notice Helper that returns the canonical V3 tick spacing for a given
+    /// fee tier. Useful when constructing a `PoolRegistry.Pool` entry so the
+    /// guardian doesn't have to memorise the V3 spec mapping. Reverts on
+    /// non-standard fees so misconfigured pools fail loudly at registration
+    /// time rather than producing surprising behaviour later.
+    function v3TickSpacingForFee(uint24 fee) external pure returns (int24) {
+        if (fee == 100) return 1;
+        if (fee == 500) return 10;
+        if (fee == 3000) return 60;
+        if (fee == 10_000) return 200;
+        revert("UniV3Adapter: non-standard fee tier");
+    }
+
     function getPositionLiquidity(
         PoolRegistry.Pool calldata,
         /* pool */

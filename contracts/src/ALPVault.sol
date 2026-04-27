@@ -256,9 +256,12 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     function guardianSweep(address token, address recipient, uint256 amount) external onlyGuardian {
         if (token == asset()) revert CannotSweepProtectedToken(token);
         uint256 numPools = registry.poolCount();
-        for (uint256 i; i < numPools; ++i) {
+        for (uint256 i; i < numPools;) {
             PoolRegistry.Pool memory p = registry.getPool(registry.poolKeys(i));
             if (p.token0 == token || p.token1 == token) revert CannotSweepProtectedToken(token);
+            unchecked {
+                ++i;
+            }
         }
         IERC20(token).safeTransfer(recipient, amount);
         emit Swept(token, recipient, amount);
@@ -299,11 +302,16 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         total = IERC20(base).balanceOf(address(this));
 
         uint256 numPools = _activePoolKeys.length;
-        for (uint256 i; i < numPools; ++i) {
+        for (uint256 i; i < numPools;) {
             // Skip pools the guardian has marked orphaned. They contribute
             // zero to TAV until manually rehabilitated.
             bytes32 key = _activePoolKeys[i];
-            if (_orphanedPool[key]) continue;
+            if (_orphanedPool[key]) {
+                unchecked {
+                    ++i;
+                }
+                continue;
+            }
             // A misbehaving non-base token, broken adapter, or pre-init pool
             // would otherwise brick deposits/redemptions. Skip and continue;
             // the guardian can `setPoolOrphaned` to surface and fix the
@@ -312,6 +320,9 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
                 total += v;
             } catch {
                 // intentionally swallowed — see comment above
+            }
+            unchecked {
+                ++i;
             }
         }
     }
@@ -350,13 +361,16 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
 
         uint256[] storage ids = _positionIdsByPool[key];
         uint256 numPositions = ids.length;
-        for (uint256 j; j < numPositions; ++j) {
+        for (uint256 j; j < numPositions;) {
             (uint256 amount0, uint256 amount1) = adapter_.getPositionAmountsAtPrice(pool, ids[j], sqrtPriceX96);
             uint256 baseAmount = baseIsToken0 ? amount0 : amount1;
             uint256 nonBaseAmount = baseIsToken0 ? amount1 : amount0;
             value += baseAmount;
             if (nonBaseAmount > 0) {
                 value += _convertToBase(nonBaseAmount, sqrtPriceX96, !baseIsToken0);
+            }
+            unchecked {
+                ++j;
             }
         }
     }
@@ -540,21 +554,26 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         ILiquidityAdapter adapter_ = ILiquidityAdapter(pool.adapter);
 
         uint256[] memory ids = _positionIdsByPool[poolKey];
+        uint256 idsLen = ids.length;
         bytes memory extra = abi.encode(deadline, true);
 
-        for (uint256 i; i < ids.length; ++i) {
+        for (uint256 i; i < idsLen;) {
             uint128 liquidity = adapter_.getPositionLiquidity(pool, ids[i]);
             // A zero reading can mean the position was already burned OR
             // that the adapter view itself reverted and was caught upstream.
             // Skip the position without untracking; a real burn will surface
             // via the next `executeRemoveLiquidity` and untrack cleanly.
-            if (liquidity == 0) continue;
-            (uint256 amount0Out, uint256 amount1Out, bool burned) =
-                adapter_.removeLiquidity(pool, ids[i], liquidity, 0, 0, extra);
-            if (burned) {
-                _untrackPosition(poolKey, ids[i]);
+            if (liquidity > 0) {
+                (uint256 amount0Out, uint256 amount1Out, bool burned) =
+                    adapter_.removeLiquidity(pool, ids[i], liquidity, 0, 0, extra);
+                if (burned) {
+                    _untrackPosition(poolKey, ids[i]);
+                }
+                emit LiquidityRemoved(poolKey, ids[i], amount0Out, amount1Out);
             }
-            emit LiquidityRemoved(poolKey, ids[i], amount0Out, amount1Out);
+            unchecked {
+                ++i;
+            }
         }
     }
 
@@ -898,20 +917,29 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     /// via the events.
     function _harvestAllPositions() internal {
         uint256 numPools = _activePoolKeys.length;
+        if (numPools == 0) return;
         address base = asset();
-        for (uint256 i; i < numPools; ++i) {
+        for (uint256 i; i < numPools;) {
             bytes32 key = _activePoolKeys[i];
-            if (_orphanedPool[key]) continue;
-            PoolRegistry.Pool memory pool = _trackedPools[key];
-            ILiquidityAdapter adapter_ = ILiquidityAdapter(pool.adapter);
-            uint256[] storage ids = _positionIdsByPool[key];
-            for (uint256 j; j < ids.length; ++j) {
-                try adapter_.collectFees(pool, ids[j]) returns (uint256 a0, uint256 a1) {
-                    if (pool.token0 == base) bookTAV += a0;
-                    else if (pool.token1 == base) bookTAV += a1;
-                } catch {
-                    // intentionally swallowed — see comment above
+            if (!_orphanedPool[key]) {
+                PoolRegistry.Pool memory pool = _trackedPools[key];
+                ILiquidityAdapter adapter_ = ILiquidityAdapter(pool.adapter);
+                uint256[] storage ids = _positionIdsByPool[key];
+                uint256 idsLen = ids.length;
+                for (uint256 j; j < idsLen;) {
+                    try adapter_.collectFees(pool, ids[j]) returns (uint256 a0, uint256 a1) {
+                        if (pool.token0 == base) bookTAV += a0;
+                        else if (pool.token1 == base) bookTAV += a1;
+                    } catch {
+                        // intentionally swallowed — see comment above
+                    }
+                    unchecked {
+                        ++j;
+                    }
                 }
+            }
+            unchecked {
+                ++i;
             }
         }
     }
