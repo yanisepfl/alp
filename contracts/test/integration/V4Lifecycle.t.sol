@@ -400,6 +400,96 @@ contract V4LifecycleTest is V4Deployers {
         assertEq(vault.positionCount(poolKeyHash), 0);
     }
 
+    // -------- Adapter coverage extensions --------
+
+    function test_increaseLiquidity_onExistingPosition() public {
+        vm.prank(alice);
+        vault.deposit(20_000e18, alice);
+        weth.mint(address(vault), 20_000e18);
+
+        // First mint a position.
+        (uint256 positionId, uint128 liquidityBefore,,) = vault.executeAddLiquidity(
+            poolKeyHash,
+            2_000e18,
+            2_000e18,
+            0,
+            0,
+            abi.encode(int24(-6_000), int24(6_000), block.timestamp + 600, uint256(0))
+        );
+
+        // Increase by passing existingPositionId.
+        (uint256 sameId, uint128 added,,) = vault.executeAddLiquidity(
+            poolKeyHash,
+            1_000e18,
+            1_000e18,
+            0,
+            0,
+            abi.encode(int24(-6_000), int24(6_000), block.timestamp + 600, positionId)
+        );
+        assertEq(sameId, positionId, "positionId should be reused");
+        assertGt(added, 0, "should have added liquidity");
+        assertGt(adapter.getPositionLiquidity(registry.getPool(poolKeyHash), positionId), liquidityBefore);
+        assertEq(vault.positionCount(poolKeyHash), 1, "still one position tracked");
+    }
+
+    function test_executeCollectFees_addsBaseSideToBookTAV() public {
+        vm.prank(alice);
+        vault.deposit(10_000e18, alice);
+        weth.mint(address(vault), 10_000e18);
+
+        (uint256 positionId,,,) = vault.executeAddLiquidity(
+            poolKeyHash,
+            5_000e18,
+            5_000e18,
+            0,
+            0,
+            abi.encode(int24(-6_000), int24(6_000), block.timestamp + 600, uint256(0))
+        );
+
+        // Drive fees through the pool.
+        usdc.approve(address(swapRouter), type(uint256).max);
+        weth.approve(address(swapRouter), type(uint256).max);
+        for (uint256 i = 0; i < 3; i++) {
+            swapRouter.swapExactTokensForTokens(5_000e18, 0, true, poolKey, "", address(this), block.timestamp + 60);
+            swapRouter.swapExactTokensForTokens(5_000e18, 0, false, poolKey, "", address(this), block.timestamp + 60);
+        }
+
+        uint256 bookBefore = vault.bookTAV();
+        (uint256 fee0, uint256 fee1) = vault.executeCollectFees(poolKeyHash, positionId);
+        assertGt(fee0 + fee1, 0, "fees collected");
+        // bookTAV grows by the base-side amount only (USDC is base).
+        uint256 expectedBump = address(usdc) == token0 ? fee0 : fee1;
+        assertEq(vault.bookTAV() - bookBefore, expectedBump, "bookTAV should match base-side fees");
+    }
+
+    function test_autoUnwind_onWithdrawShortfall() public {
+        // Alice deposits 10k USDC and the agent moves all of it into a position.
+        vm.prank(alice);
+        vault.deposit(10_000e18, alice);
+        // Agent: swap half to WETH, then add the position with both sides.
+        uint256 amtOut = vault.executeSwap(poolKeyHash, address(usdc), 5_000e18, 1, abi.encode(block.timestamp + 600));
+        assertGt(amtOut, 0);
+        vault.executeAddLiquidity(
+            poolKeyHash,
+            usdc.balanceOf(address(vault)),
+            weth.balanceOf(address(vault)),
+            0,
+            0,
+            abi.encode(int24(-6_000), int24(6_000), block.timestamp + 600, uint256(0))
+        );
+        // Idle base now ~= 0, all value in the position.
+        assertLt(usdc.balanceOf(address(vault)), 100e18, "expected most of base to be in the position");
+
+        // Alice tries to redeem half her shares. Idle base is short → auto-unwind kicks in.
+        vm.roll(block.number + 1);
+        uint256 sharesToBurn = vault.balanceOf(alice) / 2;
+        uint256 aliceBefore = usdc.balanceOf(alice);
+        vm.prank(alice);
+        uint256 received = vault.redeem(sharesToBurn, alice, alice);
+        assertGt(received, 0, "auto-unwind should have produced base");
+        assertGt(usdc.balanceOf(alice), aliceBefore);
+    }
+
     function test_partialRemove_keepsPositionTracked() public {
         vm.prank(alice);
         vault.deposit(10_000e18, alice);

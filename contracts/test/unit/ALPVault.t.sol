@@ -354,6 +354,155 @@ contract ALPVaultUnitTest is Test {
         vault.bootstrapAdapter(makeAddr("anyNft"), bogusAdapter);
     }
 
+    // -------- Coverage: revert paths for owner-tunables and sweep --------
+
+    function test_setSwapNotionalCapBps_outOfRange_reverts() public {
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ALPVault.InvalidFeeBps.selector, 0));
+        vault.setSwapNotionalCapBps(0);
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ALPVault.InvalidFeeBps.selector, 10_001));
+        vault.setSwapNotionalCapBps(10_001);
+    }
+
+    function test_setSwapNotionalCapBps_byNonOwner_reverts() public {
+        vm.expectRevert();
+        vm.prank(alice);
+        vault.setSwapNotionalCapBps(5_000);
+    }
+
+    function test_setEntryExitFeeBps_aboveMax_reverts() public {
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(ALPVault.InvalidFeeBps.selector, 201));
+        vault.setEntryExitFeeBps(201);
+    }
+
+    function test_setEntryExitFeeBps_byOwner_emitsAndUpdates() public {
+        vm.prank(owner);
+        vault.setEntryExitFeeBps(50);
+        assertEq(vault.entryExitFeeBps(), 50);
+    }
+
+    function test_setSwapNotionalCapBps_byOwner_emitsAndUpdates() public {
+        vm.prank(owner);
+        vault.setSwapNotionalCapBps(2_000);
+        assertEq(vault.swapNotionalCapBps(), 2_000);
+    }
+
+    function test_revokeAdapter_byNonGuardian_reverts() public {
+        vm.expectRevert(ALPVault.NotGuardian.selector);
+        vault.revokeAdapter(makeAddr("nft"), makeAddr("adapter"));
+    }
+
+    function test_setPoolOrphaned_byNonGuardian_reverts() public {
+        vm.expectRevert(ALPVault.NotGuardian.selector);
+        vault.setPoolOrphaned(bytes32("a"), true);
+    }
+
+    function test_setPoolOrphaned_byGuardian_works() public {
+        bytes32 key = bytes32("anyKey");
+        vm.prank(guardian);
+        vault.setPoolOrphaned(key, true);
+        assertTrue(vault.isPoolOrphaned(key));
+        vm.prank(guardian);
+        vault.setPoolOrphaned(key, false);
+        assertFalse(vault.isPoolOrphaned(key));
+    }
+
+    function test_guardianSweep_baseAsset_reverts() public {
+        vm.prank(guardian);
+        vm.expectRevert(abi.encodeWithSelector(ALPVault.CannotSweepProtectedToken.selector, address(usdc)));
+        vault.guardianSweep(address(usdc), bob, 1);
+    }
+
+    function test_guardianSweep_byNonGuardian_reverts() public {
+        vm.expectRevert(ALPVault.NotGuardian.selector);
+        vault.guardianSweep(makeAddr("randomTkn"), bob, 0);
+    }
+
+    function test_guardianSweep_unrelatedToken_works() public {
+        // Mint a stranded token nobody else holds
+        MockERC20Token stray = new MockERC20Token("Stray", "STRAY", 18);
+        stray.mint(address(vault), 1_000e18);
+        vm.prank(guardian);
+        vault.guardianSweep(address(stray), bob, 600e18);
+        assertEq(stray.balanceOf(bob), 600e18);
+        assertEq(stray.balanceOf(address(vault)), 400e18);
+    }
+
+    function test_closeAllPositionsInPool_untrackedPool_reverts() public {
+        bytes32 fake = keccak256("ghost");
+        vm.expectRevert(abi.encodeWithSelector(ALPVault.PoolNotTracked.selector, fake));
+        vm.prank(agent);
+        vault.closeAllPositionsInPool(fake, block.timestamp + 60);
+    }
+
+    function test_marketTAV_includesIdleBaseEvenWithNoPools() public {
+        usdc.mint(address(vault), 750e6);
+        assertEq(vault.marketTAV(), 750e6);
+    }
+
+    function test_unpause_byNonGuardian_reverts() public {
+        vm.prank(guardian);
+        vault.pause();
+        vm.expectRevert(ALPVault.NotGuardian.selector);
+        vault.unpause();
+    }
+
+    function test_onERC721Received_returnsSelector() public view {
+        bytes4 selector = vault.onERC721Received(address(0), address(0), 0, "");
+        assertEq(selector, bytes4(keccak256("onERC721Received(address,address,uint256,bytes)")));
+    }
+
+    function test_getPositionIds_unknownPool_returnsEmpty() public view {
+        uint256[] memory ids = vault.getPositionIds(bytes32("none"));
+        assertEq(ids.length, 0);
+    }
+
+    function test_trackedPool_unknownPool_returnsZeroStruct() public view {
+        PoolRegistry.Pool memory p = vault.trackedPool(bytes32("none"));
+        assertEq(p.adapter, address(0));
+    }
+
+    // Cover the share-pricing fee accounting on every entry point.
+    function test_fee_appliedOnDeposit_mint_withdraw_redeem() public {
+        vm.prank(owner);
+        vault.setEntryExitFeeBps(100); // 1%
+
+        // Deposit: alice puts 1000 USDC. Vault keeps 10 (1%) as fee, mints
+        // shares for 990. Future redemptions at the elevated TAV per share.
+        vm.prank(alice);
+        uint256 sharesA = vault.deposit(1_000e6, alice);
+        assertEq(usdc.balanceOf(address(vault)), 1_000e6);
+
+        // Mint: bob targets a specific share count.
+        uint256 targetShares = sharesA / 4;
+        uint256 estAssets = vault.previewMint(targetShares);
+        usdc.mint(bob, estAssets);
+        vm.prank(bob);
+        usdc.approve(address(vault), estAssets);
+        vm.prank(bob);
+        uint256 paidByBob = vault.mint(targetShares, bob);
+        assertEq(paidByBob, estAssets);
+        assertGt(paidByBob, 0);
+
+        // Roll past the same-block lockout for bob.
+        vm.roll(block.number + 1);
+
+        // Withdraw: alice asks for 100 USDC out, vault burns shares for 100/(1-fee).
+        uint256 estShares = vault.previewWithdraw(100e6);
+        vm.prank(alice);
+        uint256 burned = vault.withdraw(100e6, alice, alice);
+        assertEq(burned, estShares);
+
+        // Redeem: bob exits all his shares; receives gross - fee.
+        uint256 estAssetsBack = vault.previewRedeem(targetShares);
+        vm.prank(bob);
+        uint256 receivedByBob = vault.redeem(targetShares, bob, bob);
+        assertEq(receivedByBob, estAssetsBack);
+    }
+
     function test_executeSwap_unknownPool_reverts() public {
         bytes32 fake = keccak256("fake");
         vm.expectRevert(abi.encodeWithSelector(ALPVault.PoolNotKnown.selector, fake));

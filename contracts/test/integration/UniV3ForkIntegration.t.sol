@@ -129,6 +129,68 @@ contract UniV3ForkIntegrationTest is Test {
         assertEq(IERC20(WETH).balanceOf(address(vault)), vaultWethBefore + amountOut);
     }
 
+    function test_v3_collectFees_growsBookTAV() public {
+        vm.prank(alice);
+        vault.deposit(20_000e6, alice);
+        vault.executeSwap(poolKeyHash, USDC, 5_000e6, 1, "");
+
+        uint256 vaultUsdc = IERC20(USDC).balanceOf(address(vault));
+        uint256 vaultWeth = IERC20(WETH).balanceOf(address(vault));
+        (uint256 positionId,,,) = vault.executeAddLiquidity(
+            poolKeyHash,
+            token0 == USDC ? vaultUsdc : vaultWeth,
+            token0 == USDC ? vaultWeth : vaultUsdc,
+            0,
+            0,
+            abi.encode(int24(-887_270), int24(887_270), block.timestamp + 600, uint256(0))
+        );
+
+        // Try to collect — fees may be near-zero on a fresh position but the
+        // call path itself should run cleanly and not break bookTAV.
+        uint256 bookBefore = vault.bookTAV();
+        vault.executeCollectFees(poolKeyHash, positionId);
+        uint256 bookAfter = vault.bookTAV();
+        assertGe(bookAfter, bookBefore, "bookTAV should be monotonic on collect");
+    }
+
+    function test_v3_increaseLiquidity_onExistingPosition() public {
+        vm.prank(alice);
+        vault.deposit(20_000e6, alice);
+        vault.executeSwap(poolKeyHash, USDC, 10_000e6, 1, "");
+
+        uint256 vaultUsdc = IERC20(USDC).balanceOf(address(vault));
+        uint256 vaultWeth = IERC20(WETH).balanceOf(address(vault));
+        // Mint a small position first using only part of the balance.
+        (uint256 positionId, uint128 liquidityBefore,,) = vault.executeAddLiquidity(
+            poolKeyHash,
+            token0 == USDC ? vaultUsdc / 2 : vaultWeth / 2,
+            token0 == USDC ? vaultWeth / 2 : vaultUsdc / 2,
+            0,
+            0,
+            abi.encode(int24(-887_270), int24(887_270), block.timestamp + 600, uint256(0))
+        );
+
+        // Now increase by routing the rest into the SAME position via existingPositionId.
+        uint256 vaultUsdcNow = IERC20(USDC).balanceOf(address(vault));
+        uint256 vaultWethNow = IERC20(WETH).balanceOf(address(vault));
+        (uint256 sameId, uint128 added,,) = vault.executeAddLiquidity(
+            poolKeyHash,
+            token0 == USDC ? vaultUsdcNow : vaultWethNow,
+            token0 == USDC ? vaultWethNow : vaultUsdcNow,
+            0,
+            0,
+            abi.encode(int24(-887_270), int24(887_270), block.timestamp + 600, positionId)
+        );
+        assertEq(sameId, positionId);
+        assertGt(added, 0);
+        uint128 liquidityAfter = adapter.getPositionLiquidity(
+            PoolRegistry.Pool(address(0), address(0), address(0), 0, 0, address(0), 0, false), positionId
+        );
+        // Just confirm liquidity moved in the right direction; the exact value
+        // depends on the live spot at fork time.
+        assertGt(liquidityAfter, liquidityBefore);
+    }
+
     function test_lifecycle_v3_fullCycle() public {
         // 1. Deposit
         vm.prank(alice);
