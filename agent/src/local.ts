@@ -3,13 +3,22 @@
  *  Usage:
  *    BASE_RPC_URL=... VAULT_ADDRESS=... ... pnpm local
  */
-import { loadConfig } from "./config.js";
+import { readFileSync } from "node:fs";
+
+import { loadConfig, parsePoolsJson } from "./config.js";
 import { MemoryActivityStore } from "./log.js";
 import type { PositionHysteresis } from "./planner.js";
 import { runTick } from "./runner.js";
 
 async function main() {
   const config = loadConfig(process.env);
+  // Load pool list from POOLS_JSON_PATH if set (the local bootstrap writes
+  // this file with the deployed pool keys).
+  const poolsPath = process.env.POOLS_JSON_PATH;
+  if (poolsPath) {
+    config.pools = parsePoolsJson(readFileSync(poolsPath, "utf8"));
+    console.log(`Loaded ${config.pools.length} pool(s) from ${poolsPath}`);
+  }
   const store = new MemoryActivityStore();
   const state = new Map<string, PositionHysteresis>();
 
@@ -34,8 +43,13 @@ async function main() {
     },
     options: { dryRun, force, positionKey },
   });
-  console.log("Result:", result);
-  console.log("Activity:", await store.recent(20));
+  console.log("Result:", JSON.stringify(result, jsonReplacer, 2));
+  const activity = await store.recent(20);
+  console.log("Activity:", JSON.stringify(activity, jsonReplacer, 2));
+}
+
+function jsonReplacer(_key: string, value: unknown): unknown {
+  return typeof value === "bigint" ? value.toString() : value;
 }
 
 main().catch((e) => {

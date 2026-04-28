@@ -1,0 +1,14 @@
+[
+  {
+    "label": "USDC/cbBTC 0.05%",
+    "lpKey": "0x0f249da91e64b3bbab451b016a78deadfc97bd2482e34ba62069c756fadfa2e2",
+    "urKey": "0xc666142be0ed23547c0f0f7e68ebe06bed7f043e9cc0626cdc94fa8f4634ce35",
+    "token0": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "token1": "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
+    "decimals0": 6,
+    "decimals1": 8,
+    "fee": 500,
+    "tickSpacing": 10,
+    "profile": "mid"
+  }
+]

@@ -55,12 +55,20 @@ contract PoolRegistry is Ownable2Step {
     bytes32[] public poolKeys;
     mapping(bytes32 => uint256) internal _poolKeyIndex; // 1-based; 0 = absent
 
+    /// @notice Owner-managed allowlist of V4 hook contracts the protocol is
+    /// willing to interact with. Pools whose `hooks` field is non-zero may
+    /// only be registered when their hook address is in this set, and the
+    /// vault's runtime checks consult the same mapping. The default empty
+    /// set preserves the original "no hooks at all" posture.
+    mapping(address => bool) public hookAllowed;
+
     event GuardianUpdated(address indexed previous, address indexed current);
     event PositionGuardUpdated(address indexed previous, address indexed current);
     event PoolAdded(bytes32 indexed key, Pool pool);
     event PoolRemoved(bytes32 indexed key);
     event PoolMaxAllocationUpdated(bytes32 indexed key, uint16 maxAllocationBps);
     event PoolEnabledSet(bytes32 indexed key, bool enabled);
+    event HookAllowedSet(address indexed hook, bool allowed);
 
     error NotGuardian();
     error UnknownPool(bytes32 key);
@@ -105,11 +113,13 @@ contract PoolRegistry is Ownable2Step {
         // the V3 adapter layer but kept consistent so any future tooling
         // can derive the right step without consulting the adapter.
         if (p.tickSpacing <= 0) revert InvalidConfig();
-        // Hook contracts are blocked at the registry layer too. The vault
-        // also rejects them on every routed call (defence in depth) but
-        // refusing them at registration time keeps the whitelist itself
-        // free of pools the protocol cannot safely interact with.
-        if (p.hooks != address(0)) revert HookedPoolsNotAllowed();
+        // Hook contracts are blocked at the registry layer unless the owner
+        // has explicitly allowlisted that specific hook address. The vault
+        // also re-checks at every routed call (defence in depth) — both
+        // layers consult the same `hookAllowed` mapping so a hook the owner
+        // later revokes is rejected on the next call without needing to
+        // mutate any pool entries.
+        if (p.hooks != address(0) && !hookAllowed[p.hooks]) revert HookedPoolsNotAllowed();
 
         key = poolKey(p.adapter, p.token0, p.token1, p.fee, p.tickSpacing, p.hooks);
         if (_poolKeyIndex[key] != 0) revert PoolAlreadyExists(key);
@@ -150,6 +160,23 @@ contract PoolRegistry is Ownable2Step {
     function setPositionGuard(address newGuard) external onlyOwner {
         emit PositionGuardUpdated(positionGuard, newGuard);
         positionGuard = newGuard;
+    }
+
+    /// @notice Allow or revoke a specific V4 hook address. Reviewing a hook
+    /// before allowlisting it is the owner's responsibility — the vault
+    /// trusts every hook here to behave correctly during V4's unlock /
+    /// settle cycle. Revoking a previously-allowed hook does not retire any
+    /// existing pool entries; it just stops new operations from going
+    /// through them (the vault's runtime check will revert).
+    function setHookAllowed(address hook, bool allowed) external onlyOwner {
+        if (hook == address(0)) revert InvalidConfig();
+        hookAllowed[hook] = allowed;
+        emit HookAllowedSet(hook, allowed);
+    }
+
+    /// @notice Convenience view used by the vault's runtime hook check.
+    function isHookAllowed(address hook) external view returns (bool) {
+        return hook == address(0) || hookAllowed[hook];
     }
 
     function setPoolMaxAllocation(bytes32 key, uint16 maxAllocationBps) external onlyGuardian {

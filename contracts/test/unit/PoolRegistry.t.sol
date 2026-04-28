@@ -124,6 +124,54 @@ contract PoolRegistryTest is Test {
         registry.addPool(p);
     }
 
+    function test_addPool_withAllowlistedHook_succeeds() public {
+        address hook = makeAddr("alphixHook");
+        vm.prank(owner);
+        registry.setHookAllowed(hook, true);
+
+        PoolRegistry.Pool memory p = _samplePool();
+        p.hooks = hook;
+        vm.prank(guardian);
+        bytes32 key = registry.addPool(p);
+        assertEq(registry.getPool(key).hooks, hook);
+    }
+
+    function test_addPool_withRevokedHook_reverts() public {
+        address hook = makeAddr("alphixHook");
+        vm.startPrank(owner);
+        registry.setHookAllowed(hook, true);
+        registry.setHookAllowed(hook, false);
+        vm.stopPrank();
+
+        PoolRegistry.Pool memory p = _samplePool();
+        p.hooks = hook;
+        vm.prank(guardian);
+        vm.expectRevert(PoolRegistry.HookedPoolsNotAllowed.selector);
+        registry.addPool(p);
+    }
+
+    function test_setHookAllowed_byNonOwner_reverts() public {
+        address hook = makeAddr("alphixHook");
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        registry.setHookAllowed(hook, true);
+    }
+
+    function test_setHookAllowed_zeroAddress_reverts() public {
+        vm.prank(owner);
+        vm.expectRevert(PoolRegistry.InvalidConfig.selector);
+        registry.setHookAllowed(address(0), true);
+    }
+
+    function test_isHookAllowed_zeroAddressAlwaysAllowed() public view {
+        assertTrue(registry.isHookAllowed(address(0)));
+    }
+
+    function test_isHookAllowed_unsetReturnsFalse() public {
+        address hook = makeAddr("randomHook");
+        assertFalse(registry.isHookAllowed(hook));
+    }
+
     function test_addPool_duplicate_reverts() public {
         PoolRegistry.Pool memory p = _samplePool();
         vm.startPrank(guardian);

@@ -396,10 +396,12 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         address base = asset();
         if (pool.token0 != base && pool.token1 != base) revert BaseAssetNotInPool(poolKey);
         // Hook contracts can fire callbacks inside V4's `modifyLiquidities`
-        // that read or steer the vault's state mid-transaction. We block
-        // hooked pools entirely until each hook is reviewed and explicitly
-        // allowlisted; V3 always passes (`hooks == address(0)`).
-        if (pool.hooks != address(0)) revert HookedPoolsNotAllowed(poolKey);
+        // that read or steer the vault's state mid-transaction. We require
+        // the registry to have explicitly allowlisted the hook (V3 always
+        // passes via `hooks == address(0)`). The registry view consults the
+        // same map that gates `addPool`, so revoking a hook there blocks
+        // both new registrations and live calls.
+        if (!registry.isHookAllowed(pool.hooks)) revert HookedPoolsNotAllowed(poolKey);
 
         // Bind any agent-supplied existingPositionId (last word of `extra`)
         // to the supplied poolKey. Without this a buggy or malicious agent
@@ -505,10 +507,12 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         if (amountOutMin == 0) revert SlippageMinRequired();
         if (!registry.isPoolKnown(poolKey)) revert PoolNotKnown(poolKey);
         PoolRegistry.Pool memory pool = registry.getPool(poolKey);
-        // Hooked V4 pools are blocked here as well as on the add path,
-        // because a hook can fire callbacks during the V4 swap router's
-        // unlock/settle cycle and reach back into the vault's read path.
-        if (pool.hooks != address(0)) revert HookedPoolsNotAllowed(poolKey);
+        // Hooked V4 pools are blocked here as well as on the add path
+        // unless the registry's hook allowlist authorises them. A hook can
+        // fire callbacks during the V4 swap router's unlock/settle cycle
+        // and reach back into the vault's read path, so we re-check at
+        // every entry point.
+        if (!registry.isHookAllowed(pool.hooks)) revert HookedPoolsNotAllowed(poolKey);
 
         // Per-tx notional cap. The agent can move at most `swapNotionalCapBps`
         // of TAV in any single swap call. We measure `amountIn` in base-asset

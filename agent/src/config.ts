@@ -90,7 +90,18 @@ export function loadConfig(env: Record<string, string | undefined>): AgentConfig
     hysteresisCloserFraction: Number(env.HYSTERESIS_CLOSER_FRACTION ?? 0.5),
     tradingApiBase: env.TRADING_API_BASE ?? "https://trade-api.gateway.uniswap.org",
     tradingApiKey: env.TRADING_API_KEY,
-    // Pool list is populated post-deployment via `bootstrapPools.ts`.
+    // Pool list defaults empty; the local entrypoint can override via a JSON
+    // file (see `agent/pools.local.json` for the format expected).
     pools: [],
   };
+}
+
+/** Parse the JSON pool config produced by `scripts/local-fork.sh`. */
+export function parsePoolsJson(json: string): PoolConfig[] {
+  const raw = JSON.parse(json) as Array<Omit<PoolConfig, "lpKey" | "urKey"> & { lpKey: string; urKey: string }>;
+  return raw.map((p) => ({
+    ...p,
+    lpKey: p.lpKey as `0x${string}`,
+    urKey: p.urKey as `0x${string}`,
+  }));
 }

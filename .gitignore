@@ -16,3 +16,7 @@ contracts/out/
 contracts/cache/
 contracts/broadcast/
 .audit-reports/
+agent/.env.local
+.anvil.log
+contracts/broadcast/
+contracts/cache/
