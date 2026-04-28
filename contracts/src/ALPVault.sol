@@ -57,6 +57,14 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     /// hot path or the wind-down path.
     uint256 public constant MAX_POSITIONS_PER_POOL = 4;
 
+    /// @notice Wrapped ETH on Base. V4 native-ETH pools store
+    /// `currency0 = address(0)` in their PoolKey but the vault holds the
+    /// ERC20-compatible WETH for accounting / approvals. The V4 adapter
+    /// unwraps WETH → native ETH before the V4 settle and wraps received
+    /// native ETH back into WETH on take. Hardcoded for Base (mainnet and
+    /// Sepolia both use the same predeploy at this address).
+    address public constant WRAPPED_NATIVE = 0x4200000000000000000000000000000000000006;
+
     PoolRegistry public immutable registry;
 
     /// @notice Per-tx swap cap, expressed in basis points of `totalAssets()`.
@@ -179,6 +187,13 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         guardian = initialGuardian;
         emit AgentUpdated(address(0), initialAgent);
         emit GuardianUpdated(address(0), initialGuardian);
+    }
+
+    /// @notice Returns the ERC20 address the vault uses for accounting and
+    /// approvals when operating on `token`. Native ETH (V4 currency0 = 0)
+    /// resolves to `WRAPPED_NATIVE`; everything else maps to itself.
+    function _erc20Of(address token) internal pure returns (address) {
+        return token == address(0) ? WRAPPED_NATIVE : token;
     }
 
     // -------- Role management --------
@@ -353,7 +368,7 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         // attributes idle non-base. Matches the historic semantics of
         // _alreadyCounted but without the per-call O(N) scan.
         if (_valuationPoolByToken[nonBase] == key) {
-            uint256 idleNonBase = IERC20(nonBase).balanceOf(address(this));
+            uint256 idleNonBase = IERC20(_erc20Of(nonBase)).balanceOf(address(this));
             if (idleNonBase > 0) {
                 value += _convertToBase(idleNonBase, sqrtPriceX96, !baseIsToken0);
             }
@@ -414,14 +429,14 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
 
         _trackPoolIfNew(poolKey, pool);
 
-        IERC20(pool.token0).forceApprove(pool.adapter, amount0Desired);
-        IERC20(pool.token1).forceApprove(pool.adapter, amount1Desired);
+        IERC20(_erc20Of(pool.token0)).forceApprove(pool.adapter, amount0Desired);
+        IERC20(_erc20Of(pool.token1)).forceApprove(pool.adapter, amount1Desired);
 
         (positionId, liquidity, amount0Used, amount1Used) = ILiquidityAdapter(pool.adapter)
             .addLiquidity(pool, amount0Desired, amount1Desired, amount0Min, amount1Min, extra);
 
-        IERC20(pool.token0).forceApprove(pool.adapter, 0);
-        IERC20(pool.token1).forceApprove(pool.adapter, 0);
+        IERC20(_erc20Of(pool.token0)).forceApprove(pool.adapter, 0);
+        IERC20(_erc20Of(pool.token1)).forceApprove(pool.adapter, 0);
 
         _trackPositionIfNew(poolKey, positionId);
 
@@ -531,9 +546,9 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
             if (amountInBase > cap) revert SwapNotionalCapExceeded(amountInBase, cap);
         }
 
-        IERC20(tokenIn).forceApprove(pool.adapter, amountIn);
+        IERC20(_erc20Of(tokenIn)).forceApprove(pool.adapter, amountIn);
         amountOut = ILiquidityAdapter(pool.adapter).swapExactIn(pool, tokenIn, amountIn, amountOutMin, extra);
-        IERC20(tokenIn).forceApprove(pool.adapter, 0);
+        IERC20(_erc20Of(tokenIn)).forceApprove(pool.adapter, 0);
 
         emit Swapped(poolKey, tokenIn, amountIn, amountOut);
     }
@@ -729,10 +744,10 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
             // We don't have the snapshot, so approximate: send ratio of
             // current balance. This slightly under-pays the redeemer for
             // the peeled amount but never over-pays the vault.
-            uint256 nonBaseBalance = IERC20(nonBase).balanceOf(address(this));
+            uint256 nonBaseBalance = IERC20(_erc20Of(nonBase)).balanceOf(address(this));
             uint256 nonBaseAmt = Math.mulDiv(nonBaseBalance, shares, supply);
             if (nonBaseAmt > 0) {
-                IERC20(nonBase).safeTransfer(receiver, nonBaseAmt);
+                IERC20(_erc20Of(nonBase)).safeTransfer(receiver, nonBaseAmt);
                 emit InKindToken(nonBase, nonBaseAmt);
             }
         }
@@ -1017,11 +1032,11 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
             // Swap any non-base proceeds in this pool back to base. Skipped
             // silently on revert (dust below router minimum, etc.).
             address nonBase = baseIsToken0 ? pool.token1 : pool.token0;
-            uint256 nonBaseBal = IERC20(nonBase).balanceOf(address(this));
+            uint256 nonBaseBal = IERC20(_erc20Of(nonBase)).balanceOf(address(this));
             if (nonBaseBal > 0) {
-                IERC20(nonBase).forceApprove(pool.adapter, nonBaseBal);
+                IERC20(_erc20Of(nonBase)).forceApprove(pool.adapter, nonBaseBal);
                 try adapter_.swapExactIn(pool, nonBase, nonBaseBal, 1, swapExtra) {} catch {}
-                IERC20(nonBase).forceApprove(pool.adapter, 0);
+                IERC20(_erc20Of(nonBase)).forceApprove(pool.adapter, 0);
             }
         }
     }
