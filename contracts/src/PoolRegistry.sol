@@ -104,7 +104,11 @@ contract PoolRegistry is Ownable2Step {
     }
 
     function addPool(Pool calldata p) external onlyGuardian returns (bytes32 key) {
-        if (p.adapter == address(0) || p.token0 == address(0) || p.token1 == address(0)) revert InvalidConfig();
+        // `adapter` and `token1` are always required. `token0 == address(0)`
+        // is permitted as the V4 sentinel for native ETH; ERC20-paired pools
+        // still need both tokens. token0 < token1 is enforced unconditionally
+        // (address(0) < every other address, so V4 native pools satisfy it).
+        if (p.adapter == address(0) || p.token1 == address(0)) revert InvalidConfig();
         if (p.token0 >= p.token1) revert InvalidConfig();
         if (p.maxAllocationBps == 0 || p.maxAllocationBps > 10_000) revert InvalidConfig();
         // tickSpacing must be strictly positive. V4 pools require the live

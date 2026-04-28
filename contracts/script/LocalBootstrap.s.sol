@@ -95,16 +95,16 @@ contract LocalBootstrap is Script {
         vault.bootstrapAdapter(V3_NPM, address(v3Adapter));
         vault.bootstrapAdapter(V4_POSITION_MANAGER, address(v4Adapter));
 
-        // LP-pool entries (one per real pool)
-        // NOTE: the Alphix V4 ETH/USDC pool (hook 0x7cBb...9044, allowlisted
-        // above) uses native ETH as token0. Registering it requires loosening
-        // PoolRegistry's `token0 != address(0)` invariant AND adding native-ETH
-        // support to UniV4Adapter (currently does IERC20.safeTransferFrom on
-        // both tokens). Out of scope for the demo bootstrap; the hook
-        // allowlist plumbing is in place for any ERC20-paired hooked pool.
+        // LP-pool entries.
         // Per-pool allocation caps modeled loosely on JLP/GLP composition:
         // stables can absorb 100% of the vault, volatile pairs are capped at
         // 30% so a single position can't dominate.
+        // Alphix V4 ETH/USDC pool (hook allowlisted above; uses native ETH
+        // as token0). Registry accepts it; opening positions there requires
+        // the V4 adapter's native-ETH path (separate work item).
+        bytes32 alphixKey = registry.addPool(
+            _lpPool(address(v4Adapter), ETH_NATIVE, USDC, ALPHIX_FEE, ALPHIX_TICK_SPACING, ALPHIX_HOOK, 3_000)
+        );
         bytes32 cbbtcKey = registry.addPool(
             _lpPool(address(v3Adapter), _low(USDC, CBBTC), _high(USDC, CBBTC), 500, 10, address(0), 3_000)
         );
@@ -181,6 +181,7 @@ contract LocalBootstrap is Script {
         console2.log("AGENT_PRIVATE_KEY=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d");
         console2.log("");
         console2.log("# Pool keys");
+        console2.log("ALPHIX_V4_ETH_USDC_KEY=", uint256(alphixKey));
         console2.log("V3_USDC_CBBTC_KEY=  ", uint256(cbbtcKey));
         console2.log("V3_USDC_USDT_KEY=   ", uint256(usdtKey));
         console2.log("UR_USDC_WETH_KEY=   ", uint256(urEthKey));
