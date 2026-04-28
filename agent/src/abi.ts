@@ -162,6 +162,47 @@ export const v3FactoryAbi = [
   },
 ] as const;
 
+/** V4 PositionManager subset used by monitor. */
+export const v4PositionManagerAbi = [
+  {
+    type: "function",
+    name: "getPositionLiquidity",
+    stateMutability: "view",
+    inputs: [{ name: "tokenId", type: "uint256" }],
+    outputs: [{ type: "uint128" }],
+  },
+  {
+    type: "function",
+    name: "getPoolAndPositionInfo",
+    stateMutability: "view",
+    inputs: [{ name: "tokenId", type: "uint256" }],
+    outputs: [
+      {
+        type: "tuple",
+        components: [
+          { name: "currency0", type: "address" },
+          { name: "currency1", type: "address" },
+          { name: "fee", type: "uint24" },
+          { name: "tickSpacing", type: "int24" },
+          { name: "hooks", type: "address" },
+        ],
+      },
+      { type: "uint256" }, // PositionInfo packed
+    ],
+  },
+] as const;
+
+/** V4 PoolManager extsload — reads a single 32-byte storage slot. */
+export const v4PoolManagerAbi = [
+  {
+    type: "function",
+    name: "extsload",
+    stateMutability: "view",
+    inputs: [{ name: "slot", type: "bytes32" }],
+    outputs: [{ type: "bytes32" }],
+  },
+] as const;
+
 export const npmAbi = [
   {
     type: "function",

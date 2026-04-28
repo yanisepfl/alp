@@ -32,6 +32,7 @@ contract UniV3Adapter is ILiquidityAdapter {
     error UnknownToken(address token);
     error PoolNotFound();
     error NotVault();
+    error UnexpectedEth();
 
     modifier onlyVault() {
         if (msg.sender != vault) revert NotVault();
@@ -65,6 +66,10 @@ contract UniV3Adapter is ILiquidityAdapter {
         onlyVault
         returns (uint256 positionId, uint128 liquidity, uint256 amount0Used, uint256 amount1Used)
     {
+        // V3 only handles ERC20 tokens. The interface is `payable` to allow
+        // the V4 adapter to receive native ETH; here we reject any ETH that
+        // gets forwarded so it can't accumulate (slither: locking-ether).
+        if (msg.value != 0) revert UnexpectedEth();
         (int24 tickLower, int24 tickUpper, uint256 deadline, uint256 existingPositionId) =
             abi.decode(extra, (int24, int24, uint256, uint256));
 
@@ -178,6 +183,7 @@ contract UniV3Adapter is ILiquidityAdapter {
         uint256 amountOutMin,
         bytes calldata extra
     ) external payable onlyVault returns (uint256 amountOut) {
+        if (msg.value != 0) revert UnexpectedEth();
         if (tokenIn != pool.token0 && tokenIn != pool.token1) revert UnknownToken(tokenIn);
         address tokenOut = (tokenIn == pool.token0) ? pool.token1 : pool.token0;
 

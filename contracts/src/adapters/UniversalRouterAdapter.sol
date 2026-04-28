@@ -50,6 +50,7 @@ contract UniversalRouterAdapter is ILiquidityAdapter {
     error UnknownToken(address token);
     error InsufficientOutput(uint256 minOut, uint256 actualOut);
     error PoolNotFound();
+    error UnexpectedEth();
 
     modifier onlyVault() {
         if (msg.sender != vault) revert NotVault();
@@ -76,6 +77,11 @@ contract UniversalRouterAdapter is ILiquidityAdapter {
         uint256 amountOutMin,
         bytes calldata extra
     ) external payable onlyVault returns (uint256 amountOut) {
+        // URAdapter routes ERC20 swaps through Permit2 → Universal Router.
+        // Native-ETH swap routing through UR is a separate adapter feature
+        // (UNWRAP_WETH command etc.); reject msg.value here so it can't
+        // accumulate (slither: locking-ether).
+        if (msg.value != 0) revert UnexpectedEth();
         if (tokenIn != pool.token0 && tokenIn != pool.token1) revert UnknownToken(tokenIn);
         address tokenOut = tokenIn == pool.token0 ? pool.token1 : pool.token0;
 

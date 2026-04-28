@@ -2,23 +2,34 @@ import type { Address, Hex } from "viem";
 
 export type VolatilityProfile = "stable" | "low" | "mid" | "high";
 
+export type AdapterKind = "v3" | "v4";
+
 export interface PoolConfig {
   /** Human-readable pool label, used in logs. */
   label: string;
-  /** V3 LP pool registry key — hashed by `PoolRegistry.poolKey(...)`. */
+  /** Which adapter the pool routes through. Drives the monitor / executor
+   *  branching for V4-specific reads (PositionManager + PoolManager). */
+  kind: AdapterKind;
+  /** LP pool registry key — hashed by `PoolRegistry.poolKey(...)`. */
   lpKey: Hex;
-  /** URAdapter "router pool" registry key for swaps in this pair. */
+  /** URAdapter "router pool" registry key for swaps in this pair (only used
+   *  on the rebalance swap step; V4 native-ETH swaps via UR aren't wired
+   *  yet, so V4 pools keep this zero). */
   urKey: Hex;
-  /** Sorted pool tokens (token0 < token1). */
+  /** Pool tokens. For V4 native-ETH pools, `token0 = 0x000...000`. Sorting
+   *  is `token0 < token1` (address(0) compares as smallest). */
   token0: Address;
   token1: Address;
   /** Decimals of token0 / token1 — used for human-friendly logging. */
   decimals0: number;
   decimals1: number;
-  /** V3 fee tier (100 / 500 / 3000 / 10000). */
-  fee: 100 | 500 | 3000 | 10000;
-  /** V3 tickSpacing matching the fee tier. */
+  /** V3 fee tier (100/500/3000/10000) or V4 PoolKey.fee. V4 hooked pools
+   *  use 0x800000 (DYNAMIC_FEE_FLAG). */
+  fee: number;
+  /** V3 tickSpacing matching the fee tier; V4 PoolKey.tickSpacing. */
   tickSpacing: number;
+  /** V4 PoolKey.hooks — address(0) for V3 and unhooked V4 pools. */
+  hooks: Address;
   /** Volatility profile drives target range width (see `widthForProfile`). */
   profile: VolatilityProfile;
 }
@@ -28,7 +39,12 @@ export interface AgentConfig {
   vaultAddress: Address;
   registryAddress: Address;
   v3AdapterAddress: Address;
+  v4AdapterAddress: Address;
   urAdapterAddress: Address;
+  /** V4 PositionManager — used by monitor to read V4 position liquidity + ranges. */
+  v4PositionManagerAddress: Address;
+  /** V4 PoolManager — used by monitor (extsload) to read pool tick. */
+  v4PoolManagerAddress: Address;
   agentPrivateKey: Hex;
   /** Slippage tolerance applied to Trading API quotes, in basis points. */
   swapSlippageBps: number;
@@ -86,7 +102,10 @@ export function loadConfig(env: Record<string, string | undefined>): AgentConfig
     vaultAddress: required("VAULT_ADDRESS") as Address,
     registryAddress: required("REGISTRY_ADDRESS") as Address,
     v3AdapterAddress: required("V3_ADAPTER_ADDRESS") as Address,
+    v4AdapterAddress: required("V4_ADAPTER_ADDRESS") as Address,
     urAdapterAddress: required("UR_ADAPTER_ADDRESS") as Address,
+    v4PositionManagerAddress: (env.V4_POSITION_MANAGER_ADDRESS ?? "0x7C5f5A4bBd8fD63184577525326123B519429bDc") as Address,
+    v4PoolManagerAddress: (env.V4_POOL_MANAGER_ADDRESS ?? "0x498581fF718922c3f8e6A244956aF099B2652b2b") as Address,
     agentPrivateKey: required("AGENT_PRIVATE_KEY") as Hex,
     swapSlippageBps: Number(env.SWAP_SLIPPAGE_BPS ?? 50), // 0.50%
     liquiditySlippageBps: Number(env.LIQUIDITY_SLIPPAGE_BPS ?? 100), // 1.00%
