@@ -184,16 +184,20 @@ function CloseButton({ onClick }: { onClick: () => void }) {
 const SWITCH_TRANSITION =
   "transform 450ms cubic-bezier(0.6, 0, 0.3, 1), opacity 450ms cubic-bezier(0.6, 0, 0.3, 1)";
 
-function TotalDeposits() {
+function TotalDeposits({ exiting = false }: { exiting?: boolean }) {
   const [expanded, setExpanded] = useState(false);
 
   return (
     <div
-      className="reveal absolute z-30"
+      className={exiting ? "absolute z-30" : "reveal absolute z-30"}
       style={{
         top: "calc(20% - 28px)",
         right: "20%",
         animationDelay: "2600ms",
+        opacity: exiting ? 0 : undefined,
+        transform: exiting ? "translateY(-12px)" : undefined,
+        transition: exiting ? "opacity 360ms ease-out, transform 360ms ease-out" : undefined,
+        pointerEvents: exiting ? "none" : undefined,
       }}
     >
       {/* Collapsed view */}
@@ -2211,41 +2215,65 @@ function InlinePill({ icon, iconImage, iconPair, tooltip, children }: InlinePill
 
   if (!tooltip) return pill;
 
-  // Hoverable variant. Popover uses frosted-glass chrome (matches the card
-  // system, no dark text-box feel). Content can be text OR a JSX grid.
+  return <InlinePillWithTooltip pill={pill} tooltip={tooltip} />;
+}
+
+// Portalled tooltip variant. Tracks hover via state + the pill's
+// bounding rect, then renders the popover at <body> level so its
+// `backdrop-filter` samples the actual page bg instead of the
+// already-filtered ancestor (which would collapse the frosted effect
+// when the pill sits inside a blurred segment, e.g. /app's Summary).
+function InlinePillWithTooltip({ pill, tooltip }: { pill: React.ReactNode; tooltip: React.ReactNode }) {
+  const [hover, setHover] = useState(false);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const wrapRef = useRef<HTMLSpanElement>(null);
+  const onEnter = () => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setPos({ left: r.left + r.width / 2, top: r.top });
+    setHover(true);
+  };
+  const onLeave = () => setHover(false);
+
   return (
     <span
-      className="group"
+      ref={wrapRef}
+      onMouseEnter={onEnter}
+      onMouseLeave={onLeave}
       style={{ position: "relative", display: "inline-block", whiteSpace: "nowrap" }}
     >
       {pill}
-      <span
-        aria-hidden
-        className="pointer-events-none opacity-0 transition-opacity duration-200 group-hover:opacity-100"
-        style={{
-          position: "absolute",
-          left: "50%",
-          bottom: "calc(100% + 10px)",
-          transform: "translateX(-50%)",
-          padding: 12,
-          borderRadius: 14,
-          background: "rgba(255,255,255,0.05)",
-          backdropFilter: "blur(24px)",
-          WebkitBackdropFilter: "blur(24px)",
-          border: "1px solid rgba(255,255,255,0.10)",
-          color: "rgba(255,255,255,0.92)",
-          fontFamily: "var(--font-radley)",
-          fontSize: 13,
-          fontWeight: 400,
-          lineHeight: 1.5,
-          width: "max-content",
-          maxWidth: 380,
-          whiteSpace: "normal",
-          zIndex: 50,
-        }}
-      >
-        {tooltip}
-      </span>
+      {hover && pos && typeof document !== "undefined" && createPortal(
+        <span
+          aria-hidden
+          style={{
+            position: "fixed",
+            left: pos.left,
+            top: pos.top - 10,
+            transform: "translate(-50%, -100%)",
+            padding: 12,
+            borderRadius: 14,
+            background: "rgba(255,255,255,0.05)",
+            backdropFilter: "blur(24px)",
+            WebkitBackdropFilter: "blur(24px)",
+            border: "1px solid rgba(255,255,255,0.10)",
+            color: "rgba(255,255,255,0.92)",
+            fontFamily: "var(--font-radley)",
+            fontSize: 13,
+            fontWeight: 400,
+            lineHeight: 1.5,
+            width: "max-content",
+            maxWidth: 380,
+            whiteSpace: "normal",
+            pointerEvents: "none",
+            zIndex: 1000,
+          }}
+        >
+          {tooltip}
+        </span>,
+        document.body,
+      )}
     </span>
   );
 }
@@ -2942,21 +2970,86 @@ function StrategyViz() {
   );
 }
 
-function LearnMoreContent({ open, onAppNav }: { open: boolean; onAppNav?: () => void }) {
+// Summary prose with inline interactive pills. Exported on its own
+// (no Card wrapper, no CardLabel) so /app can render it as plain
+// text in the hero column. SummaryCard wraps it for landing's LMC.
+export function SummaryText() {
   return (
     <div
-      className="absolute z-[25]"
       style={{
-        top: "calc(20% + 36px)",
-        left: "calc(20% + 36px)",
-        right: "calc(20% + 36px)",
-        bottom: "calc(20% + 36px)",
-        display: "flex",
-        flexDirection: "column",
-        opacity: open ? 1 : 0,
-        transition: "opacity 500ms cubic-bezier(0.16, 1, 0.3, 1)",
-        pointerEvents: open ? "auto" : "none",
+        color: "rgba(255,255,255,0.92)",
+        fontFamily: "var(--font-radley)",
+        fontSize: 18,
+        lineHeight: 1.55,
       }}
+    >
+      Deposit{" "}
+      <InlinePill iconImage={{ src: "/tokens/usdc.png", alt: "USDC" }}>
+        USDC
+      </InlinePill>{" "}
+      and gain exposure to a{" "}
+      <InlinePill icon="dots" tooltip={<PortfolioTooltip />}>
+        portfolio
+      </InlinePill>{" "}
+      of active positions across high volume{" "}
+      <InlinePill icon="gaming" tooltip={<PairsTooltip />}>
+        pairs
+      </InlinePill>
+      . An{" "}
+      <InlinePill
+        icon="sparkles"
+        tooltip="An agentic backend with rich context across markets, pools, and onchain conditions. Decides where to deploy, when to retighten, and when to rotate capital."
+      >
+        agent
+      </InlinePill>{" "}
+      tightens these positions and rotates capital between
+      pools to maximize fee earnings while managing{" "}
+      <InlinePill
+        icon="fingerprint"
+        tooltip="Impermanent loss, range exits, and capital drift. The agent's rebalancing and rotation are designed to manage all three."
+      >
+        risk
+      </InlinePill>
+      .
+    </div>
+  );
+}
+
+export function SummaryCard() {
+  return (
+    <Card>
+      <CardLabel icon="summary">Summary</CardLabel>
+      <div style={{ marginTop: 8 }}>
+        <SummaryText />
+      </div>
+    </Card>
+  );
+}
+
+export function LearnMoreContent({ open, onAppNav, inline = false }: { open: boolean; onAppNav?: () => void; inline?: boolean }) {
+  return (
+    <div
+      className={inline ? "" : "absolute z-[25]"}
+      style={
+        inline
+          ? {
+              display: "flex",
+              flexDirection: "column",
+              width: "100%",
+              minHeight: 0,
+            }
+          : {
+              top: "calc(20% + 36px)",
+              left: "calc(20% + 36px)",
+              right: "calc(20% + 36px)",
+              bottom: "calc(20% + 36px)",
+              display: "flex",
+              flexDirection: "column",
+              opacity: open ? 1 : 0,
+              transition: "opacity 500ms cubic-bezier(0.16, 1, 0.3, 1)",
+              pointerEvents: open ? "auto" : "none",
+            }
+      }
     >
       {/* Header -concrete fee stat over two lines, full container width.
           Subtitle delivers the why (infrastructure, not capital) and the
@@ -3002,7 +3095,7 @@ function LearnMoreContent({ open, onAppNav }: { open: boolean; onAppNav?: () => 
           display: "flex",
           gap: 14,
           marginTop: 14,
-          flex: 1,
+          flex: inline ? "none" : 1,
           minHeight: 0,
           alignItems: "flex-start",
         }}
@@ -3018,47 +3111,7 @@ function LearnMoreContent({ open, onAppNav }: { open: boolean; onAppNav?: () => 
             minWidth: 0,
           }}
         >
-        <Card>
-          <CardLabel icon="summary">Summary</CardLabel>
-          <p
-            style={{
-              margin: "8px 0 0 0",
-              color: "rgba(255,255,255,0.92)",
-              fontFamily: "var(--font-radley)",
-              fontSize: 18,
-              lineHeight: 1.55,
-            }}
-          >
-            You deposit{" "}
-            <InlinePill iconImage={{ src: "/tokens/usdc.png", alt: "USDC" }}>
-              USDC
-            </InlinePill>{" "}
-            and gain exposure to a{" "}
-            <InlinePill icon="dots" tooltip={<PortfolioTooltip />}>
-              portfolio
-            </InlinePill>{" "}
-            of active positions across high volume{" "}
-            <InlinePill icon="gaming" tooltip={<PairsTooltip />}>
-              pairs
-            </InlinePill>
-            . An{" "}
-            <InlinePill
-              icon="sparkles"
-              tooltip="An agentic backend with rich context across markets, pools, and onchain conditions. Decides where to deploy, when to retighten, and when to rotate capital."
-            >
-              agent
-            </InlinePill>{" "}
-            continuously tightens these positions and rotates capital between
-            pools to maximize fee earnings while managing{" "}
-            <InlinePill
-              icon="fingerprint"
-              tooltip="Impermanent loss, range exits, and capital drift. The agent's rebalancing and rotation are designed to manage all three."
-            >
-              risk
-            </InlinePill>
-            .
-          </p>
-        </Card>
+        <SummaryCard />
 
         {/* Stack — single card. Unlike Strategy/Vault flow which have a
             CardLabel pill at top followed by a side-by-side row, here the
@@ -3188,11 +3241,13 @@ function LearnMoreContent({ open, onAppNav }: { open: boolean; onAppNav?: () => 
           </div>
 
           {/* Open App — marginTop:auto pushes it to the bottom of the
-              right column regardless of Strategy's content height. */}
+              right column regardless of Strategy's content height.
+              Hidden when rendered inline on /app since the user is
+              already in the app. */}
           <div
             style={{
               marginTop: "auto",
-              display: "flex",
+              display: inline ? "none" : "flex",
               justifyContent: "flex-end",
               alignItems: "center",
               gap: 8,
@@ -3279,16 +3334,20 @@ function LearnMoreContent({ open, onAppNav }: { open: boolean; onAppNav?: () => 
   );
 }
 
-function BuiltWith() {
+function BuiltWith({ exiting = false }: { exiting?: boolean }) {
   return (
     <a
       href="#"
-      className="reveal absolute z-30 flex items-center gap-1.5 text-xs text-haze group"
+      className={exiting ? "absolute z-30 flex items-center gap-1.5 text-xs text-haze group" : "reveal absolute z-30 flex items-center gap-1.5 text-xs text-haze group"}
       style={{
         top: "calc(80% + 12px)",
         right: "20%",
         animationDelay: "2600ms",
         textDecoration: "none",
+        opacity: exiting ? 0 : undefined,
+        transform: exiting ? "translateY(12px)" : undefined,
+        transition: exiting ? "opacity 360ms ease-out, transform 360ms ease-out" : undefined,
+        pointerEvents: exiting ? "none" : undefined,
       }}
     >
       <span>Built with</span>
@@ -3374,9 +3433,9 @@ export function LandingFace({
       {/* Learn-more overlay (headline + body + secondary Open App) */}
       <LearnMoreContent open={learnMore} onAppNav={handleAppNav} />
 
-      <TotalDeposits />
+      <TotalDeposits exiting={exiting} />
       <LearnMore open={learnMore} onClick={onToggleLearnMore} />
-      <BuiltWith />
+      <BuiltWith exiting={exiting} />
     </>
   );
 }

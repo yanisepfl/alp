@@ -3,7 +3,17 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import {
+  clientId,
+  subscribeAgentStream,
+  type ActionCategory,
+  type StreamHandle,
+  type WireMessage,
+  type WireSource,
+} from "@/lib/agent-stream";
+import { LearnMoreContent, SummaryText } from "@/components/landing-face";
 
 /* ---------- Panel rect math (mirrors Shell + Scenery from the landing) ---------- */
 
@@ -14,38 +24,70 @@ const SCALE_REF_H = (SCALE_REF_W * REF_H) / REF_W;
 const PANEL_INSET = 0.20;
 
 type PanelLayout = { left: number; top: number; width: number; height: number; scale: number };
-type FullLayout = { main: PanelLayout };
+type FullLayout = { main: PanelLayout; left: PanelLayout | null; right: PanelLayout | null };
 
+// Side panels (Dashboard left, Sherpa right) sit in the side margins
+// next to the main panel. Capped at MAX so they don't balloon on wide
+// monitors; only render if at least MIN of margin is free.
+const SIDE_PANEL_MIN_WIDTH = 240;
+const SIDE_PANEL_MAX_WIDTH = 400;
+const SIDE_PANEL_GAP = 14;
+const SIDE_PANEL_OUTER_MARGIN = 14;
+
+// Layout positions are resolved against the fixed canvas (REF_W ×
+// REF_H). The outer Shell scales the whole canvas via CSS transform
+// — same approach as the landing page in components/shell.tsx — so
+// every percentage / px value below is design-stable, no per-frame
+// math needed.
 function computeFullLayout(): FullLayout {
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
-  const scale = Math.min(1, vw / SCALE_REF_W, vh / SCALE_REF_H);
-  const canvasW = REF_W * scale;
-  const canvasH = REF_H * scale;
-  const canvasLeft = (vw - canvasW) / 2;
-  const canvasTop = (vh - canvasH) / 2;
+  const canvasW = REF_W;
+  const canvasH = REF_H;
 
-  const mainLeft = canvasLeft + canvasW * PANEL_INSET;
-  const mainTop = canvasTop + canvasH * PANEL_INSET;
+  const mainLeft = canvasW * PANEL_INSET;
+  const mainTop = canvasH * PANEL_INSET;
   const mainW = canvasW * (1 - 2 * PANEL_INSET);
   const mainH = canvasH * (1 - 2 * PANEL_INSET);
-  const main: PanelLayout = { left: mainLeft, top: mainTop, width: mainW, height: mainH, scale };
+  // `scale` stays 1 inside the canvas — the outer Shell handles the
+  // viewport scaling via transform: scale().
+  const main: PanelLayout = { left: mainLeft, top: mainTop, width: mainW, height: mainH, scale: 1 };
 
-  return { main };
+  const rightLeft = mainLeft + mainW + SIDE_PANEL_GAP;
+  const rightAvail = canvasW - rightLeft - SIDE_PANEL_OUTER_MARGIN;
+  const right: PanelLayout | null =
+    rightAvail >= SIDE_PANEL_MIN_WIDTH
+      ? { left: rightLeft, top: mainTop, width: Math.min(SIDE_PANEL_MAX_WIDTH, rightAvail), height: mainH, scale: 1 }
+      : null;
+
+  const leftAvail = mainLeft - SIDE_PANEL_OUTER_MARGIN - SIDE_PANEL_GAP;
+  const leftW = Math.min(SIDE_PANEL_MAX_WIDTH, leftAvail);
+  const left: PanelLayout | null =
+    leftAvail >= SIDE_PANEL_MIN_WIDTH
+      ? { left: mainLeft - SIDE_PANEL_GAP - leftW, top: mainTop, width: leftW, height: mainH, scale: 1 }
+      : null;
+
+  return { main, left, right };
 }
 
-// useState initializer so the layout (and FloatingNav) is in the DOM
-// on the first client render rather than after a useEffect tick.
+// Layout is now fully static — same numbers every render. Kept the
+// hook signature so call sites don't churn.
 function useFullLayout(): FullLayout | null {
-  const [layout, setLayout] = useState<FullLayout | null>(() =>
-    typeof window === "undefined" ? null : computeFullLayout(),
+  return computeFullLayout();
+}
+
+// Outer canvas scale — mirrors components/shell.tsx so /app and
+// landing scale identically.
+function useShellScale(): number {
+  const [scale, setScale] = useState<number>(() =>
+    typeof window === "undefined" ? 1 : Math.min(1, window.innerWidth / SCALE_REF_W, window.innerHeight / SCALE_REF_H)
   );
   useEffect(() => {
-    const update = () => setLayout(computeFullLayout());
-    window.addEventListener("resize", update);
-    return () => window.removeEventListener("resize", update);
+    const compute = () =>
+      setScale(Math.min(1, window.innerWidth / SCALE_REF_W, window.innerHeight / SCALE_REF_H));
+    compute();
+    window.addEventListener("resize", compute);
+    return () => window.removeEventListener("resize", compute);
   }, []);
-  return layout;
+  return scale;
 }
 
 // Landscape filter — colour-preserving, just slightly desaturated and dimmed.
@@ -53,13 +95,27 @@ function useFullLayout(): FullLayout | null {
 const LANDSCAPE_FILTER = "saturate(0.85) brightness(0.7)";
 
 // LMC-style muted filter — exact match to landing's Scenery muted state
-// (when learnMore = true). Applied to the bottom activity panel so it
+// (when learnMore = true). Applied to the agent chat sidebar so it
 // reads as a recessed, greyscaled surface vs the colourful main panel.
 const LANDSCAPE_FILTER_MUTED = "grayscale(0.85) saturate(0.35) contrast(0.85) brightness(0.55)";
 
 /* ---------- Constants & sample data ---------- */
 
 const SHARE_PRICE = 1.0427;
+
+// Demo wallet position. Real backend: read from `/me/position` once a
+// wallet is connected. Stable-token deposit so HODL value == principal,
+// which makes outperformance the same as raw P&L.
+const USER_DEPOSIT_TS = "2026-02-27T10:14:00";
+const USER_DEPOSIT_AMT = 5000;
+const USER_DEPOSIT_TX = "0x82a3…4d91";
+const USER_ENTRY_SHARE_PRICE = 1.0184;
+const USER_DAYS_HELD = 60;
+const USER_SHARES = USER_DEPOSIT_AMT / USER_ENTRY_SHARE_PRICE;
+const USER_VALUE = USER_SHARES * SHARE_PRICE;
+const USER_PNL = USER_VALUE - USER_DEPOSIT_AMT;
+const USER_PNL_PCT = (USER_PNL / USER_DEPOSIT_AMT) * 100;
+const USER_REALIZED_APY = ((USER_VALUE / USER_DEPOSIT_AMT) ** (365 / USER_DAYS_HELD) - 1) * 100;
 
 const SHARE_PRICE_30D = [
   1.0000, 0.9994, 1.0008, 1.0021, 1.0014, 1.0035, 1.0028, 1.0049, 1.0061, 1.0078,
@@ -121,10 +177,151 @@ const ICONS: Record<string, React.ReactNode> = {
   range:      (<><path d="M3 8h18M3 16h18" /><path d="M7 12h10" /></>),
 };
 
+// Copy + check icons — user-supplied artwork on a 20×20 viewBox. Both
+// stroke-only so they swap cleanly on `copied`. `currentColor` lets
+// the surrounding button drive the fill.
+function CopyIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 20 20" fill="none" aria-hidden style={{ display: "inline-block", flexShrink: 0 }}>
+      <path d="m13,7h2c1.105,0,2,.895,2,2v6c0,1.105-.895,2-2,2h-6c-1.105,0-2-.895-2-2v-2" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
+      <rect x="3" y="3" width="10" height="10" rx="2" ry="2" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
+    </svg>
+  );
+}
+
+function CheckIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 20 20" fill="none" aria-hidden style={{ display: "inline-block", flexShrink: 0 }}>
+      <polyline points="6.5 10.5 8.75 13 13.5 7" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
+    </svg>
+  );
+}
+
+// "New context" icon — user-supplied artwork for the signal card.
+// Document-with-lines mark; opacity-0.4 body + solid corner fold and
+// solid lines so it reads at small sizes against a dark grey panel.
+function NewContextIcon({ size = 13 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden style={{ display: "inline-block", flexShrink: 0 }}>
+      <path d="M15.487 5.427L11.572 1.512C11.2442 1.1841 10.7996 1 10.336 1H4.75C3.2312 1 2 2.2312 2 3.75V14.25C2 15.7688 3.2312 17 4.75 17H13.25C14.7688 17 16 15.7688 16 14.25V6.6655C16 6.2009 15.8155 5.7553 15.487 5.427Z" fill="currentColor" fillOpacity="0.4" />
+      <path d="M15.8691 6.00098H12C11.45 6.00098 11 5.55098 11 5.00098V1.13101C11.212 1.21806 11.4068 1.34677 11.572 1.512L15.487 5.427C15.6527 5.59266 15.7818 5.7882 15.8691 6.00098Z" fill="currentColor" />
+      <path fillRule="evenodd" clipRule="evenodd" d="M5 6.75C5 6.33579 5.33579 6 5.75 6H7.75C8.16421 6 8.5 6.33579 8.5 6.75C8.5 7.16421 8.16421 7.5 7.75 7.5H5.75C5.33579 7.5 5 7.16421 5 6.75Z" fill="currentColor" />
+      <path fillRule="evenodd" clipRule="evenodd" d="M5 9.75C5 9.33579 5.33579 9 5.75 9H12.25C12.6642 9 13 9.33579 13 9.75C13 10.1642 12.6642 10.5 12.25 10.5H5.75C5.33579 10.5 5 10.1642 5 9.75Z" fill="currentColor" />
+      <path fillRule="evenodd" clipRule="evenodd" d="M5 12.75C5 12.3358 5.33579 12 5.75 12H12.25C12.6642 12 13 12.3358 13 12.75C13 13.1642 12.6642 13.5 12.25 13.5H5.75C5.33579 13.5 5 13.1642 5 12.75Z" fill="currentColor" />
+    </svg>
+  );
+}
+
+// Source icons — three rendered styles for the three source kinds.
+// `vault` uses the alps logo (mask), `uniswap` is the unicorn glyph,
+// `basescan` is the stylized B. All grayscale to match the chat. The
+// `vault` kind reuses MASK_STYLE so it tracks logo.png changes.
+type SourceKind = "vault" | "uniswap" | "basescan";
+
+function SourceIcon({ kind, size = 12 }: { kind: SourceKind; size?: number }) {
+  if (kind === "vault") {
+    return (
+      <span aria-hidden style={{ display: "inline-block", width: size, height: size, flexShrink: 0, ...MASK_STYLE, backgroundColor: "rgba(255,255,255,0.65)" }} />
+    );
+  }
+  if (kind === "uniswap") {
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden style={{ display: "inline-block", flexShrink: 0 }}>
+        <path d="M5.6 14.7c-.3-.7-.4-1.6-.2-2.5.2-.9.7-1.7 1.4-2.3.7-.6 1.6-1 2.5-1.1.6-.1 1.1 0 1.6.2.5.2.9.6 1.2 1.1.3.5.4 1.1.3 1.7-.1.6-.4 1.2-.9 1.6-.5.4-1.1.6-1.7.5-.6 0-1.1-.3-1.4-.7l.5-.4c.3.3.6.5 1 .5.4 0 .8-.1 1.1-.3.3-.2.5-.5.5-.9 0-.4-.1-.7-.4-1-.3-.3-.7-.4-1.1-.4-.6 0-1.2.2-1.7.6-.5.4-.8 1-1 1.6-.1.6-.1 1.3.1 1.9.2.6.6 1.1 1.1 1.5.5.4 1.1.6 1.8.6.8 0 1.6-.3 2.2-.8.6-.5 1-1.2 1.2-2 .2-.8.1-1.6-.1-2.4-.3-.8-.7-1.4-1.4-1.9-.6-.5-1.4-.8-2.2-.9-.9-.1-1.8 0-2.6.4-.8.4-1.5 1-2 1.7-.5.7-.8 1.6-.8 2.5 0 .9.2 1.7.6 2.5.4.7 1 1.4 1.7 1.8.7.4 1.5.7 2.4.7" stroke="currentColor" strokeWidth="0.6" fill="currentColor" opacity="0.85" />
+        <circle cx="9.7" cy="11.6" r="0.6" fill="currentColor" />
+      </svg>
+    );
+  }
+  // basescan — minimal B/explorer mark
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden style={{ display: "inline-block", flexShrink: 0 }}>
+      <circle cx="12" cy="12" r="9.5" stroke="currentColor" strokeWidth="1.4" opacity="0.6" />
+      <path d="M9 7.5h3.6c1.4 0 2.4.8 2.4 2.1 0 .9-.5 1.6-1.2 1.9.9.2 1.5 1 1.5 2 0 1.4-1.1 2.5-2.7 2.5H9V7.5Zm1.4 1.2v2.1h2c.7 0 1.2-.4 1.2-1.1 0-.6-.5-1-1.2-1h-2Zm0 3.2v2.4h2.2c.8 0 1.4-.5 1.4-1.2 0-.7-.6-1.2-1.4-1.2h-2.2Z" fill="currentColor" opacity="0.85" />
+    </svg>
+  );
+}
+
 function StrokeIcon({ kind, size = 11 }: { kind: keyof typeof ICONS | string; size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden style={{ display: "inline-block", flexShrink: 0 }}>
       {ICONS[kind]}
+    </svg>
+  );
+}
+
+// Filled-icon set used by `CardLabel` pills. Each path uses
+// currentColor (inherited from the SVG `fill="currentColor"` wrapper
+// in `<FilledIcon>`); `fillOpacity` introduces the soft tint passes.
+const FILLED_ICONS: Record<string, React.ReactNode> = {
+  // Deposit — filled card with a deposit-arrow / lines and chip dots.
+  vault: (
+    <>
+      <path d="M4.75 2C3.23079 2 2 3.23079 2 4.75V13.25C2 14.7692 3.23079 16 4.75 16H13.25C14.7692 16 16 14.7692 16 13.25V4.75C16 3.23079 14.7692 2 13.25 2H4.75Z" fillOpacity="0.4" />
+      <path fillRule="evenodd" clipRule="evenodd" d="M1 9C1 8.58579 1.33579 8.25 1.75 8.25H2.75C3.16421 8.25 3.5 8.58579 3.5 9C3.5 9.41421 3.16421 9.75 2.75 9.75H1.75C1.33579 9.75 1 9.41421 1 9Z" />
+      <path fillRule="evenodd" clipRule="evenodd" d="M1 5.75C1 5.33579 1.33579 5 1.75 5H2.75C3.16421 5 3.5 5.33579 3.5 5.75C3.5 6.16421 3.16421 6.5 2.75 6.5H1.75C1.33579 6.5 1 6.16421 1 5.75Z" />
+      <path fillRule="evenodd" clipRule="evenodd" d="M1 12.25C1 11.8358 1.33579 11.5 1.75 11.5H2.75C3.16421 11.5 3.5 11.8358 3.5 12.25C3.5 12.6642 3.16421 13 2.75 13H1.75C1.33579 13 1 12.6642 1 12.25Z" />
+      <path d="M9.73278 9.83948C10.3331 9.56204 10.75 8.95441 10.75 8.25C10.75 7.284 9.966 6.5 9 6.5C8.034 6.5 7.25 7.284 7.25 8.25C7.25 8.95441 7.66688 9.56204 8.26722 9.83948C8.25594 9.89119 8.25 9.9449 8.25 10V11.75C8.25 12.1642 8.58579 12.5 9 12.5C9.41421 12.5 9.75 12.1642 9.75 11.75V10C9.75 9.9449 9.74406 9.89119 9.73278 9.83948Z" />
+      <path d="M4 15.8965C4.2384 15.9639 4.48998 16 4.75 16H5.5V16.75C5.5 17.1642 5.16421 17.5 4.75 17.5C4.33579 17.5 4 17.1642 4 16.75V15.8965Z" />
+      <path d="M12.5 16H13.25C13.51 16 13.7616 15.9639 14 15.8965V16.75C14 17.1642 13.6642 17.5 13.25 17.5C12.8358 17.5 12.5 17.1642 12.5 16.75V16Z" />
+    </>
+  ),
+  // Position — three dim circles + a bright "add" circle (the user
+  // adding a position to the basket).
+  position: (
+    <>
+      <path d="M15.5001 12H13.7501V10.25C13.7501 9.8359 13.4142 9.5 13.0001 9.5C12.586 9.5 12.2501 9.8359 12.2501 10.25V12H10.5001C10.086 12 9.75012 12.3359 9.75012 12.75C9.75012 13.1641 10.086 13.5 10.5001 13.5H12.2501V15.25C12.2501 15.6641 12.586 16 13.0001 16C13.4142 16 13.7501 15.6641 13.7501 15.25V13.5H15.5001C15.9142 13.5 16.2501 13.1641 16.2501 12.75C16.2501 12.3359 15.9142 12 15.5001 12Z" />
+      <path d="M5.00011 8.25C6.79503 8.25 8.25011 6.79493 8.25011 5C8.25011 3.20507 6.79503 1.75 5.00011 1.75C3.20518 1.75 1.75012 3.20507 1.75012 5C1.75012 6.79493 3.20518 8.25 5.00011 8.25Z" fillOpacity="0.4" />
+      <path d="M13.0001 8.25C14.795 8.25 16.2501 6.79493 16.2501 5C16.2501 3.20507 14.795 1.75 13.0001 1.75C11.2052 1.75 9.75012 3.20507 9.75012 5C9.75012 6.79493 11.2052 8.25 13.0001 8.25Z" fillOpacity="0.4" />
+      <path d="M5.00011 16.25C6.79503 16.25 8.25011 14.7949 8.25011 13C8.25011 11.2051 6.79503 9.75 5.00011 9.75C3.20518 9.75 1.75012 11.2051 1.75012 13C1.75012 14.7949 3.20518 16.25 5.00011 16.25Z" fillOpacity="0.4" />
+    </>
+  ),
+  strategy: (
+    <>
+      <path opacity="0.4" d="M14.2501 8H3.75012C1.68212 8 0.00012207 9.682 0.00012207 11.75C0.00012207 13.818 1.68212 15.5 3.75012 15.5H14.2501C16.3181 15.5 18.0001 13.818 18.0001 11.75C18.0001 9.682 16.3181 8 14.2501 8Z" />
+      <path d="M9.00011 6C8.58711 6 8.20211 5.79901 7.97111 5.46301L6.2141 2.909C5.9561 2.534 5.9291 2.05102 6.1451 1.65002C6.3611 1.24902 6.7821 0.999023 7.2441 0.999023H10.7561C11.2171 0.999023 11.6381 1.24802 11.8551 1.65002C12.0721 2.05202 12.0441 2.534 11.7861 2.909L10.0301 5.46198C9.79911 5.79798 9.4141 5.99902 9.0011 5.99902L9.00011 6Z" />
+      <path d="M9.00012 12.5H3.75012C3.33612 12.5 3.00012 12.164 3.00012 11.75C3.00012 11.336 3.33612 11 3.75012 11H9.00012C9.41412 11 9.75012 11.336 9.75012 11.75C9.75012 12.164 9.41412 12.5 9.00012 12.5Z" />
+    </>
+  ),
+  // Performance — chart card: a dim card with a sparkline-style line
+  // crossing it and two dot markers.
+  sparkles: (
+    <>
+      <path d="M3.75 2C2.23079 2 1 3.23079 1 4.75V13.25C1 14.7692 2.23079 16 3.75 16H14.25C15.7692 16 17 14.7692 17 13.25V4.75C17 3.23079 15.7692 2 14.25 2H3.75Z" fillOpacity="0.4" />
+      <path fillRule="evenodd" clipRule="evenodd" d="M13.5854 5.07916C13.9559 5.2644 14.1061 5.71491 13.9208 6.08539L11.6708 10.5854C11.5484 10.8302 11.3023 10.9889 11.0288 10.9994C10.7553 11.0099 10.4977 10.8706 10.3569 10.6359L9.5158 9.23403L8.15119 11.6221C8.02796 11.8377 7.80594 11.9784 7.5583 11.9977C7.31066 12.017 7.06953 11.9125 6.91436 11.7185L6.47425 11.1684L5.31444 12.4939C5.04168 12.8056 4.56786 12.8372 4.25613 12.5644C3.9444 12.2917 3.91282 11.8178 4.18558 11.5061L5.93558 9.5061C6.0818 9.33899 6.29455 9.24527 6.51654 9.25016C6.73854 9.25506 6.94695 9.35807 7.08566 9.53146L7.39631 9.91978L8.84883 7.37788C8.98095 7.14667 9.22576 7.00286 9.49203 7.00002C9.75831 6.99719 10.0061 7.13577 10.1431 7.36411L10.9402 8.69256L12.5792 5.41457C12.7644 5.04409 13.2149 4.89392 13.5854 5.07916Z" />
+      <path d="M4.25 6C4.664 6 5 5.664 5 5.25C5 4.836 4.664 4.5 4.25 4.5C3.836 4.5 3.5 4.836 3.5 5.25C3.5 5.664 3.836 6 4.25 6Z" />
+      <path d="M6.75 6C7.164 6 7.5 5.664 7.5 5.25C7.5 4.836 7.164 4.5 6.75 4.5C6.336 4.5 6 4.836 6 5.25C6 5.664 6.336 6 6.75 6Z" />
+    </>
+  ),
+  // Activity — calendar card with dotted entries.
+  stack: (
+    <>
+      <path fillRule="evenodd" clipRule="evenodd" d="M1.5 4.75C1.5 3.23069 2.73128 2 4.25 2H13.75C15.2687 2 16.5 3.23069 16.5 4.75V13.25C16.5 14.7693 15.2687 16 13.75 16H4.25C2.73128 16 1.5 14.7693 1.5 13.25V4.75Z" fillOpacity="0.4" />
+      <path fillRule="evenodd" clipRule="evenodd" d="M6.5 0.75C6.5 0.335786 6.16421 0 5.75 0C5.33579 0 5 0.335786 5 0.75V2H4.25C2.73079 2 1.5 3.23079 1.5 4.75V6H16.5V4.75C16.5 3.23079 15.2692 2 13.75 2H13V0.75C13 0.335786 12.6642 0 12.25 0C11.8358 0 11.5 0.335786 11.5 0.75V2H6.5V0.75Z" />
+      <path d="M9 8C8.449 8 8 8.449 8 9C8 9.551 8.449 10 9 10C9.551 10 10 9.551 10 9C10 8.449 9.551 8 9 8Z" />
+      <path d="M12.5 10C13.051 10 13.5 9.551 13.5 9C13.5 8.449 13.051 8 12.5 8C11.949 8 11.5 8.449 11.5 9C11.5 9.551 11.949 10 12.5 10Z" />
+      <path d="M9 11.5C8.449 11.5 8 11.949 8 12.5C8 13.051 8.449 13.5 9 13.5C9.551 13.5 10 13.051 10 12.5C10 11.949 9.551 11.5 9 11.5Z" />
+      <path d="M5.5 11.5C4.949 11.5 4.5 11.949 4.5 12.5C4.5 13.051 4.949 13.5 5.5 13.5C6.051 13.5 6.5 13.051 6.5 12.5C6.5 11.949 6.051 11.5 5.5 11.5Z" />
+      <path d="M12.5 11.5C11.949 11.5 11.5 11.949 11.5 12.5C11.5 13.051 11.949 13.5 12.5 13.5C13.051 13.5 13.5 13.051 13.5 12.5C13.5 11.949 13.051 11.5 12.5 11.5Z" />
+    </>
+  ),
+};
+
+function FilledIcon({ kind, size = 12 }: { kind: keyof typeof FILLED_ICONS | string; size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" fill="currentColor" aria-hidden style={{ display: "inline-block", flexShrink: 0 }}>
+      {FILLED_ICONS[kind]}
+    </svg>
+  );
+}
+
+// User-supplied wallet artwork — stays in sync with the connect-wallet
+// nav button on the floating top nav.
+function WalletIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden style={{ display: "inline-block", flexShrink: 0 }}>
+      <path d="M13.5028 2.07856C13.1582 1.38927 12.4027 1.0061 11.6429 1.13564L5.08061 2.25569C3.01253 2.60925 1.5 4.40138 1.5 6.49997C1.5 6.5286 1.50164 6.55704 1.50485 6.58519C1.59004 5.14276 2.78612 4 4.25 4H13.75C13.9233 4 14.0929 4.01603 14.2574 4.04668C14.2357 3.98275 14.2141 3.91867 14.1925 3.85451C13.9882 3.24883 13.7815 2.63594 13.5028 2.07856Z" fill="currentColor" fillOpacity="0.2" />
+      <path d="M4.25 4C2.73079 4 1.5 5.23079 1.5 6.75V13.25C1.5 14.7692 2.73079 16 4.25 16H13.75C15.2692 16 16.5 14.7692 16.5 13.25V6.75C16.5 5.23079 15.2692 4 13.75 4H4.25Z" fill="currentColor" fillOpacity="0.4" />
+      <path d="M16 11.75H13C12.034 11.75 11.25 10.966 11.25 10C11.25 9.033 12.034 8.25 13 8.25H16C16.552 8.25 17 8.698 17 9.25V10.75C17 11.302 16.552 11.75 16 11.75Z" fill="currentColor" />
     </svg>
   );
 }
@@ -150,13 +347,17 @@ function Silhouette({ src, color }: { src: string; color: string }) {
 
 function TokenChip({ entry, size = 18, radius }: { entry: TokenEntry; size?: number; radius?: number }) {
   const r = radius ?? Math.max(3, Math.round(size * 0.26));
-  const gs = Math.round(size * 0.62);
   const withMoon = entry.kind === "png" && entry.src.endsWith("/uni.svg");
+  // Inner mask sized as a percentage (not rounded px) so the padding
+  // ring stays symmetric at every chip size — at 14px or 16px the
+  // rounded-px version produced uneven sub-pixel offsets that read
+  // as "icon shifted up-right".
   return (
     <span aria-hidden style={{
       width: size, height: size, borderRadius: r, background: entry.color,
       display: "inline-flex", alignItems: "center", justifyContent: "center",
       overflow: "hidden", flexShrink: 0, position: "relative",
+      lineHeight: 0, verticalAlign: "middle",
     }}>
       {withMoon ? (
         <>
@@ -165,7 +366,7 @@ function TokenChip({ entry, size = 18, radius }: { entry: TokenEntry; size?: num
         </>
       ) : entry.kind === "svg" ? (
         <span style={{
-          width: gs, height: gs, backgroundColor: "#fff",
+          width: "62%", height: "62%", backgroundColor: "#fff",
           WebkitMaskImage: `url(${entry.src})`, maskImage: `url(${entry.src})`,
           WebkitMaskSize: "contain", maskSize: "contain",
           WebkitMaskRepeat: "no-repeat", maskRepeat: "no-repeat",
@@ -180,14 +381,20 @@ function TokenChip({ entry, size = 18, radius }: { entry: TokenEntry; size?: num
 }
 
 function AlpChip({ size = 18 }: { size?: number }) {
-  const inner = Math.round(size * 0.65);
   return (
     <span aria-hidden style={{
       width: size, height: size, borderRadius: Math.max(3, Math.round(size * 0.26)),
-      background: "rgba(255,255,255,0.10)",
-      display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+      background: "#2a2b32",
+      display: "inline-flex", alignItems: "center", justifyContent: "center",
+      flexShrink: 0, lineHeight: 0, verticalAlign: "middle",
     }}>
-      <span style={{ display: "block", width: inner, height: inner, ...MASK_STYLE }} />
+      {/* Percentage-sized inner so the mask padding stays exactly
+          symmetric at any chip size — same fix as TokenChip. */}
+      <span style={{
+        display: "block", width: "65%", height: "65%",
+        ...MASK_STYLE,
+        backgroundColor: "rgba(255,255,255,0.85)",
+      }} />
     </span>
   );
 }
@@ -207,14 +414,14 @@ function PoolPairChip({ left, right, size = 18 }: { left: TokenEntry; right: Tok
 }
 
 function Card({ children, style, className }: { children: React.ReactNode; style?: React.CSSProperties; className?: string }) {
+  // Mirrors landing-face's Card 1:1 — no backdrop blur, so segments
+  // sit on a flat rgba surface like the How-it-works bento.
   return (
     <div className={className} style={{
       background: "rgba(255,255,255,0.04)",
       border: "1px solid rgba(255,255,255,0.06)",
       borderRadius: 20,
       padding: "16px 20px 18px",
-      backdropFilter: "blur(24px)",
-      WebkitBackdropFilter: "blur(24px)",
       ...style,
     }}>
       {children}
@@ -222,7 +429,8 @@ function Card({ children, style, className }: { children: React.ReactNode; style
   );
 }
 
-function CardLabel({ icon, children }: { icon: keyof typeof ICONS | string; children: React.ReactNode }) {
+function CardLabel({ icon, children }: { icon: keyof typeof ICONS | keyof typeof FILLED_ICONS | string; children: React.ReactNode }) {
+  const isFilled = icon in FILLED_ICONS;
   return (
     <span style={{
       display: "inline-flex", alignSelf: "flex-start", alignItems: "center", gap: 5,
@@ -232,7 +440,7 @@ function CardLabel({ icon, children }: { icon: keyof typeof ICONS | string; chil
       fontFamily: "var(--sans-stack)", fontSize: 11, fontWeight: 500,
       letterSpacing: "0.02em", lineHeight: 1, width: "max-content",
     }}>
-      <StrokeIcon kind={icon} size={11} />
+      {isFilled ? <FilledIcon kind={icon} size={12} /> : <StrokeIcon kind={icon} size={11} />}
       {children}
     </span>
   );
@@ -263,42 +471,6 @@ function H3({ children }: { children: React.ReactNode }) {
     <h3 style={{ color: "#fff", fontFamily: "var(--font-radley)", fontSize: 22, lineHeight: 1.1, letterSpacing: "-0.005em", margin: 0, fontWeight: 400 }}>
       {children}
     </h3>
-  );
-}
-
-function SectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 18, marginBottom: 12 }}>
-      <span style={{
-        fontFamily: "var(--sans-stack)", fontSize: 10, fontWeight: 500,
-        color: "rgba(255,255,255,0.45)", letterSpacing: "0.10em",
-        textTransform: "uppercase", lineHeight: 1,
-      }}>
-        {children}
-      </span>
-      <span aria-hidden style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.06)" }} />
-    </div>
-  );
-}
-
-function PageSection({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <section style={{ marginTop: 28 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
-        <span style={{
-          display: "inline-flex", alignItems: "center", height: 22,
-          padding: "0 11px", borderRadius: 6,
-          background: "rgba(255,255,255,0.10)",
-          color: "rgba(255,255,255,0.95)",
-          fontFamily: "var(--sans-stack)", fontSize: 11, fontWeight: 600,
-          letterSpacing: "0.12em", textTransform: "uppercase", lineHeight: 1,
-        }}>
-          {label}
-        </span>
-        <span aria-hidden style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.10)" }} />
-      </div>
-      {children}
-    </section>
   );
 }
 
@@ -348,57 +520,6 @@ function Sparkline({ values, lineColor, fillColor, height = 64 }: { values: numb
   );
 }
 
-function RangeMiniChart({ upper, lower, color, height = 36 }: { upper: number[]; lower: number[]; color: string; height?: number }) {
-  const W = 1000;
-  const H = height;
-  const stepX = W / (upper.length - 1);
-  const upperPts = upper.map((v, i) => `${(i * stepX).toFixed(1)},${((1 - v) * H).toFixed(1)}`);
-  const lowerPts = lower.map((v, i) => `${(i * stepX).toFixed(1)},${((1 - v) * H).toFixed(1)}`);
-  const path =
-    `M${upperPts[0]} ` +
-    upperPts.slice(1).map((p) => `L${p}`).join(" ") +
-    " " +
-    [...lowerPts].reverse().map((p) => `L${p}`).join(" ") +
-    " Z";
-  return (
-    <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden style={{ display: "block" }}>
-      <path d={path} fill={color} fillOpacity="0.18" />
-      <polyline points={upperPts.join(" ")} fill="none" stroke={color} strokeOpacity="0.7" strokeWidth="1" vectorEffect="non-scaling-stroke" />
-      <polyline points={lowerPts.join(" ")} fill="none" stroke={color} strokeOpacity="0.7" strokeWidth="1" vectorEffect="non-scaling-stroke" />
-    </svg>
-  );
-}
-
-/* ---------- Stat / Metric cells ---------- */
-
-function StatCell({ label, value, tone }: { label: string; value: string; tone?: "up" | "down" }) {
-  const valueColor = tone === "up" ? "rgb(134, 239, 172)" : tone === "down" ? "rgb(252, 165, 165)" : "#fff";
-  return (
-    <div>
-      <div style={{ color: "rgba(255,255,255,0.55)", fontFamily: "var(--sans-stack)", fontSize: 11, fontWeight: 500, letterSpacing: "0.06em", textTransform: "uppercase", lineHeight: 1 }}>
-        {label}
-      </div>
-      <div style={{ marginTop: 8, color: valueColor, fontFamily: "var(--font-radley)", fontSize: 26, lineHeight: 1.1, letterSpacing: "-0.01em", fontVariantNumeric: "tabular-nums" }}>
-        {value}
-      </div>
-    </div>
-  );
-}
-
-function MetricCell({ label, value, icon }: { label: string; value: string; icon?: keyof typeof ICONS | string }) {
-  return (
-    <div>
-      <div style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "rgba(255,255,255,0.55)", fontFamily: "var(--sans-stack)", fontSize: 11, fontWeight: 500, letterSpacing: "0.06em", textTransform: "uppercase", lineHeight: 1 }}>
-        {icon && <StrokeIcon kind={icon} size={11} />}
-        {label}
-      </div>
-      <div style={{ marginTop: 8, color: "#fff", fontFamily: "var(--sans-stack)", fontSize: 22, fontWeight: 500, lineHeight: 1.1, letterSpacing: "-0.015em", fontVariantNumeric: "tabular-nums" }}>
-        {value}
-      </div>
-    </div>
-  );
-}
-
 function DetailRow({ label, value }: { label: string; value: string }) {
   return (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", color: "rgba(255,255,255,0.55)", fontFamily: "var(--sans-stack)", fontSize: 12, lineHeight: 1.2 }}>
@@ -444,64 +565,222 @@ const POSITIONS_SORTED: PoolEntry[] = [
     .sort((a, b) => b.pct - a.pct),
 ];
 
-type ActivityRow =
-  | { kind: "single"; token: TokenEntry; time: string; text: string }
-  | { kind: "pair"; left: TokenEntry; right: TokenEntry; time: string; text: string };
-const ACTIVITY: ActivityRow[] = [
-  { kind: "single", token: TOKENS.ETH,  time: "2m",  text: "Tightened ETH/USDC range to ±0.8%" },
-  { kind: "single", token: TOKENS.BTC,  time: "17m", text: "Harvested $1.2k in fees from BTC/USDC" },
-  { kind: "pair",   left: TOKENS.BTC,   right: TOKENS.UNI, time: "1h",  text: "Rotated 5% from BTC/USDC into UNI/USDC" },
-  { kind: "single", token: TOKENS.UNI,  time: "3h",  text: "Pulled UNI/USDC outer band to reserve" },
-  { kind: "single", token: TOKENS.ETH,  time: "6h",  text: "Rebalanced ETH/USDC at $4,124" },
-  { kind: "single", token: TOKENS.USDT, time: "9h",  text: "Compounded $890 from USDC/USDT into LP" },
-  { kind: "pair",   left: TOKENS.USDC,  right: TOKENS.UNI, time: "14h", text: "Closed UNI/USDC narrow window post-volatility" },
-  { kind: "single", token: TOKENS.BTC,  time: "1d",  text: "Tightened BTC/USDC range to ±1.4%" },
-  { kind: "single", token: TOKENS.ETH,  time: "1d",  text: "Pulled ETH/USDC outer band, redeployed inner" },
-  { kind: "single", token: TOKENS.UNI,  time: "2d",  text: "Skipped UNI/USDC rebalance — gas threshold" },
-  { kind: "single", token: TOKENS.USDC, time: "2d",  text: "Drew $4.2k from idle reserve into USDC/USDT" },
-  { kind: "single", token: TOKENS.BTC,  time: "3d",  text: "Harvested $4.8k in fees from BTC/USDC" },
-  { kind: "pair",   left: TOKENS.UNI,   right: TOKENS.ETH, time: "3d",  text: "Rebalanced UNI/USDC post-narrative shift" },
-  { kind: "single", token: TOKENS.ETH,  time: "4d",  text: "Tightened ETH/USDC to ±1.0% mid-volatility" },
-  { kind: "single", token: TOKENS.USDC, time: "5d",  text: "Returned $3.1k to idle reserve from BTC/USDC" },
-];
-
-type FlowEntry = { fromIdx: number; toIdx: number; amount: string; time: string };
-const FLOWS: FlowEntry[] = [
-  { fromIdx: 1, toIdx: 3, amount: "$12.4k", time: "17m" },
-  { fromIdx: 4, toIdx: 0, amount: "$8.2k",  time: "2h"  },
-  { fromIdx: 1, toIdx: 4, amount: "$5.1k",  time: "5h"  },
-  { fromIdx: 0, toIdx: 1, amount: "$3.8k",  time: "8h"  },
-  { fromIdx: 4, toIdx: 2, amount: "$2.4k",  time: "1d"  },
-];
-
-const POOL_RANGES_DATA: Record<string, { upper: number[]; lower: number[]; current: string }> = {
-  "ETH/USDC": {
-    upper: [0.78,0.80,0.82,0.85,0.83,0.81,0.79,0.82,0.85,0.88,0.85,0.82,0.78,0.75,0.78,0.81,0.84,0.86,0.83,0.80,0.78,0.81,0.83,0.85,0.82,0.79,0.81,0.84,0.82,0.80],
-    lower: [0.22,0.20,0.18,0.15,0.17,0.19,0.21,0.18,0.15,0.12,0.15,0.18,0.22,0.25,0.22,0.19,0.16,0.14,0.17,0.20,0.22,0.19,0.17,0.15,0.18,0.21,0.19,0.16,0.18,0.20],
-    current: "±0.8%",
-  },
-  "BTC/USDC": {
-    upper: [0.75,0.78,0.80,0.82,0.85,0.83,0.80,0.78,0.81,0.84,0.82,0.79,0.76,0.78,0.81,0.84,0.82,0.79,0.77,0.80,0.83,0.85,0.82,0.79,0.81,0.84,0.86,0.83,0.80,0.78],
-    lower: [0.25,0.22,0.20,0.18,0.15,0.17,0.20,0.22,0.19,0.16,0.18,0.21,0.24,0.22,0.19,0.16,0.18,0.21,0.23,0.20,0.17,0.15,0.18,0.21,0.19,0.16,0.14,0.17,0.20,0.22],
-    current: "±1.2%",
-  },
-  "USDC/USDT": {
-    upper: [0.55,0.56,0.57,0.55,0.54,0.56,0.58,0.57,0.55,0.54,0.55,0.57,0.58,0.56,0.55,0.54,0.56,0.58,0.57,0.55,0.56,0.58,0.57,0.55,0.54,0.56,0.58,0.57,0.55,0.54],
-    lower: [0.45,0.44,0.43,0.45,0.46,0.44,0.42,0.43,0.45,0.46,0.45,0.43,0.42,0.44,0.45,0.46,0.44,0.42,0.43,0.45,0.44,0.42,0.43,0.45,0.46,0.44,0.42,0.43,0.45,0.46],
-    current: "±0.05%",
-  },
-  "UNI/USDC": {
-    upper: [0.85,0.82,0.78,0.75,0.80,0.85,0.88,0.85,0.82,0.78,0.82,0.86,0.83,0.80,0.85,0.88,0.84,0.81,0.83,0.86,0.84,0.80,0.78,0.82,0.85,0.82,0.79,0.83,0.86,0.83],
-    lower: [0.15,0.18,0.22,0.25,0.20,0.15,0.12,0.15,0.18,0.22,0.18,0.14,0.17,0.20,0.15,0.12,0.16,0.19,0.17,0.14,0.16,0.20,0.22,0.18,0.15,0.18,0.21,0.17,0.14,0.17],
-    current: "±2.4%",
-  },
+// Per-pool APR + 30d fees earned. Same eventual source as POOLS — a
+// vault-state read on the backend; mocked here for the demo.
+const POOL_APR: Record<string, number> = {
+  "ETH/USDC":     18.4,
+  "BTC/USDC":     14.2,
+  "USDC/USDT":     8.6,
+  "UNI/USDC":     22.1,
+  "Idle reserve":  0.0,
 };
+const POOL_EARNED_30D: Record<string, number> = {
+  "ETH/USDC":     1240.50,
+  "BTC/USDC":      890.20,
+  "USDC/USDT":     320.10,
+  "UNI/USDC":      215.80,
+  "Idle reserve":    0.00,
+};
+const BASKET_APR_30D = 14.2;
+const BASKET_EARNED_30D = POOLS.reduce((a, p) => a + (POOL_EARNED_30D[p.slug] ?? 0), 0);
+
+// Agent message feed:
+//   signal  — raw incoming data (price/vol move, fee accrual, etc.).
+//             Standalone: a signal may or may not get acted on.
+//   action  — onchain tx (hash + chip + title). Carries an optional
+//             `thought` lead-in; thoughts only exist tethered to the
+//             action they triggered, never standalone.
+// Plus user/reply for live chat.
+type ActionChip =
+  | { type: "single"; token: TokenEntry }
+  | { type: "pair"; left: TokenEntry; right: TokenEntry };
+
+type SourceRef = { kind: SourceKind; label: string; tx?: string; href?: string };
+
+type AgentMessage =
+  | { id: string; kind: "signal"; iso: string; text: string }
+  | { id: string; kind: "action"; title: string; category: ActionCategory; chip: ActionChip; iso: string; tx: string; text: string; thought?: string }
+  | { id: string; kind: "user";   iso: string; text: string }
+  | { id: string; kind: "reply";  iso: string; text: string; sources?: SourceRef[]; replyTo?: string };
+
+// Pulls the hour-of-day (0–23) from an iso label like "Apr 28 · 14:23".
+// Returns null if the format is unexpected.
+function parseHour(iso: string): number | null {
+  const time = iso.split(" · ")[1];
+  if (!time) return null;
+  const hh = parseInt(time.slice(0, 2), 10);
+  return Number.isFinite(hh) ? hh : null;
+}
+
+// Builds 24 hour buckets ending at the latest message's hour. Each
+// bucket counts `signal` and `action` messages and dedupes the tokens
+// touched by actions in that hour (used by the tooltip's chip row).
+// User/reply chat is ignored — this is agent-side cadence.
+type HourBucket = { signals: number; actions: number; tokens: TokenEntry[] };
+function buildHourlyActivity(messages: AgentMessage[]): HourBucket[] {
+  const buckets: HourBucket[] = Array.from({ length: 24 }, () => ({ signals: 0, actions: 0, tokens: [] }));
+  if (messages.length === 0) return buckets;
+  const lastHour = (() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const h = parseHour(messages[i].iso);
+      if (h !== null) return h;
+    }
+    return 0;
+  })();
+  for (const m of messages) {
+    if (m.kind !== "signal" && m.kind !== "action") continue;
+    const h = parseHour(m.iso);
+    if (h === null) continue;
+    // Distance backward from lastHour, wrapping mod 24. Bucket index
+    // is (23 - distance) so the latest hour sits at the right edge.
+    const dist = (lastHour - h + 24) % 24;
+    if (dist > 23) continue;
+    const idx = 23 - dist;
+    if (m.kind === "signal") buckets[idx].signals++;
+    else {
+      buckets[idx].actions++;
+      const ts: TokenEntry[] = m.chip.type === "pair" ? [m.chip.left, m.chip.right] : [m.chip.token];
+      for (const t of ts) {
+        if (!buckets[idx].tokens.some((x) => x.slug === t.slug)) {
+          buckets[idx].tokens.push(t);
+        }
+      }
+    }
+  }
+  return buckets;
+}
+
+// "MMM D · HH:MM" — what the chat row + hover time render.
+function formatDisplayIso(d: Date): string {
+  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${months[d.getMonth()]} ${d.getDate()} · ${hh}:${mm}`;
+}
+
+function nowIso(): string { return formatDisplayIso(new Date()); }
+
+// Falls back to USDC if the backend ever sends an unknown symbol —
+// keeps the chip from rendering undefined and crashing TokenChip.
+const resolveToken = (sym: string): TokenEntry => TOKENS[sym] ?? TOKENS.USDC;
+
+// Wire → view: resolves token symbols, reshapes WireSource → SourceRef,
+// preserves id + replyTo so optimistic reconciliation can work.
+function toAgentMessage(w: WireMessage): AgentMessage {
+  const iso = formatDisplayIso(new Date(w.ts));
+  switch (w.kind) {
+    case "signal":
+      return { id: w.id, kind: "signal", iso, text: w.text };
+    case "action":
+      return {
+        id: w.id, kind: "action", iso,
+        title: w.title,
+        category: w.category,
+        text: w.text,
+        thought: w.thought,
+        tx: w.tx,
+        chip: w.chip.type === "pair"
+          ? { type: "pair", left: resolveToken(w.chip.left), right: resolveToken(w.chip.right) }
+          : { type: "single", token: resolveToken(w.chip.token) },
+      };
+    case "user":
+      return { id: w.id, kind: "user", iso, text: w.text };
+    case "reply":
+      return {
+        id: w.id, kind: "reply", iso, text: w.text,
+        replyTo: w.replyTo,
+        sources: w.sources?.map((s): SourceRef =>
+          s.kind === "uniswap"
+            ? { kind: "uniswap", label: s.label, href: s.url }
+            : { kind: s.kind, label: s.label, tx: s.tx }
+        ),
+      };
+  }
+}
+
+// Wire-shape demo seed. `ts` is local-time ISO (no Z) so the display
+// stays stable across timezones; prod backend should emit UTC.
+const ACTION_TITLE = "Action submitted";
+
+const INITIAL_WIRE_MESSAGES: WireMessage[] = [
+  { id: "evt_001", ts: "2026-04-28T05:18:00", kind: "signal", text: "USDC/USDT stable-pair fees: $890 accrued." },
+  { id: "evt_002", ts: "2026-04-28T05:24:00", kind: "action", title: ACTION_TITLE, category: "claim_fees", chip: { type: "single", token: "USDT" }, tx: "0xc4e2…77f9",
+    text: "Compounded $890 from USDC/USDT into LP." },
+  { id: "evt_003", ts: "2026-04-28T08:11:00", kind: "signal", text: "ETH/USDC mid drifted to $4,124, +1.4% from band center." },
+  { id: "evt_004", ts: "2026-04-28T08:24:00", kind: "action", title: ACTION_TITLE, category: "edit_position", chip: { type: "single", token: "ETH" }, tx: "0x9f15…c780",
+    thought: "Drift exceeds the rebalance threshold. Recentering before fees decay further.",
+    text: "Rebalanced ETH/USDC at $4,124 mid. New range ±1.0%." },
+  // Standalone signal — TWAP divergence noted, but no action follows.
+  { id: "evt_005", ts: "2026-04-28T09:55:00", kind: "signal", text: "TWAP divergence between USDC and USDT widening to 4 bps." },
+  { id: "evt_006", ts: "2026-04-28T11:20:00", kind: "signal", text: "UNI/USDC price re-entered the inner range." },
+  { id: "evt_007", ts: "2026-04-28T11:25:00", kind: "action", title: ACTION_TITLE, category: "edit_position", chip: { type: "single", token: "UNI" }, tx: "0x2e91…44ab",
+    text: "Closed UNI/USDC outer band to reserve. Price action settled inside the inner range." },
+  { id: "evt_008", ts: "2026-04-28T13:18:00", kind: "signal", text: "UNI 1h volume +43% post-governance vote." },
+  { id: "evt_009", ts: "2026-04-28T13:25:00", kind: "action", title: ACTION_TITLE, category: "swap", chip: { type: "pair", left: "BTC", right: "UNI" }, tx: "0xa7d3…91f2",
+    thought: "Volume regime shift on UNI looks structural, not a wick. Reallocating exposure.",
+    text: "Rotated 5% from BTC/USDC into UNI/USDC." },
+  { id: "evt_010", ts: "2026-04-28T14:01:00", kind: "signal", text: "Accrued fees on BTC/USDC: $1.21k." },
+  { id: "evt_011", ts: "2026-04-28T14:08:00", kind: "action", title: ACTION_TITLE, category: "claim_fees", chip: { type: "single", token: "BTC" }, tx: "0xb1c2…8e4d",
+    text: "Harvested $1.2k in fees from BTC/USDC and compounded back into the position." },
+  { id: "evt_012", ts: "2026-04-28T14:15:00", kind: "signal", text: "ETH/USDC realized vol −22% over the last 4h." },
+  { id: "evt_013", ts: "2026-04-28T14:23:00", kind: "action", title: ACTION_TITLE, category: "edit_position", chip: { type: "single", token: "ETH" }, tx: "0x4f8a…c3b1",
+    thought: "Vol contracting cleanly. A tighter band captures more of the spread without raising rebalance frequency.",
+    text: "Tightened ETH/USDC to ±0.8%. Realized vol dropped 22% in the last 4h, capturing more of the spread in a tighter band." },
+];
+
+// Pre-built dev replies. Sources are WireSource so the stub round-trips
+// through the same adapter the real backend will feed.
+const QUICK_REPLIES: { match: RegExp; text: string; sources?: WireSource[] }[] = [
+  { match: /\b(position|stake|holding|holdings|share|shares|alp)\b/i,
+    text: "You currently hold 0 ALP. Once you deposit, each ALP claims a slice of $3.26M of active liquidity across 5 pools, with 38% sitting in the idle reserve.",
+    sources: [{ kind: "vault", label: "Vault state", tx: "0xa1b2…f9c8" }] },
+  { match: /\b(apr|yield|earning|earnings|return|fee|fees)\b/i,
+    text: "30-day rolling APR is 14.2%, slightly above the 90-day average (13.6%). Driven mostly by ETH/USDC fee capture this week.",
+    sources: [
+      { kind: "vault", label: "30d performance", tx: "0xa1b2…f9c8" },
+      { kind: "uniswap", label: "ETH/USDC pool", url: "https://app.uniswap.org/" },
+    ] },
+  { match: /\b(rebalance|range|tighten|widen)\b/i,
+    text: "Tightened ETH/USDC to ±0.8% two minutes ago after realized vol dropped. Fee yield projected up ~12% over the next 24h.",
+    sources: [
+      { kind: "basescan", label: "Rebalance tx", tx: "0x4f8a…c3b1" },
+      { kind: "uniswap", label: "ETH/USDC pool", url: "https://app.uniswap.org/" },
+    ] },
+  { match: /\b(tvl|vault|value)\b/i,
+    text: "Vault TVL is $3.26M, up 6.9% over 30 days. Four active pools and the idle reserve at 38%.",
+    sources: [{ kind: "vault", label: "Vault state", tx: "0xa1b2…f9c8" }] },
+  { match: /\b(risk|il|impermanent|drawdown)\b/i,
+    text: "Impermanent loss is contained by continuous rebalancing. 30-day net APR (14.2%) sits well above estimated IL drag (~2.4%/y).",
+    sources: [{ kind: "vault", label: "Risk model", tx: "0xa1b2…f9c8" }] },
+  { match: /\b(idle|reserve|cash)\b/i,
+    text: "Idle reserve is at 38% (target band 30 to 45%). It's USDC sitting in the vault, used for instant withdrawals and quick redeployments.",
+    sources: [{ kind: "vault", label: "Vault state", tx: "0xa1b2…f9c8" }] },
+  { match: /\b(pool|pools|pair|pairs)\b/i,
+    text: "Active pools: ETH/USDC (24%), BTC/USDC (18%), USDC/USDT (12%), UNI/USDC (8%). Each is rebalanced independently based on its own vol and fee signals.",
+    sources: [
+      { kind: "vault", label: "Vault allocation", tx: "0xa1b2…f9c8" },
+      { kind: "uniswap", label: "Uniswap pools", url: "https://app.uniswap.org/" },
+    ] },
+  { match: /\b(hi|hello|hey|sup|yo)\b/i,
+    text: "Hey. I manage the active positions across the basket and rebalance them continuously. Try asking about position, APR, rebalances, TVL, risk, or pools." },
+];
+
+function getAgentReply(input: string): { text: string; sources?: WireSource[] } {
+  for (const r of QUICK_REPLIES) {
+    if (r.match.test(input)) return { text: r.text, sources: r.sources };
+  }
+  return { text: "I don't have a pre-built answer for that one. Try asking about position, APR, rebalances, TVL, risk, or pools." };
+}
 
 /* ---------- Backdrop ---------- */
 
 function PanelLandscape({ muted = false }: { muted?: boolean }) {
+  // zIndex: -1 (stays inside the section's `isolation: isolate`
+  // context) so the panel-scroll above doesn't need its own stacking
+  // context to layer over it — keeps backdrop-filter on cards inside
+  // the scroll area free to sample this image as their backdrop.
   return (
-    <div aria-hidden style={{ position: "absolute", inset: 0, zIndex: 0 }}>
+    <div aria-hidden style={{ position: "absolute", inset: 0, zIndex: -1 }}>
       <Image src="/landscape.png" alt="" fill priority sizes="100vw" style={{
         objectFit: "cover",
         filter: muted ? LANDSCAPE_FILTER_MUTED : LANDSCAPE_FILTER,
@@ -512,10 +791,7 @@ function PanelLandscape({ muted = false }: { muted?: boolean }) {
 
 /* ---------- Floating nav pill — full main-panel width, sits just above it ---------- */
 
-function FloatingNav({ layout }: { layout: PanelLayout }) {
-  const router = useRouter();
-  const [exiting, setExiting] = useState(false);
-
+function FloatingNav({ layout, exiting, onBack }: { layout: PanelLayout; exiting: boolean; onBack: () => void }) {
   return (
     <div className={exiting ? "app-nav-exit" : "app-nav-enter"} style={{
       position: "fixed",
@@ -528,7 +804,7 @@ function FloatingNav({ layout }: { layout: PanelLayout }) {
     }}>
       <div style={{
         position: "relative",
-        borderRadius: 999,
+        borderRadius: 20 * layout.scale,
         overflow: "hidden",
         border: "1px solid rgba(255,255,255,0.08)",
         isolation: "isolate",
@@ -546,7 +822,7 @@ function FloatingNav({ layout }: { layout: PanelLayout }) {
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          padding: "8px 12px 8px 18px",
+          padding: "8px 10px 8px 18px",
         }}>
           <Link
             href="/"
@@ -554,8 +830,7 @@ function FloatingNav({ layout }: { layout: PanelLayout }) {
               if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
               e.preventDefault();
               if (exiting) return;
-              setExiting(true);
-              router.push("/");
+              onBack();
             }}
             style={{
               display: "inline-flex",
@@ -570,12 +845,12 @@ function FloatingNav({ layout }: { layout: PanelLayout }) {
 
           <button type="button" className="bg-white/[0.20] transition-colors duration-300 ease-out hover:bg-white/[0.32]" style={{
             display: "inline-flex", alignItems: "center", gap: 7,
-            padding: "8px 14px", borderRadius: 999, border: "none",
+            padding: "8px 14px", borderRadius: 10 * layout.scale, border: "none",
             color: "#fff", fontFamily: "var(--sans-stack)",
             fontSize: 12, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1,
           }}>
             Connect wallet
-            <StrokeIcon kind="arrow" size={12} />
+            <WalletIcon size={13} />
           </button>
         </div>
       </div>
@@ -585,314 +860,795 @@ function FloatingNav({ layout }: { layout: PanelLayout }) {
 
 /* ---------- Hero ---------- */
 
-function Hero() {
+function HeroTitle() {
   return (
-    <div className="reveal" style={{ animationDelay: "100ms" }}>
-      <h1 style={{ color: "#fff", fontFamily: "var(--font-radley)", fontSize: 38, lineHeight: 1.08, letterSpacing: "-0.01em", margin: 0, fontWeight: 400 }}>
-        Your stake in onchain volume.
-      </h1>
-      <p style={{ color: "rgba(255,255,255,0.65)", fontFamily: "var(--font-radley)", fontSize: 15, lineHeight: 1.5, margin: "10px 0 0 0", maxWidth: 620 }}>
-        Deposit{" "}
-        <InlinePill iconImage={{ src: "/tokens/usdc.png", alt: "USDC" }}>USDC</InlinePill>
-        {" "}once. An agent rebalances across high-volume pools, keeping an idle reserve for instant withdrawals.
-      </p>
-    </div>
+    <h1 style={{
+      color: "#fff", fontFamily: "var(--font-radley)",
+      fontSize: 42, lineHeight: 1.08, letterSpacing: "-0.01em",
+      margin: 0, fontWeight: 400,
+      alignSelf: "center",
+    }}>
+      Start earning from onchain volume.
+    </h1>
+  );
+}
+
+// Empty visual segment used in the top-right of the bento until the
+// real content lands (3D bluechip render, marquee, etc.).
+function PlaceholderCard({ label }: { label: string }) {
+  return (
+    <Card style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", minHeight: 0 }}>
+      <span style={{
+        color: "rgba(255,255,255,0.30)",
+        fontFamily: "var(--sans-stack)", fontSize: 11, fontWeight: 500,
+        letterSpacing: "0.10em", textTransform: "uppercase",
+      }}>
+        {label}
+      </span>
+    </Card>
   );
 }
 
 /* ---------- User cards ---------- */
 
+// Filled "i" — user-supplied artwork. Outer disc at 40% opacity,
+// the glyph at full opacity, both via currentColor.
+function InfoIcon({ size = 12 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden style={{ display: "block", flexShrink: 0, verticalAlign: "middle" }}>
+      <path opacity="0.4" d="M9 1C4.5889 1 1 4.5889 1 9C1 13.4111 4.5889 17 9 17C13.4111 17 17 13.4111 17 9C17 4.5889 13.4111 1 9 1Z" fill="currentColor" />
+      <path d="M9.75 12.75C9.75 13.1641 9.4141 13.5 9 13.5C8.5859 13.5 8.25 13.1641 8.25 12.75V9.5H7.75C7.3359 9.5 7 9.1641 7 8.75C7 8.3359 7.3359 8 7.75 8H8.5C9.1895 8 9.75 8.5605 9.75 9.25V12.75ZM9 6.75C8.448 6.75 8 6.301 8 5.75C8 5.199 8.448 4.75 9 4.75C9.552 4.75 10 5.199 10 5.75C10 6.301 9.552 6.75 9 6.75Z" fill="currentColor" />
+    </svg>
+  );
+}
+
+// Hover tooltip wrapper. Renders the popover via `createPortal` to
+// `document.body` so it escapes any ancestor `overflow: hidden` (the
+// deposit sub-card has it for the dot-grid clip) and isn't cut off
+// when expanding upward over the input area.
+function InfoTip({ label, children }: { label: string; children: React.ReactNode }) {
+  const [hover, setHover] = useState(false);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const wrapRef = useRef<HTMLSpanElement>(null);
+  const onEnter = () => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setPos({ left: r.left + r.width / 2, top: r.top });
+    setHover(true);
+  };
+  return (
+    <span
+      ref={wrapRef}
+      onMouseEnter={onEnter}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        position: "relative", display: "inline-flex",
+        alignItems: "center", justifyContent: "center",
+        verticalAlign: "middle",
+      }}
+    >
+      {children}
+      {hover && pos && typeof document !== "undefined" && createPortal(
+        <div
+          aria-hidden
+          style={{
+            position: "fixed",
+            left: pos.left,
+            top: pos.top - 6,
+            transform: "translate(-50%, -100%)",
+            padding: "4px 7px",
+            borderRadius: 6,
+            background: "rgba(20,20,22,0.95)",
+            backdropFilter: "blur(14px)",
+            WebkitBackdropFilter: "blur(14px)",
+            border: "1px solid rgba(255,255,255,0.10)",
+            color: "rgba(255,255,255,0.92)",
+            fontFamily: "var(--sans-stack)",
+            fontSize: 11, fontWeight: 500,
+            lineHeight: 1.45,
+            whiteSpace: "normal",
+            width: "max-content", maxWidth: 220,
+            pointerEvents: "none",
+            zIndex: 1000,
+          }}
+        >
+          {label}
+        </div>,
+        document.body,
+      )}
+    </span>
+  );
+}
+
+// User-supplied chevron-pair (up + down). Uses currentColor so it
+// inherits the surrounding muted-text shade.
+function SwapVerticalIcon({ size = 12 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden style={{ display: "inline-block", flexShrink: 0, opacity: 0.85 }}>
+      <path d="M9.53,2.22c-.293-.293-.768-.293-1.061,0l-3.5,3.5c-.293,.293-.293,.768,0,1.061s.768,.293,1.061,0l2.97-2.97,2.97,2.97c.146,.146,.338,.22,.53,.22s.384-.073,.53-.22c.293-.293,.293-.768,0-1.061l-3.5-3.5Z" fill="currentColor" />
+      <path d="M11.97,11.22l-2.97,2.97-2.97-2.97c-.293-.293-.768-.293-1.061,0s-.293,.768,0,1.061l3.5,3.5c.146,.146,.338,.22,.53,.22s.384-.073,.53-.22l3.5-3.5c.293-.293,.293-.768,0-1.061s-.768-.293-1.061,0Z" fill="currentColor" />
+    </svg>
+  );
+}
+
 function VaultCard() {
-  const [tab, setTab] = useState<"deposit" | "redeem">("deposit");
   const [amount, setAmount] = useState("");
-  const isDeposit = tab === "deposit";
   const num = Number.parseFloat(amount.replace(/,/g, "")) || 0;
-  const receive = isDeposit ? num / SHARE_PRICE : num * SHARE_PRICE;
+  const usdValue = num; // 1:1 since input is in USDC
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Five-token row used by the Exposure detail. Leftmost on top,
+  // each subsequent chip steps right with a lower z-index. Hovered
+  // chip lifts + scales + reveals its slug; neighbours stay put.
+  const exposureTokens: TokenEntry[] = [TOKENS.USDC, TOKENS.ETH, TOKENS.BTC, TOKENS.USDT, TOKENS.UNI];
+  const TOK_SIZE = 16;
+  const TOK_OFFSET = 10;
+  const [hoveredTokIdx, setHoveredTokIdx] = useState<number | null>(null);
 
   return (
-    <Card style={{ display: "flex", flexDirection: "column" }}>
-      <CardLabel icon="vault">Vault</CardLabel>
+    <Card style={{
+      display: "flex", flexDirection: "column", height: "100%",
+      padding: 20,
+      background: "#0c0c10",
+      border: "1px solid rgba(255,255,255,0.08)",
+      backdropFilter: "none",
+      WebkitBackdropFilter: "none",
+    }}>
+      <CardLabel icon="vault">Deposit</CardLabel>
       <div style={{ marginTop: 12 }}>
-        <H3>{isDeposit ? "Deposit USDC." : "Redeem ALP."}</H3>
+        <H3>Start earning fees from onchain volume!</H3>
       </div>
 
-      <div style={{ marginTop: 14, display: "inline-flex", padding: 4, gap: 4, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, width: "max-content" }}>
-        {(["deposit", "redeem"] as const).map((t) => (
-          <button key={t} type="button" onClick={() => setTab(t)} style={{
-            border: "none", padding: "6px 14px", borderRadius: 8,
-            background: t === tab ? "rgba(255,255,255,0.10)" : "transparent",
-            color: t === tab ? "#fff" : "rgba(255,255,255,0.55)",
-            fontFamily: "var(--sans-stack)", fontSize: 12, fontWeight: 500, lineHeight: 1,
-            transition: "background 200ms ease, color 200ms ease",
-          }}>
-            {t === "deposit" ? "Deposit" : "Redeem"}
-          </button>
-        ))}
-      </div>
-
-      <div style={{ marginTop: 14 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", color: "rgba(255,255,255,0.55)", fontFamily: "var(--sans-stack)", fontSize: 11, letterSpacing: "0.02em", lineHeight: 1, marginBottom: 8 }}>
-          <span style={{ textTransform: "uppercase", fontWeight: 500 }}>Amount</span>
-          <span style={{ fontVariantNumeric: "tabular-nums" }}>Balance: 0.00 {isDeposit ? "USDC" : "ALP"}</span>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 12px 12px 16px", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 14 }}>
-          <input inputMode="decimal" placeholder="0.00" value={amount} onChange={(e) => setAmount(e.target.value)} style={{
-            flex: 1, minWidth: 0,
-            background: "transparent", border: "none", outline: "none",
-            color: "#fff", fontFamily: "var(--sans-stack)",
-            fontSize: 24, fontWeight: 500, letterSpacing: "-0.01em", lineHeight: 1.1, fontVariantNumeric: "tabular-nums",
-          }} />
-          <button type="button" className="bg-white/[0.08] transition-colors duration-200 ease-out hover:bg-white/[0.14]" style={{
-            border: "none", padding: "0 9px", height: 22, borderRadius: 6,
-            color: "rgba(255,255,255,0.92)", fontFamily: "var(--sans-stack)",
-            fontSize: 11, fontWeight: 600, letterSpacing: "0.04em", lineHeight: 1,
-          }}>
-            MAX
-          </button>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "5px 10px 5px 6px", background: "rgba(255,255,255,0.06)", borderRadius: 999 }}>
-            {isDeposit ? <TokenChip entry={TOKENS.USDC} size={18} /> : <AlpChip size={18} />}
-            <span style={{ color: "#fff", fontFamily: "var(--sans-stack)", fontSize: 13, fontWeight: 500, lineHeight: 1 }}>
-              {isDeposit ? "USDC" : "ALP"}
+      {/* Sub-card 1 — amount input + APY readout. The deposit area
+          (top portion above the divider) carries the dot-grid bg
+          that matches Sherpa's action-summary bubble. The APY row
+          below the divider stays on a flat surface. */}
+      <div style={{
+        marginTop: 18,
+        border: "1px solid rgba(255,255,255,0.06)",
+        borderRadius: 12,
+        overflow: "hidden",
+        background: "rgba(255,255,255,0.03)",
+      }}>
+        {/* Whole grid segment is a click-target for the input — any
+            blank area focuses it. The USDC chip + Max + input itself
+            still handle their own events first via bubbling. */}
+        <div
+          onClick={() => inputRef.current?.focus()}
+          style={{
+            padding: 14,
+            backgroundColor: "rgba(255,255,255,0.03)",
+            backgroundImage: "radial-gradient(circle, rgba(255,255,255,0.10) 0.7px, transparent 1.1px)",
+            backgroundSize: "9px 9px",
+            display: "flex", flexDirection: "column", gap: 10,
+            cursor: "text",
+          }}
+        >
+          <div style={{ color: "rgba(255,255,255,0.55)", fontFamily: "var(--sans-stack)", fontSize: 11, fontWeight: 500, lineHeight: 1 }}>
+            Deposit
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <input
+              ref={inputRef}
+              inputMode="decimal"
+              placeholder="0"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              style={{
+                flex: 1, minWidth: 0,
+                background: "transparent", border: "none", outline: "none",
+                color: "#fff", fontFamily: "var(--sans-stack)",
+                fontSize: 28, fontWeight: 500, letterSpacing: "-0.015em", lineHeight: 1.05,
+                fontVariantNumeric: "tabular-nums",
+              }}
+            />
+            {/* Opaque bg ≈ Vault card #0c0c10 + 0.06 white tint, so
+                the pill matches the Connect wallet button visually
+                without the dot-grid behind sub-card 1 bleeding
+                through a translucent rgba bg. */}
+            <span style={{
+              display: "inline-flex", alignItems: "center", gap: 7,
+              padding: "4px 11px 4px 4px",
+              border: "1px solid rgba(255,255,255,0.10)",
+              background: "#1a1c20",
+              borderRadius: 8,
+              color: "#fff",
+              fontFamily: "var(--sans-stack)",
+              fontSize: 12.5, fontWeight: 600, letterSpacing: "-0.005em",
+            }}>
+              <TokenChip entry={TOKENS.USDC} size={22} radius={5} />
+              <span style={{ display: "inline-block", position: "relative", top: 1, lineHeight: 1 }}>
+                USDC
+              </span>
             </span>
+          </div>
+          <div style={{
+            display: "flex", justifyContent: "space-between", alignItems: "center",
+            color: "rgba(255,255,255,0.55)",
+            fontFamily: "var(--sans-stack)", fontSize: 12, fontWeight: 400, lineHeight: 1,
+          }}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              <SwapVerticalIcon size={12} />
+              <span style={{ fontVariantNumeric: "tabular-nums" }}>
+                ${usdValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </span>
+            </span>
+            {/* Click balance to MAX-fill — keeps the row chrome-free. */}
+            <button
+              type="button"
+              onClick={() => setAmount("0")}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "#fff"; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.55)"; }}
+              style={{
+                background: "transparent", border: "none", padding: 0,
+                color: "rgba(255,255,255,0.55)",
+                fontFamily: "var(--sans-stack)", fontSize: 12, fontWeight: 400,
+                fontVariantNumeric: "tabular-nums", lineHeight: 1,
+                cursor: "pointer",
+                transition: "color 200ms ease",
+              }}
+            >
+              Balance: 0.00
+            </button>
+          </div>
+        </div>
+        <div aria-hidden style={{ height: 1, background: "rgba(255,255,255,0.05)" }} />
+        <div style={{
+          padding: "10px 14px",
+          display: "flex", justifyContent: "space-between", alignItems: "center",
+          fontFamily: "var(--sans-stack)", fontSize: 12,
+        }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "rgba(255,255,255,0.55)" }}>
+            Deposit APY
+            <InfoTip label="30-day rolling realized yield from fees the agent has captured across the basket.">
+              <InfoIcon size={12} />
+            </InfoTip>
+          </span>
+          <span style={{ color: "rgb(134, 239, 172)", fontWeight: 600, fontVariantNumeric: "tabular-nums", letterSpacing: "-0.005em" }}>
+            {BASKET_APR_30D.toFixed(2)}%
           </span>
         </div>
       </div>
 
-      <div style={{ marginTop: 10, display: "flex", justifyContent: "space-between", alignItems: "center", padding: "11px 14px", background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12 }}>
-        <span style={{ color: "rgba(255,255,255,0.55)", fontFamily: "var(--sans-stack)", fontSize: 12, fontWeight: 500 }}>You receive</span>
-        <span style={{ color: "#fff", fontFamily: "var(--sans-stack)", fontSize: 13, fontWeight: 500, fontVariantNumeric: "tabular-nums" }}>
-          ≈ {fmtNum(receive)} {isDeposit ? "ALP" : "USDC"}
-        </span>
-      </div>
-
-      <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
-        <DetailRow label="Share price" value="$1.0427" />
-        <DetailRow label="Withdraw delay" value="Instant up to reserve" />
-      </div>
-
-      <button type="button" className="bg-white/[0.20] transition-colors duration-300 ease-out hover:bg-white/[0.32]" style={{
-        marginTop: 14, width: "100%",
-        display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
-        padding: "12px 16px", borderRadius: 14, border: "none",
-        color: "#fff", fontFamily: "var(--sans-stack)",
-        fontSize: 13, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1,
+      {/* Sub-card 2 — vault details. Flat bg, no dot grid. */}
+      <div style={{
+        marginTop: 10,
+        padding: "10px 14px",
+        background: "rgba(255,255,255,0.03)",
+        border: "1px solid rgba(255,255,255,0.06)",
+        borderRadius: 12,
+        display: "flex", flexDirection: "column", gap: 8,
+        fontFamily: "var(--sans-stack)", fontSize: 12,
       }}>
+        {/* Exposure — overlapping token chips. Hovered chip lifts +
+            scales up, neighbours fan outward, tooltip reveals slug. */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "rgba(255,255,255,0.55)" }}>
+            Exposure
+            <InfoTip label="Tokens currently held by the vault across all active liquidity positions.">
+              <InfoIcon size={12} />
+            </InfoTip>
+          </span>
+          <span style={{
+            position: "relative",
+            display: "inline-block",
+            width: TOK_SIZE + (exposureTokens.length - 1) * TOK_OFFSET,
+            height: TOK_SIZE + 4,
+          }}>
+            {exposureTokens.map((t, i) => {
+              const hovered = hoveredTokIdx === i;
+              return (
+                <span
+                  key={t.slug}
+                  onMouseEnter={() => setHoveredTokIdx(i)}
+                  onMouseLeave={() => setHoveredTokIdx(null)}
+                  style={{
+                    position: "absolute",
+                    left: i * TOK_OFFSET,
+                    top: 2,
+                    zIndex: hovered ? 100 : exposureTokens.length - i,
+                    transition: "transform 180ms ease",
+                    transform: hovered ? "scale(1.22)" : "none",
+                    transformOrigin: "center center",
+                    cursor: "default",
+                  }}
+                >
+                  <TokenChip entry={t} size={TOK_SIZE} radius={4} />
+                  {hovered && (
+                    <span aria-hidden style={{
+                      position: "absolute",
+                      bottom: "calc(100% + 4px)",
+                      left: "50%",
+                      transform: "translateX(-50%)",
+                      padding: "2px 5px",
+                      borderRadius: 5,
+                      background: "rgba(20,20,22,0.95)",
+                      border: "1px solid rgba(255,255,255,0.10)",
+                      color: "rgba(255,255,255,0.92)",
+                      fontFamily: "var(--sans-stack)", fontSize: 10, fontWeight: 500,
+                      lineHeight: 1, letterSpacing: "0.02em",
+                      whiteSpace: "nowrap",
+                      pointerEvents: "none",
+                    }}>
+                      {t.slug}
+                    </span>
+                  )}
+                </span>
+              );
+            })}
+          </span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "rgba(255,255,255,0.55)" }}>
+            Share price
+            <InfoTip label="Value of one ALP share. Grows as fees accrue into the vault.">
+              <InfoIcon size={12} />
+            </InfoTip>
+          </span>
+          <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)", fontVariantNumeric: "tabular-nums" }}>$1.0427</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "rgba(255,255,255,0.55)" }}>
+            Withdraw delay
+            <InfoTip label="Withdrawals settle in one block while the idle reserve covers them; larger asks queue against the next rebalance.">
+              <InfoIcon size={12} />
+            </InfoTip>
+          </span>
+          <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)" }}>Instant up to reserve</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "rgba(255,255,255,0.55)" }}>
+            Vault TVL
+            <InfoTip label="Total value across all active positions plus the idle reserve.">
+              <InfoIcon size={12} />
+            </InfoTip>
+          </span>
+          <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)", fontVariantNumeric: "tabular-nums" }}>$3.26M</span>
+        </div>
+      </div>
+
+      {/* Full-width primary CTA — no inline margin so it sits flush
+          with the card's uniform 20px padding (top = sides = bottom). */}
+      <button
+        type="button"
+        className="transition-colors duration-200 ease-out"
+        style={{
+          marginTop: "auto", width: "100%",
+          display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
+          padding: "14px 16px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.10)",
+          background: "rgba(255,255,255,0.06)",
+          color: "rgba(255,255,255,0.78)", fontFamily: "var(--sans-stack)",
+          fontSize: 13, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1,
+          cursor: "pointer",
+        }}
+        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.10)"; }}
+        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.06)"; }}
+      >
         Connect wallet
-        <StrokeIcon kind="arrow" size={13} />
+        <WalletIcon size={14} />
       </button>
     </Card>
   );
 }
 
-function PositionCard() {
-  return (
-    <Card>
-      <CardLabel icon="position">Position</CardLabel>
-      <div style={{ marginTop: 14, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
-        <StatCell label="Deposited" value="$0.00" />
-        <StatCell label="Net APR" value="14.2%" tone="up" />
-        <StatCell label="Position" value="0 ALP" />
-        <StatCell label="Earnings" value="$0.00" />
-      </div>
-    </Card>
-  );
-}
+const fmtUsd2 = (n: number, signed = false) => {
+  const sign = signed ? (n >= 0 ? "+" : "−") : "";
+  const abs = Math.abs(n);
+  return `${sign}$${abs.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+};
 
-function HistoryCard() {
-  const start = APR_30D[0];
-  const end = APR_30D[APR_30D.length - 1];
-  const delta = end - start;
-  const up = delta >= 0;
+// Compact key/value row used in the user-side cards.
+function KvRow({ label, value, valueColor }: { label: string; value: string; valueColor?: string }) {
   return (
-    <Card>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-        <CardLabel icon="position">APR · 30d rolling</CardLabel>
-        <span style={{ color: up ? "rgb(134, 239, 172)" : "rgb(252, 165, 165)", fontFamily: "var(--sans-stack)", fontSize: 11, fontWeight: 500, fontVariantNumeric: "tabular-nums", letterSpacing: "-0.005em", lineHeight: 1, marginTop: 4 }}>
-          {up ? "+" : ""}{delta.toFixed(1)}pp
-        </span>
-      </div>
-      <div style={{ marginTop: 10, color: "#fff", fontFamily: "var(--sans-stack)", fontSize: 22, fontWeight: 500, letterSpacing: "-0.015em", fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>
-        {end.toFixed(1)}%
-      </div>
-      <div style={{ marginTop: 14 }}>
-        <Sparkline values={APR_30D} lineColor="rgba(255,255,255,0.70)" fillColor="rgba(255,255,255,0.06)" height={48} />
-      </div>
-    </Card>
-  );
-}
-
-function GaugeCell({ pct, color, ariaLabel, slug, centre }: { pct: number; color: string; ariaLabel: string; slug: string; centre: React.ReactNode }) {
-  return (
-    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10, minWidth: 60 }}>
-      <Gauge pct={pct} color={color} ariaLabel={ariaLabel}>{centre}</Gauge>
-      <span style={{ color: "rgba(255,255,255,0.92)", fontFamily: "var(--sans-stack)", fontSize: 11, fontWeight: 500, letterSpacing: "0.04em", lineHeight: 1, whiteSpace: "nowrap" }}>
-        {slug}
-      </span>
+    <div style={{
+      display: "flex", justifyContent: "space-between", alignItems: "baseline",
+      fontFamily: "var(--sans-stack)", fontSize: 12, lineHeight: 1.2,
+    }}>
+      <span style={{ color: "rgba(255,255,255,0.55)" }}>{label}</span>
+      <span style={{ color: valueColor ?? "rgba(255,255,255,0.92)", fontVariantNumeric: "tabular-nums" }}>{value}</span>
     </div>
   );
 }
 
-function AllocationCard() {
+// Position: current value (Inter), pct delta, ALP token chip + share
+// count inline, deposited row at bottom, Withdraw CTA top-right.
+function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
+  const up = USER_PNL >= 0;
+  const accent = up ? "rgb(134, 239, 172)" : "rgb(248, 113, 113)";
   return (
-    <Card>
-      <CardLabel icon="allocation">Allocation</CardLabel>
-      <div style={{ marginTop: 12 }}>
-        <H3>Where deposits sit today.</H3>
+    <Card style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <CardLabel icon="position">Position</CardLabel>
+        <button
+          type="button"
+          onClick={onWithdraw}
+          className="bg-white/[0.12] transition-colors duration-200 ease-out hover:bg-white/[0.20]"
+          style={{
+            display: "inline-flex", alignItems: "center", gap: 6,
+            border: "1px solid rgba(255,255,255,0.14)",
+            padding: "7px 12px", borderRadius: 8,
+            color: "#fff",
+            fontFamily: "var(--sans-stack)", fontSize: 12, fontWeight: 600,
+            lineHeight: 1, letterSpacing: "-0.005em",
+            cursor: "pointer",
+          }}
+        >
+          Withdraw
+          <StrokeIcon kind="arrow" size={11} />
+        </button>
       </div>
 
-      <SectionLabel>By token</SectionLabel>
-      <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
-        {ALLOCATIONS.map((a) => (
-          <GaugeCell key={a.slug} pct={a.pct} color={a.color} ariaLabel={`${a.slug} ${a.pct}%`} slug={a.slug} centre={<TokenChip entry={a} size={24} />} />
-        ))}
-      </div>
-
-      <SectionLabel>Positions</SectionLabel>
-      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        {POSITIONS_SORTED.map((p) => (
-          <div key={p.slug} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0" }}>
-            {p.single ? (
-              <TokenChip entry={p.single} size={18} radius={5} />
-            ) : (
-              <PoolPairChip left={p.pair!.left} right={p.pair!.right} size={16} />
-            )}
-            <span style={{ flex: 1, color: "rgba(255,255,255,0.92)", fontFamily: "var(--sans-stack)", fontSize: 12, fontWeight: 500, letterSpacing: "-0.005em" }}>
-              {p.slug}
-            </span>
-            <span style={{ color: "rgba(255,255,255,0.55)", fontFamily: "var(--sans-stack)", fontSize: 12, fontWeight: 500, fontVariantNumeric: "tabular-nums" }}>
-              {p.pct}%
-            </span>
-          </div>
-        ))}
-      </div>
-    </Card>
-  );
-}
-
-/* ---------- Protocol section cards ---------- */
-
-function VaultMetricsCard() {
-  return (
-    <Card>
-      <CardLabel icon="agent">Vault metrics</CardLabel>
-      <div style={{ marginTop: 14, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
-        <MetricCell icon="vault" label="TVL" value="$3.26M" />
-        <MetricCell icon="fees" label="30d fees" value="$42.18k" />
-        <MetricCell icon="pools" label="Active pools" value="4" />
-        <MetricCell icon="clock" label="Last action" value="2m ago" />
-      </div>
-    </Card>
-  );
-}
-
-function ChartCard({ icon, label, value, values, lineColor, fillColor }: { icon: keyof typeof ICONS | string; label: string; value: string; values: number[]; lineColor: string; fillColor: string }) {
-  const start = values[0];
-  const end = values[values.length - 1];
-  const deltaPct = ((end - start) / start) * 100;
-  const up = deltaPct >= 0;
-  return (
-    <Card>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-        <CardLabel icon={icon}>{label}</CardLabel>
-        <span style={{ color: up ? "rgb(134, 239, 172)" : "rgb(252, 165, 165)", fontFamily: "var(--sans-stack)", fontSize: 11, fontWeight: 500, fontVariantNumeric: "tabular-nums", letterSpacing: "-0.005em", lineHeight: 1, marginTop: 4 }}>
-          {up ? "+" : ""}{deltaPct.toFixed(2)}%
+      <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+        <span style={{
+          color: "#fff", fontFamily: "var(--sans-stack)",
+          fontSize: 26, fontWeight: 600, lineHeight: 1,
+          letterSpacing: "-0.015em", fontVariantNumeric: "tabular-nums",
+        }}>
+          {fmtUsd2(USER_VALUE)}
+        </span>
+        {/* Grey AlpChip + share count, no surrounding chip wrapper. */}
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+          <AlpChip size={20} />
+          <span style={{
+            color: "rgba(255,255,255,0.92)",
+            fontFamily: "var(--sans-stack)", fontSize: 12.5, fontWeight: 500,
+            fontVariantNumeric: "tabular-nums", lineHeight: 1,
+          }}>
+            {USER_SHARES.toLocaleString("en-US", { maximumFractionDigits: 2 })} ALP
+          </span>
         </span>
       </div>
-      <div style={{ marginTop: 10, color: "#fff", fontFamily: "var(--sans-stack)", fontSize: 22, fontWeight: 500, letterSpacing: "-0.015em", fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>
-        {value}
+
+      {/* Pin details to the card floor; Performance is the taller
+          sibling so this just absorbs the height difference. */}
+      <div style={{ marginTop: "auto", paddingTop: 14, display: "flex", flexDirection: "column", gap: 6 }}>
+        <KvRow label="Deposited" value={fmtUsd2(USER_DEPOSIT_AMT)} />
+        <KvRow label="Yield" value={fmtUsd2(USER_PNL, true)} valueColor={accent} />
+      </div>
+    </Card>
+  );
+}
+
+// Performance: realized APY (Inter), hover-trackable sparkline. Date
+// in top-right swaps to the hovered day so the value/header heights
+// stay constant — no layout shift on hover.
+function UserAprCard() {
+  const data = APR_30D;
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const handleMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    const el = containerRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const ratio = Math.max(0, Math.min(1, x / rect.width));
+    setHoverIdx(Math.round(ratio * (data.length - 1)));
+  };
+
+  // Day index → "MMM D". Last index is today; we walk backward by
+  // (data.length - 1 - i) days from today.
+  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const today = new Date(USER_DEPOSIT_TS);
+  today.setDate(today.getDate() + USER_DAYS_HELD);
+  const dateForIdx = (i: number) => {
+    const d = new Date(today);
+    d.setDate(d.getDate() - (data.length - 1 - i));
+    return `${months[d.getMonth()]} ${d.getDate()}`;
+  };
+
+  const value = hoverIdx === null ? USER_REALIZED_APY : data[hoverIdx];
+  const dateLabel = dateForIdx(hoverIdx === null ? data.length - 1 : hoverIdx);
+
+  return (
+    <Card style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <CardLabel icon="sparkles">Performance</CardLabel>
+        <span style={{
+          color: "rgba(255,255,255,0.55)",
+          fontFamily: "var(--sans-stack)", fontSize: 11, fontWeight: 500,
+          fontVariantNumeric: "tabular-nums", lineHeight: 1,
+        }}>
+          {dateLabel}
+        </span>
       </div>
       <div style={{ marginTop: 14 }}>
-        <Sparkline values={values} lineColor={lineColor} fillColor={fillColor} height={48} />
+        <span style={{
+          color: "rgb(134, 239, 172)",
+          fontFamily: "var(--sans-stack)",
+          fontSize: 26, fontWeight: 600, lineHeight: 1,
+          letterSpacing: "-0.015em", fontVariantNumeric: "tabular-nums",
+        }}>
+          {value.toFixed(1)}%
+        </span>
+      </div>
+      {/* marginTop matches the gap from the value to the KvRows in
+          Position (chip + gap + KvRow padding) so both cards' second
+          block starts at the same Y. Rounded corners on the chart
+          container so the sparkline's fill area doesn't end with a
+          hard rectangular bottom-right. */}
+      <div
+        ref={containerRef}
+        onMouseMove={handleMove}
+        onMouseLeave={() => setHoverIdx(null)}
+        style={{
+          marginTop: 44, position: "relative", cursor: "default",
+          borderRadius: 10, overflow: "hidden",
+        }}
+      >
+        <Sparkline values={data} lineColor="rgba(134, 239, 172, 0.85)" fillColor="rgba(134, 239, 172, 0.10)" height={56} />
+        {hoverIdx !== null && (
+          <div aria-hidden style={{
+            position: "absolute",
+            left: `${(hoverIdx / (data.length - 1)) * 100}%`,
+            top: 0, bottom: 0, width: 1,
+            background: "rgba(255,255,255,0.30)",
+            pointerEvents: "none",
+          }} />
+        )}
       </div>
     </Card>
   );
 }
 
-function TvlChartCard() {
-  const end = TVL_30D[TVL_30D.length - 1];
-  return (
-    <ChartCard icon="vault" label="TVL · 30d" value={`$${end.toFixed(2)}M`} values={TVL_30D} lineColor="rgba(255,255,255,0.70)" fillColor="rgba(255,255,255,0.06)" />
-  );
-}
+// Full-page modal triggered by the Position card's Withdraw button.
+// Backdrop darkens + blurs the entire /app shell so the modal reads
+// as a dedicated transactional context.
+function WithdrawModal({ onClose }: { onClose: () => void }) {
+  const [amount, setAmount] = useState("");
+  const num = Number.parseFloat(amount.replace(/,/g, "")) || 0;
+  const usdcOut = num * SHARE_PRICE;
+  const valid = num > 0 && num <= USER_SHARES;
 
-function SharePriceChartCard() {
-  const end = SHARE_PRICE_30D[SHARE_PRICE_30D.length - 1];
-  return (
-    <ChartCard icon="position" label="Share price · 30d" value={`$${end.toFixed(4)}`} values={SHARE_PRICE_30D} lineColor="rgba(134, 239, 172, 0.85)" fillColor="rgba(134, 239, 172, 0.10)" />
-  );
-}
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = "";
+    };
+  }, [onClose]);
 
-/* ---------- Stats section cards ---------- */
+  if (typeof document === "undefined") return null;
 
-function FlowChip({ pool, size = 14 }: { pool: PoolEntry; size?: number }) {
-  return pool.single ? (
-    <TokenChip entry={pool.single} size={size} radius={4} />
-  ) : (
-    <PoolPairChip left={pool.pair!.left} right={pool.pair!.right} size={size} />
-  );
-}
+  const setPct = (pct: number) => {
+    const v = (USER_SHARES * pct) / 100;
+    setAmount(v.toFixed(2));
+  };
 
-function FlowsCard() {
-  return (
-    <Card>
-      <CardLabel icon="flow">Fund flows</CardLabel>
-      <div style={{ marginTop: 12 }}>
-        <H3>Where capital moved.</H3>
-        <p style={{ margin: "8px 0 0 0", color: "rgba(255,255,255,0.55)", fontFamily: "var(--font-radley)", fontSize: 14, lineHeight: 1.5 }}>
-          Recent rotations across pools and the idle reserve.
-        </p>
-      </div>
-      <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 10 }}>
-        {FLOWS.map((f, i) => (
-          <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderRadius: 10, background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.04)" }}>
-            <FlowChip pool={POOLS[f.fromIdx]} size={14} />
-            <StrokeIcon kind="arrow" size={11} />
-            <FlowChip pool={POOLS[f.toIdx]} size={14} />
-            <span style={{ flex: 1, color: "rgba(255,255,255,0.92)", fontFamily: "var(--sans-stack)", fontSize: 11, fontWeight: 500, marginLeft: 4, letterSpacing: "-0.005em" }}>
-              {POOLS[f.fromIdx].slug} → {POOLS[f.toIdx].slug}
-            </span>
-            <span style={{ color: "#fff", fontFamily: "var(--sans-stack)", fontSize: 11, fontWeight: 500, fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>
-              {f.amount}
-            </span>
-            <span style={{ color: "rgba(255,255,255,0.45)", fontFamily: "var(--sans-stack)", fontSize: 11, fontWeight: 500, fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>
-              {f.time}
+  return createPortal(
+    <div
+      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      style={{
+        position: "fixed", inset: 0, zIndex: 1000,
+        background: "rgba(0,0,0,0.55)",
+        backdropFilter: "blur(12px) saturate(120%)",
+        WebkitBackdropFilter: "blur(12px) saturate(120%)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        animation: "withdraw-fade 160ms ease-out",
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Withdraw"
+        style={{
+          width: "min(440px, calc(100vw - 32px))",
+          background: "#0c0c10",
+          border: "1px solid rgba(255,255,255,0.08)",
+          borderRadius: 16,
+          padding: 24,
+          color: "#fff",
+          boxShadow: "0 24px 64px rgba(0,0,0,0.6)",
+          fontFamily: "var(--sans-stack)",
+          animation: "withdraw-pop 180ms ease-out",
+        }}
+      >
+        {/* Header */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <span style={{ fontSize: 16, fontWeight: 500 }}>Withdraw</span>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="transition-colors duration-200 ease-out"
+            style={{
+              width: 28, height: 28, borderRadius: 8,
+              background: "transparent", border: "none",
+              color: "rgba(255,255,255,0.60)",
+              display: "inline-flex", alignItems: "center", justifyContent: "center",
+              cursor: "pointer",
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M6 6l12 12M18 6l-12 12" />
+            </svg>
+          </button>
+        </div>
+
+        {/* Position summary strip */}
+        <div style={{
+          marginTop: 18,
+          padding: "12px 14px",
+          background: "rgba(255,255,255,0.03)",
+          border: "1px solid rgba(255,255,255,0.06)",
+          borderRadius: 10,
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          fontSize: 12,
+        }}>
+          <span style={{ color: "rgba(255,255,255,0.55)" }}>Your position</span>
+          <span style={{ color: "rgba(255,255,255,0.92)", fontVariantNumeric: "tabular-nums" }}>
+            {USER_SHARES.toLocaleString("en-US", { maximumFractionDigits: 2 })} ALP · {fmtUsd2(USER_VALUE)}
+          </span>
+        </div>
+
+        {/* Amount input */}
+        <div style={{ marginTop: 18 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", color: "rgba(255,255,255,0.55)", fontSize: 11.5, marginBottom: 8 }}>
+            <span>Amount</span>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontVariantNumeric: "tabular-nums" }}>
+              Balance: {USER_SHARES.toLocaleString("en-US", { maximumFractionDigits: 2 })}
+              <button type="button" onClick={() => setPct(100)} style={{
+                border: "1px solid rgba(255,255,255,0.12)", background: "transparent",
+                padding: "2px 8px", borderRadius: 6, height: 20,
+                color: "rgba(255,255,255,0.92)",
+                fontFamily: "var(--sans-stack)", fontSize: 10.5, fontWeight: 600, letterSpacing: "0.04em",
+                lineHeight: 1, cursor: "pointer",
+              }}>MAX</button>
             </span>
           </div>
-        ))}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 12px 12px 16px", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 12 }}>
+            <input
+              inputMode="decimal" placeholder="0.00" value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              style={{
+                flex: 1, minWidth: 0,
+                background: "transparent", border: "none", outline: "none",
+                color: "#fff", fontFamily: "var(--sans-stack)",
+                fontSize: 24, fontWeight: 500, letterSpacing: "-0.01em", lineHeight: 1.1, fontVariantNumeric: "tabular-nums",
+              }}
+            />
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "5px 10px 5px 6px", background: "rgba(255,255,255,0.06)", borderRadius: 999 }}>
+              <AlpChip size={18} />
+              <span style={{ fontSize: 13, fontWeight: 500, lineHeight: 1 }}>ALP</span>
+            </span>
+          </div>
+          {/* Quick pct chips */}
+          <div style={{ marginTop: 10, display: "flex", gap: 6 }}>
+            {[25, 50, 75, 100].map((p) => (
+              <button
+                key={p}
+                type="button"
+                onClick={() => setPct(p)}
+                className="bg-white/[0.04] transition-colors duration-200 ease-out hover:bg-white/[0.10]"
+                style={{
+                  flex: 1,
+                  border: "1px solid rgba(255,255,255,0.08)",
+                  padding: "5px 0", borderRadius: 7,
+                  color: "rgba(255,255,255,0.78)",
+                  fontFamily: "var(--sans-stack)", fontSize: 11, fontWeight: 500,
+                  cursor: "pointer",
+                }}
+              >
+                {p === 100 ? "Max" : `${p}%`}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* You receive */}
+        <div style={{
+          marginTop: 14,
+          padding: "12px 14px",
+          background: "rgba(255,255,255,0.03)",
+          border: "1px solid rgba(255,255,255,0.06)",
+          borderRadius: 10,
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          fontSize: 12,
+        }}>
+          <span style={{ color: "rgba(255,255,255,0.55)" }}>You receive</span>
+          <span style={{ fontWeight: 500, fontSize: 14, fontVariantNumeric: "tabular-nums" }}>
+            {fmtUsd2(usdcOut)}
+          </span>
+        </div>
+
+        {/* CTA */}
+        <button
+          type="button"
+          disabled={!valid}
+          className={valid ? "bg-white transition-colors duration-200 ease-out hover:bg-white/90" : ""}
+          style={{
+            marginTop: 18, width: "100%", height: 48,
+            borderRadius: 12, border: "none",
+            background: valid ? "#fff" : "rgba(255,255,255,0.06)",
+            color: valid ? "#0c0c10" : "rgba(255,255,255,0.30)",
+            fontFamily: "var(--sans-stack)",
+            fontSize: 14, fontWeight: 600, letterSpacing: "-0.005em",
+            cursor: valid ? "pointer" : "default",
+            transition: "background 200ms ease",
+          }}
+        >
+          {valid ? `Withdraw ${fmtUsd2(usdcOut)}` : "Enter an amount"}
+        </button>
       </div>
-    </Card>
+    </div>,
+    document.body
   );
 }
 
-function RangesCard() {
-  const pools = POOLS.filter((p) => p.pair);
+// Full-width log of the user's own deposits/withdrawals. Wire-shape
+// extension once backend lands: filter by connected wallet, surface
+// withdraw events, and group same-day transactions.
+type UserActivityKind = "deposit" | "withdraw";
+type UserActivityRow = {
+  kind: UserActivityKind;
+  amount: number;
+  token: TokenEntry;
+  ts: string;
+  tx: string;
+};
+const USER_ACTIVITY: UserActivityRow[] = [
+  { kind: "deposit", amount: USER_DEPOSIT_AMT, token: TOKENS.USDC, ts: USER_DEPOSIT_TS, tx: USER_DEPOSIT_TX },
+];
+
+function UserActivityCard() {
   return (
-    <Card>
-      <CardLabel icon="range">Pool ranges</CardLabel>
-      <div style={{ marginTop: 12 }}>
-        <H3>How positions adjusted.</H3>
-        <p style={{ margin: "8px 0 0 0", color: "rgba(255,255,255,0.55)", fontFamily: "var(--font-radley)", fontSize: 14, lineHeight: 1.5 }}>
-          Range bands per pool over the last 30 days.
-        </p>
-      </div>
-      <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 14 }}>
-        {pools.map((p) => {
-          const data = POOL_RANGES_DATA[p.slug];
-          if (!data) return null;
+    <Card style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+      <CardLabel icon="stack">Activity</CardLabel>
+      <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 4 }}>
+        {USER_ACTIVITY.length === 0 ? (
+          <div style={{
+            padding: "16px 14px",
+            textAlign: "center",
+            color: "rgba(255,255,255,0.45)",
+            fontFamily: "var(--sans-stack)", fontSize: 12,
+          }}>
+            No activity yet — deposit to get started.
+          </div>
+        ) : USER_ACTIVITY.map((a, i) => {
+          const d = new Date(a.ts);
+          const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+          const dateLabel = `${months[d.getMonth()]} ${d.getDate()}`;
           return (
-            <div key={p.slug}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                <PoolPairChip left={p.pair!.left} right={p.pair!.right} size={14} />
-                <span style={{ color: "rgba(255,255,255,0.92)", fontFamily: "var(--sans-stack)", fontSize: 12, fontWeight: 500, letterSpacing: "-0.005em" }}>
-                  {p.slug}
-                </span>
-                <span style={{ flex: 1 }} />
-                <span style={{ color: "rgba(255,255,255,0.55)", fontFamily: "var(--sans-stack)", fontSize: 11, fontWeight: 500, fontVariantNumeric: "tabular-nums" }}>
-                  {data.current}
-                </span>
-              </div>
-              <RangeMiniChart upper={data.upper} lower={data.lower} color={p.color} height={32} />
-            </div>
+            <a
+              key={i}
+              href={`${TX_BASE_URL}${a.tx.replace(/…/g, "")}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="chat-tx-link"
+              style={{
+                display: "grid",
+                gridTemplateColumns: "auto minmax(0, 1fr) auto auto",
+                alignItems: "center",
+                gap: 12,
+                padding: "10px 12px",
+                borderRadius: 10,
+                textDecoration: "none",
+                color: "rgba(255,255,255,0.85)",
+                background: "rgba(255,255,255,0.03)",
+                border: "1px solid rgba(255,255,255,0.05)",
+              }}
+            >
+              <TokenChip entry={a.token} size={18} radius={5} />
+              <span style={{
+                fontFamily: "var(--sans-stack)", fontSize: 12.5, fontWeight: 500,
+                whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+              }}>
+                {a.kind === "deposit" ? "Deposited" : "Withdrew"} {a.amount.toLocaleString("en-US")} {a.token.slug}
+              </span>
+              <span style={{
+                color: "rgba(255,255,255,0.45)",
+                fontFamily: "var(--sans-stack)", fontSize: 11, fontWeight: 500,
+                fontVariantNumeric: "tabular-nums",
+              }}>
+                {dateLabel}
+              </span>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "rgba(255,255,255,0.55)", fontFamily: "var(--sans-stack)", fontSize: 11, fontVariantNumeric: "tabular-nums" }}>
+                {a.tx}
+                <StrokeIcon kind="external" size={10} />
+              </span>
+            </a>
           );
         })}
       </div>
@@ -900,100 +1656,1310 @@ function RangesCard() {
   );
 }
 
-/* ---------- Activity panel content ---------- */
 
-function ActivityPanelContent() {
+/* ---------- Agent chat sidebar ---------- */
+
+// Stylised alps mark for the thinking indicator — a triangular peak with
+// 5 streaks above. Mountain stays muted; streaks fade in one-by-one in a
+// looping cycle (`thinking-streak` keyframe in the inline <style>).
+function ThinkingMark({ size = 22 }: { size?: number }) {
+  const mountain = "rgba(255,255,255,0.18)";
+  const streak = "rgba(255,255,255,0.55)";
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", padding: "20px 16px 18px" }}>
-      <div style={{ flexShrink: 0 }}>
-        <CardLabel icon="agent">Agent activity</CardLabel>
-        <div style={{ marginTop: 10 }}>
-          <H3>Continuous decisions.</H3>
-          <p style={{ margin: "6px 0 0 0", color: "rgba(255,255,255,0.55)", fontFamily: "var(--font-radley)", fontSize: 13, lineHeight: 1.5 }}>
-            247 actions · 30 days
-          </p>
+    <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden style={{ display: "block" }}>
+      <line className="thinking-streak streak-1" x1="11.5" y1="4"  x2="13.5" y2="4"  stroke={streak} strokeWidth="1.4" strokeLinecap="round" />
+      <line className="thinking-streak streak-2" x1="14"   y1="6"  x2="16"   y2="6"  stroke={streak} strokeWidth="1.4" strokeLinecap="round" />
+      <line className="thinking-streak streak-3" x1="16.5" y1="4"  x2="18.5" y2="4"  stroke={streak} strokeWidth="1.4" strokeLinecap="round" />
+      <line className="thinking-streak streak-4" x1="13"   y1="8"  x2="15"   y2="8"  stroke={streak} strokeWidth="1.4" strokeLinecap="round" />
+      <line className="thinking-streak streak-5" x1="17"   y1="8"  x2="19"   y2="8"  stroke={streak} strokeWidth="1.4" strokeLinecap="round" />
+      <path d="M5 27 L16 11 L27 27 Z" fill={mountain} />
+    </svg>
+  );
+}
+
+const TX_BASE_URL = "https://basescan.org/tx/";
+
+// `iso` is "MMM D · HH:MM". When the message is on the same date as
+// today's feed-top label we show only the time (HH:MM); otherwise only
+// the date (MMM D). One value, never both.
+function formatHoverIso(iso: string, todayLabel: string): string {
+  const [date, time] = iso.split(" · ");
+  return date === todayLabel ? (time ?? iso) : (date ?? iso);
+}
+
+// Solid grey rounded-square copy button overlaid on a bubble's
+// top-right corner. Positioned absolute so it sits ON TOP of body text.
+// Reveals on `.chat-msg:hover`. Click → write to clipboard, brief flash
+// of brighter bg (no svg color change).
+function BubbleCopy({ copyText }: { copyText: string }) {
+  const [copied, setCopied] = useState(false);
+  const onCopy = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    navigator.clipboard.writeText(copyText).then(() => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    }).catch(() => {});
+  };
+  // Sized to match the inner content height of a single-line bubble
+  // (≈line-height 19.4 + a bit of breathing room → 28×28). Stays the
+  // same constant size on multi-line bubbles so it doesn't grow.
+  // backdropFilter blurs whatever's behind the square (dot grid, body
+  // text, etc.) so the icon stays readable on every surface — same
+  // technique the main panel `Card`s use.
+  return (
+    <button
+      type="button"
+      onClick={onCopy}
+      aria-label={copied ? "Copied" : "Copy message"}
+      className="chat-msg-copy"
+      style={{
+        position: "absolute",
+        top: 6, right: 6,
+        width: 28, height: 28, borderRadius: 7,
+        background: copied ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.08)",
+        backdropFilter: "blur(14px) saturate(140%)",
+        WebkitBackdropFilter: "blur(14px) saturate(140%)",
+        border: "1px solid rgba(255,255,255,0.10)",
+        color: "rgba(255,255,255,0.88)",
+        display: "inline-flex", alignItems: "center", justifyContent: "center",
+        cursor: "pointer", padding: 0,
+        transition: "background 180ms ease, opacity 160ms ease",
+      }}
+    >
+      {copied ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
+    </button>
+  );
+}
+
+// Inline timestamp shown below the bubble on hover only. Renders
+// absolutely so it doesn't reserve vertical space when hidden.
+function BubbleTime({ iso, todayLabel }: { iso: string; todayLabel: string }) {
+  return (
+    <time className="chat-msg-time" style={{
+      position: "absolute",
+      right: 0, top: "100%",
+      marginTop: 4,
+      fontFamily: "var(--sans-stack)", fontSize: 10, fontWeight: 500,
+      color: "rgba(255,255,255,0.40)",
+      fontVariantNumeric: "tabular-nums",
+      letterSpacing: "0.02em",
+      pointerEvents: "none",
+      whiteSpace: "nowrap",
+    }}>
+      {formatHoverIso(iso, todayLabel)}
+    </time>
+  );
+}
+
+// 24h micro-histogram of agent activity — one bar per hour, latest on
+// the right. Each bar is two stacked sub-bars: actions at the bottom
+// (dim) + signals on top (bright white). Tokens in the tooltip line
+// up with the bottom (actions) row, matching the dim color. Empty
+// hours render as a faint floor pin so the timeline reads even when
+// sparse. The rightmost "now" bar gets a slow pulse. Hovering a bar
+// reveals a small tooltip card above the histogram.
+function ActivityHistogram({ messages, onSelectHour }: { messages: AgentMessage[]; onSelectHour: (hour: number) => void }) {
+  const buckets = React.useMemo(() => buildHourlyActivity(messages), [messages]);
+  const lastHour = React.useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const h = parseHour(messages[i].iso);
+      if (h !== null) return h;
+    }
+    return null;
+  }, [messages]);
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const [tipPos, setTipPos] = useState<{ top: number; right: number } | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const max = Math.max(1, ...buckets.map((b) => b.signals + b.actions));
+  const MAX_H = 18;
+  const BAR_W = 4;
+  const GAP = 2.5;
+  const total = buckets.reduce((a, b) => a + b.signals + b.actions, 0);
+
+  const hoveredHour = hoverIdx !== null && lastHour !== null
+    ? (lastHour - (23 - hoverIdx) + 24) % 24
+    : null;
+  const hovered = hoverIdx !== null ? buckets[hoverIdx] : null;
+
+  // Capture the histogram's bounding rect on hover so the portalled
+  // tooltip can position itself in viewport space (escapes the chat
+  // panel's `overflow: hidden`).
+  const onEnterHisto = () => {
+    const el = containerRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setTipPos({ top: r.top, right: window.innerWidth - r.right });
+  };
+
+  return (
+    <div
+      ref={containerRef}
+      aria-label={`24h activity, ${total} events`}
+      style={{
+        position: "relative",
+        display: "inline-flex", alignItems: "flex-end", gap: GAP,
+        height: MAX_H, flexShrink: 0,
+      }}
+      onMouseEnter={onEnterHisto}
+      onMouseLeave={() => { setHoverIdx(null); setTipPos(null); }}
+    >
+      {buckets.map((b, i) => {
+        const sum = b.signals + b.actions;
+        const isNow = i === buckets.length - 1;
+        const hourFor = lastHour !== null ? (lastHour - (23 - i) + 24) % 24 : null;
+        const onEnter = () => setHoverIdx(i);
+        const onClick = () => { if (sum > 0 && hourFor !== null) onSelectHour(hourFor); };
+        const clickable = sum > 0;
+        if (sum === 0) {
+          return (
+            <span
+              key={i}
+              onMouseEnter={onEnter}
+              style={{
+                width: BAR_W, height: MAX_H, alignSelf: "flex-end",
+                display: "inline-flex", alignItems: "flex-end",
+                cursor: "default",
+              }}
+            >
+              <span aria-hidden style={{
+                width: BAR_W, height: 1, borderRadius: 1,
+                background: "rgba(255,255,255,0.10)",
+              }} />
+            </span>
+          );
+        }
+        const h = Math.max(2, Math.round((sum / max) * MAX_H));
+        const sigH = Math.round((b.signals / sum) * h);
+        const actH = h - sigH;
+        return (
+          <span
+            key={i}
+            onMouseEnter={onEnter}
+            onClick={onClick}
+            role={clickable ? "button" : undefined}
+            tabIndex={clickable ? 0 : undefined}
+            onKeyDown={(e) => { if (clickable && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onClick(); } }}
+            style={{
+              width: BAR_W, height: MAX_H, alignSelf: "flex-end",
+              display: "inline-flex", alignItems: "flex-end",
+              cursor: clickable ? "pointer" : "default",
+            }}
+          >
+            <span
+              aria-hidden
+              className={isNow ? "histo-now" : undefined}
+              style={{
+                display: "inline-flex", flexDirection: "column-reverse",
+                width: BAR_W, height: h, borderRadius: 1,
+                overflow: "hidden",
+              }}
+            >
+              {actH > 0 && (
+                <span style={{ height: actH, background: "rgba(255,255,255,0.30)" }} />
+              )}
+              {sigH > 0 && (
+                <span style={{ height: sigH, background: "rgba(255,255,255,0.85)" }} />
+              )}
+            </span>
+          </span>
+        );
+      })}
+
+      {/* Tooltip is portalled to <body> with position: fixed so it
+          escapes the chat panel's `overflow: hidden` clipping when it
+          renders above the header. */}
+      {hovered !== null && hoveredHour !== null && tipPos && typeof document !== "undefined" && createPortal(
+        <div style={{
+          position: "fixed",
+          top: tipPos.top - 8,
+          right: tipPos.right,
+          transform: "translateY(-100%)",
+          background: "rgba(20,20,22,0.92)",
+          backdropFilter: "blur(14px) saturate(140%)",
+          WebkitBackdropFilter: "blur(14px) saturate(140%)",
+          border: "1px solid rgba(255,255,255,0.10)",
+          borderRadius: 8,
+          padding: "7px 9px",
+          display: "flex", flexDirection: "column", gap: 4,
+          minWidth: 132,
+          fontFamily: "var(--sans-stack)",
+          fontVariantNumeric: "tabular-nums",
+          pointerEvents: "none",
+          zIndex: 1000,
+        }}>
+          {/* Top row: signals (bright square) + count, hour pill on right. */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, color: "rgba(255,255,255,0.92)", fontSize: 11, fontWeight: 500 }}>
+            <span aria-hidden style={{ width: 8, height: 8, borderRadius: 2, background: "rgba(255,255,255,0.85)", flexShrink: 0 }} />
+            <span style={{ flex: 1 }}>{hovered.signals} signal{hovered.signals === 1 ? "" : "s"}</span>
+            <span style={{
+              color: "rgba(255,255,255,0.50)",
+              fontSize: 9, fontWeight: 600, letterSpacing: "0.10em",
+              textTransform: "uppercase",
+              flexShrink: 0,
+            }}>
+              {String(hoveredHour).padStart(2, "0")}:00
+            </span>
+          </div>
+          {/* Bottom row: actions (dim square) + count, token chips + "+N"
+              right-aligned. Tokens come from actions, so they align
+              semantically with the action row's dim color. */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, color: "rgba(255,255,255,0.92)", fontSize: 11, fontWeight: 500 }}>
+            <span aria-hidden style={{ width: 8, height: 8, borderRadius: 2, background: "rgba(255,255,255,0.30)", flexShrink: 0 }} />
+            <span style={{ flex: 1 }}>{hovered.actions} action{hovered.actions === 1 ? "" : "s"}</span>
+            {hovered.tokens.length > 0 && (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
+                {hovered.tokens.slice(0, 2).map((t, i) => (
+                  <TokenChip key={i} entry={t} size={12} radius={3} />
+                ))}
+              </span>
+            )}
+          </div>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+}
+
+// Small grey rounded square used as a glyph holder for non-action
+// message kinds (signal, etc.) — visually sibling to the agent header
+// avatar but smaller/inline.
+function GlyphSquare({ children, size = 22 }: { children: React.ReactNode; size?: number }) {
+  return (
+    <span aria-hidden style={{
+      width: size, height: size, borderRadius: 6,
+      background: "rgba(255,255,255,0.06)",
+      color: "rgba(255,255,255,0.78)",
+      display: "inline-flex", alignItems: "center", justifyContent: "center",
+      flexShrink: 0,
+    }}>
+      {children}
+    </span>
+  );
+}
+
+function MessageView({ m, todayLabel, flash }: { m: AgentMessage; todayLabel: string; flash: boolean }) {
+  const wrapperClass = `chat-msg${flash ? " chat-msg-flash" : ""}`;
+  if (m.kind === "signal") {
+    // Same chassis as an action bubble (dark card, no dot grid). Header
+    // is a "New context" label with a glyph square — no chip/no hash.
+    return (
+      <div className={wrapperClass} data-msg-id={m.id} style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <GlyphSquare size={22}>
+            <NewContextIcon size={13} />
+          </GlyphSquare>
+          <span style={{
+            flex: 1, minWidth: 0,
+            color: "rgba(255,255,255,0.92)",
+            fontFamily: "var(--sans-stack)",
+            fontSize: 12, fontWeight: 600,
+            letterSpacing: "-0.005em",
+          }}>
+            New context
+          </span>
+        </div>
+        <div style={{
+          position: "relative",
+          color: "rgba(255,255,255,0.85)",
+          fontFamily: "var(--sans-stack)",
+          fontSize: 12.5, lineHeight: 1.55, fontWeight: 400,
+          padding: "10px 12px",
+          borderRadius: 12,
+          background: "rgba(255,255,255,0.03)",
+          border: "1px solid rgba(255,255,255,0.06)",
+        }}>
+          {m.text}
+          <BubbleCopy copyText={m.text} />
+        </div>
+        <BubbleTime iso={m.iso} todayLabel={todayLabel} />
+      </div>
+    );
+  }
+
+  if (m.kind === "action") {
+    return (
+      <div className={wrapperClass} data-msg-id={m.id} style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+        {/* Optional thought lead-in — italic Radley framed by curly
+            quotes and a left divider. Always tethered to its action. */}
+        {m.thought && (
+          <div style={{
+            color: "rgba(255,255,255,0.62)",
+            fontFamily: "var(--font-radley)",
+            fontSize: 13, lineHeight: 1.55, fontStyle: "italic",
+            paddingLeft: 11,
+            borderLeft: "1.5px solid rgba(255,255,255,0.12)",
+          }}>
+            <span aria-hidden style={{ marginRight: 2, color: "rgba(255,255,255,0.45)" }}>{"\u201C"}</span>
+            {m.thought}
+            <span aria-hidden style={{ marginLeft: 2, color: "rgba(255,255,255,0.45)" }}>{"\u201D"}</span>
+          </div>
+        )}
+        {/* Header: chip + generic "Action submitted" title + tx hash. */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {m.chip.type === "pair" ? (
+            <PoolPairChip left={m.chip.left} right={m.chip.right} size={14} />
+          ) : (
+            <TokenChip entry={m.chip.token} size={14} radius={4} />
+          )}
+          <span style={{
+            flex: 1, minWidth: 0,
+            color: "rgba(255,255,255,0.92)",
+            fontFamily: "var(--sans-stack)",
+            fontSize: 12, fontWeight: 600,
+            letterSpacing: "-0.005em",
+            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+          }}>
+            {m.title}
+          </span>
+          <a
+            href={`${TX_BASE_URL}${m.tx.replace(/…/g, "")}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="chat-tx-link"
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 5,
+              color: "rgba(255,255,255,0.55)",
+              fontFamily: "var(--sans-stack)", fontSize: 10, fontWeight: 500,
+              fontVariantNumeric: "tabular-nums",
+              textDecoration: "none",
+              flexShrink: 0,
+              transition: "color 160ms ease",
+            }}
+          >
+            {m.tx}
+            <StrokeIcon kind="external" size={10} />
+          </a>
+        </div>
+        {/* Body — static dot grid only on action bubbles */}
+        <div style={{
+          position: "relative",
+          color: "rgba(255,255,255,0.92)",
+          fontFamily: "var(--sans-stack)",
+          fontSize: 12.5, lineHeight: 1.55, fontWeight: 400,
+          padding: "10px 12px",
+          borderRadius: 12,
+          backgroundColor: "rgba(255,255,255,0.03)",
+          backgroundImage: "radial-gradient(circle, rgba(255,255,255,0.10) 0.7px, transparent 1.1px)",
+          backgroundSize: "9px 9px",
+          border: "1px solid rgba(255,255,255,0.06)",
+        }}>
+          {m.text}
+          <BubbleCopy copyText={m.thought ? `${m.thought}\n\n${m.text}` : m.text} />
+        </div>
+        <BubbleTime iso={m.iso} todayLabel={todayLabel} />
+      </div>
+    );
+  }
+
+  if (m.kind === "user") {
+    return (
+      <div className={wrapperClass} data-msg-id={m.id} style={{ display: "flex", flexDirection: "column", gap: 5, alignItems: "flex-end" }}>
+        <div style={{
+          position: "relative",
+          maxWidth: "85%",
+          color: "rgba(255,255,255,0.95)",
+          fontFamily: "var(--sans-stack)",
+          fontSize: 13, lineHeight: 1.5, fontWeight: 400,
+          padding: "9px 12px",
+          borderRadius: 12,
+          background: "rgba(255,255,255,0.08)",
+          border: "1px solid rgba(255,255,255,0.10)",
+        }}>
+          {m.text}
+          <BubbleCopy copyText={m.text} />
+        </div>
+        <BubbleTime iso={m.iso} todayLabel={todayLabel} />
+      </div>
+    );
+  }
+
+  // reply — flat bubble, no dot grid (only actions get the grid bg)
+  return (
+    <div className={wrapperClass} data-msg-id={m.id} style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+      <div style={{
+        position: "relative",
+        color: "rgba(255,255,255,0.92)",
+        fontFamily: "var(--sans-stack)",
+        fontSize: 13, lineHeight: 1.5, fontWeight: 400,
+        padding: "10px 12px",
+        borderRadius: 12,
+        background: "rgba(255,255,255,0.04)",
+        border: "1px solid rgba(255,255,255,0.06)",
+      }}>
+        {m.text}
+        <BubbleCopy copyText={m.text} />
+      </div>
+      {m.sources && m.sources.length > 0 && (
+        <div style={{
+          padding: "9px 10px",
+          borderRadius: 10,
+          background: "rgba(255,255,255,0.02)",
+          border: "1px solid rgba(255,255,255,0.06)",
+          display: "flex", flexDirection: "column", gap: 6,
+        }}>
+          <div style={{ color: "rgba(255,255,255,0.45)", fontFamily: "var(--sans-stack)", fontSize: 10, fontWeight: 500, letterSpacing: "0.04em" }}>
+            {m.sources.length} source{m.sources.length === 1 ? "" : "s"} found
+          </div>
+          {m.sources.map((s, i) => {
+            // basescan tx → explorer URL; everything else uses an
+            // explicit href (Uniswap pool page, vault detail, etc.)
+            const href = s.tx ? `${TX_BASE_URL}${s.tx.replace(/…/g, "")}` : (s.href ?? "#");
+            return (
+              <a
+                key={i}
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  display: "inline-flex", alignItems: "center", gap: 7,
+                  color: "rgba(255,255,255,0.85)",
+                  fontFamily: "var(--sans-stack)", fontSize: 11, fontWeight: 500,
+                  textDecoration: "none",
+                }}
+              >
+                <SourceIcon kind={s.kind} size={12} />
+                {s.label}
+                <StrokeIcon kind="external" size={10} />
+              </a>
+            );
+          })}
+        </div>
+      )}
+      <BubbleTime iso={m.iso} todayLabel={todayLabel} />
+    </div>
+  );
+}
+
+const WSS_URL = process.env.NEXT_PUBLIC_SHERPA_WSS_URL;
+const IS_DEV_STUB = !WSS_URL;
+
+/* ---------- Dashboard sidebar (left) ---------- */
+
+const fmtUsd = (n: number) => {
+  if (n === 0) return "$0";
+  return `$${n.toLocaleString("en-US", { minimumFractionDigits: n < 1000 ? 2 : 0, maximumFractionDigits: n < 1000 ? 2 : 0 })}`;
+};
+
+const fmtPct = (n: number) => n === 0 ? "0%" : `${n.toFixed(1)}%`;
+
+const CATEGORY_LABEL: Record<ActionCategory, string> = {
+  swap: "Swap",
+  edit_position: "Edit position",
+  claim_fees: "Claim fees",
+};
+
+const ALPS_USERS = 247;
+
+// Hover-interactive mini sparkline. Tooltip is portalled to <body>
+// so it escapes the sidebar's overflow:hidden when it sits near the
+// edge.
+function MiniSparkline({ data, width = 60, height = 18, stroke = "rgba(255,255,255,0.85)", label, formatValue }: {
+  data: number[]; width?: number; height?: number; stroke?: string;
+  label?: string;
+  formatValue?: (v: number) => string;
+}) {
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const [tipPos, setTipPos] = useState<{ left: number; top: number } | null>(null);
+  const wrapRef = useRef<HTMLSpanElement>(null);
+  if (data.length < 2) return null;
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = max - min || 1;
+  const stepX = width / (data.length - 1);
+  const pts = data.map((v, i) => {
+    const x = i * stepX;
+    const y = height - ((v - min) / range) * height;
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  }).join(" ");
+
+  const onMove = (e: React.MouseEvent<HTMLSpanElement>) => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    setHoverIdx(Math.round(ratio * (data.length - 1)));
+    setTipPos({ left: rect.left + rect.width / 2, top: rect.top });
+  };
+
+  const v = hoverIdx !== null ? data[hoverIdx] : null;
+  const fmt = formatValue ?? ((x: number) => x.toFixed(2));
+
+  return (
+    <>
+      <span
+        ref={wrapRef}
+        onMouseMove={onMove}
+        onMouseLeave={() => { setHoverIdx(null); setTipPos(null); }}
+        style={{ display: "inline-flex", flexShrink: 0, position: "relative", cursor: "default" }}
+      >
+        <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} aria-hidden style={{ display: "block" }}>
+          <polyline points={pts} fill="none" stroke={stroke} strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+          {hoverIdx !== null && (
+            <line x1={hoverIdx * stepX} y1={0} x2={hoverIdx * stepX} y2={height} stroke="rgba(255,255,255,0.30)" strokeWidth={1} />
+          )}
+        </svg>
+      </span>
+      {hoverIdx !== null && tipPos && v !== null && typeof document !== "undefined" && createPortal(
+        <div style={{
+          position: "fixed",
+          left: tipPos.left,
+          top: tipPos.top - 8,
+          // translateZ forces a GPU compositor layer → integer-pixel
+          // edges. The border becomes an inset box-shadow because
+          // border + backdrop-filter on a translucent bg doubles up
+          // antialiasing along the top edge.
+          transform: "translate(-50%, -100%) translateZ(0)",
+          background: "#15161b",
+          boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.08)",
+          borderRadius: 8,
+          padding: "2px 8px",
+          color: "#fff",
+          fontFamily: "var(--sans-stack)",
+          fontSize: 11, fontWeight: 500,
+          lineHeight: 1.4,
+          fontVariantNumeric: "tabular-nums",
+          pointerEvents: "none",
+          zIndex: 1000,
+          whiteSpace: "nowrap",
+        }}>
+          {fmt(v)}
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
+function PoolChip({ p, size = 16 }: { p: PoolEntry; size?: number }) {
+  if (p.pair) return <PoolPairChip left={p.pair.left} right={p.pair.right} size={size} />;
+  if (p.single) return <TokenChip entry={p.single} size={size} radius={4} />;
+  return null;
+}
+
+// Compact 3/4-circle gauge sized to fit a row of 5 across the
+// dashboard sidebar. Smaller cousin of <Gauge>.
+function DashGauge({ pct, color, chip }: { pct: number; color: string; chip: React.ReactNode }) {
+  const SIZE = 44;
+  const STROKE = 4;
+  const r = (SIZE - STROKE) / 2;
+  const c = 2 * Math.PI * r;
+  const ARC_FRAC = 0.75;
+  const trackLen = ARC_FRAC * c;
+  const fillLen = Math.max(0, Math.min(trackLen, (pct / 100) * trackLen));
+  return (
+    <div style={{ position: "relative", width: SIZE, height: SIZE, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <svg width={SIZE} height={SIZE} aria-hidden style={{ display: "block" }}>
+        <circle cx={SIZE/2} cy={SIZE/2} r={r} fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth={STROKE} strokeLinecap="round" strokeDasharray={`${trackLen} ${c-trackLen}`} transform={`rotate(135 ${SIZE/2} ${SIZE/2})`} />
+        <circle cx={SIZE/2} cy={SIZE/2} r={r} fill="none" stroke={color} strokeWidth={STROKE} strokeLinecap="round" strokeDasharray={`${fillLen} ${c-fillLen}`} transform={`rotate(135 ${SIZE/2} ${SIZE/2})`} />
+      </svg>
+      <span aria-hidden style={{ position: "absolute", left: "50%", top: "50%", transform: "translate(-50%, calc(-50% - 2px))", pointerEvents: "none" }}>
+        {chip}
+      </span>
+    </div>
+  );
+}
+
+// Shared grid-template so the Exposure header row + body rows align.
+const EXPOSURE_GRID = "minmax(0, 1fr) 44px 44px 56px";
+
+function ExposureRow({ p, dimmed }: { p: PoolEntry; dimmed: boolean }) {
+  const apr = POOL_APR[p.slug] ?? 0;
+  const earned = POOL_EARNED_30D[p.slug] ?? 0;
+  const display = p.slug === "Idle reserve" ? "Reserve" : p.slug;
+  const muted = "rgba(255,255,255,0.45)";
+  return (
+    <div style={{
+      display: "grid",
+      gridTemplateColumns: EXPOSURE_GRID,
+      alignItems: "center",
+      gap: 10,
+      padding: "8px 10px",
+      borderRadius: 10,
+      background: "rgba(255,255,255,0.03)",
+      border: "1px solid rgba(255,255,255,0.05)",
+      opacity: dimmed ? 0.32 : 1,
+      transition: "opacity 180ms ease",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+        <PoolChip p={p} size={16} />
+        <span style={{
+          color: "rgba(255,255,255,0.92)",
+          fontFamily: "var(--sans-stack)", fontSize: 12, fontWeight: 500,
+          whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+        }}>
+          {display}
+        </span>
+      </div>
+      <span style={{ color: muted, fontSize: 11, fontFamily: "var(--sans-stack)", fontVariantNumeric: "tabular-nums", textAlign: "right" }}>
+        {fmtPct(p.pct)}
+      </span>
+      <span style={{ color: apr === 0 ? muted : "rgba(255,255,255,0.92)", fontSize: 11, fontWeight: 500, fontFamily: "var(--sans-stack)", fontVariantNumeric: "tabular-nums", textAlign: "right" }}>
+        {fmtPct(apr)}
+      </span>
+      <span style={{ color: earned === 0 ? muted : "rgba(255,255,255,0.85)", fontSize: 11, fontWeight: 500, fontFamily: "var(--sans-stack)", fontVariantNumeric: "tabular-nums", textAlign: "right" }}>
+        {fmtUsd(earned)}
+      </span>
+    </div>
+  );
+}
+
+// True if the pool has the given token slug somewhere in its make-up.
+// USDC is in every pool, so hovering USDC's gauge keeps all rows lit.
+function poolContainsToken(p: PoolEntry, slug: string | null): boolean {
+  if (slug === null) return true;
+  if (p.single) return p.single.slug === slug;
+  if (p.pair) return p.pair.left.slug === slug || p.pair.right.slug === slug;
+  return false;
+}
+
+// Compact action log — title + chip + tx + time. No body / thought /
+// sources. Just the audit trail.
+function ActionLogRow({ m }: { m: AgentMessage & { kind: "action" } }) {
+  return (
+    <a
+      href={`${TX_BASE_URL}${m.tx.replace(/…/g, "")}`}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="chat-tx-link"
+      style={{
+        display: "grid",
+        gridTemplateColumns: "auto minmax(0, 1fr) auto",
+        alignItems: "center",
+        gap: 8,
+        padding: "7px 10px",
+        borderRadius: 8,
+        textDecoration: "none",
+        color: "rgba(255,255,255,0.85)",
+        background: "rgba(255,255,255,0.025)",
+        border: "1px solid rgba(255,255,255,0.05)",
+        transition: "background 160ms ease",
+      }}
+    >
+      {m.chip.type === "pair"
+        ? <PoolPairChip left={m.chip.left} right={m.chip.right} size={14} />
+        : <TokenChip entry={m.chip.token} size={14} radius={4} />}
+      <span style={{
+        fontFamily: "var(--sans-stack)", fontSize: 11.5, fontWeight: 500,
+        whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+      }}>
+        {CATEGORY_LABEL[m.category]}
+      </span>
+      <span style={{
+        color: "rgba(255,255,255,0.45)",
+        fontFamily: "var(--sans-stack)", fontSize: 10, fontWeight: 500,
+        fontVariantNumeric: "tabular-nums",
+        whiteSpace: "nowrap",
+      }}>
+        {m.iso.split(" · ")[1] ?? m.iso}
+      </span>
+    </a>
+  );
+}
+
+// Inline value + label, same font size — `value` white-bold, `label`
+// muted. Used for the TVL block's bottom row stats.
+function DashStat({ value, label }: { value: string; label: string }) {
+  return (
+    <div style={{
+      display: "inline-flex", alignItems: "baseline", gap: 5,
+      fontFamily: "var(--sans-stack)", fontSize: 11,
+      lineHeight: 1.1,
+      whiteSpace: "nowrap",
+    }}>
+      <span style={{
+        color: "rgba(255,255,255,0.92)", fontWeight: 600,
+        fontVariantNumeric: "tabular-nums",
+      }}>
+        {value}
+      </span>
+      <span style={{ color: "rgba(255,255,255,0.55)", fontWeight: 500 }}>
+        {label}
+      </span>
+    </div>
+  );
+}
+
+// Section heading row used between blocks. Lives inline with content,
+// not a chrome bar — same family as the Exposure header row.
+function SectionTitle({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{
+      color: "#fff",
+      fontFamily: "var(--sans-stack)", fontSize: 13, fontWeight: 600,
+      letterSpacing: "-0.005em", lineHeight: 1,
+    }}>
+      {children}
+    </div>
+  );
+}
+
+function DashboardPanel() {
+  const recentActions = INITIAL_WIRE_MESSAGES
+    .filter((m): m is Extract<WireMessage, { kind: "action" }> => m.kind === "action")
+    .slice(-6)
+    .reverse()
+    .map((w) => toAgentMessage(w))
+    .filter((m): m is AgentMessage & { kind: "action" } => m.kind === "action");
+
+  const tvl = TVL_30D[TVL_30D.length - 1] ?? 3.26;
+  const activePools = POOLS.filter((p) => p.slug !== "Idle reserve").length;
+  const [hoveredToken, setHoveredToken] = useState<string | null>(null);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      {/* Fixed top — everything but the Recent actions list itself.
+          Mirrors Sherpa: only the bottom feed scrolls. */}
+      <div style={{
+        flexShrink: 0,
+        padding: "16px 14px 0",
+        display: "flex", flexDirection: "column", gap: 10,
+      }}>
+        {/* TVL + vault metrics — full-width hero */}
+        <div style={{
+          display: "flex", flexDirection: "column", gap: 10,
+          padding: "13px 14px 12px",
+          borderRadius: 12,
+          background: "rgba(255,255,255,0.04)",
+          border: "1px solid rgba(255,255,255,0.06)",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+            <div>
+              <div style={{ color: "rgba(255,255,255,0.55)", fontFamily: "var(--sans-stack)", fontSize: 11, fontWeight: 500 }}>
+                Vault TVL
+              </div>
+              <div style={{ marginTop: 4, color: "#fff", fontFamily: "var(--sans-stack)", fontSize: 22, fontWeight: 600, lineHeight: 1, letterSpacing: "-0.015em", fontVariantNumeric: "tabular-nums" }}>
+                ${tvl.toFixed(2)}M
+              </div>
+            </div>
+            <MiniSparkline data={TVL_30D} width={80} height={24} label="TVL" formatValue={(v) => `$${v.toFixed(2)}M`} />
+          </div>
+          {/* Bottom row: 3 stats inline with equal gaps between them
+              via space-between. */}
+          <div style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "baseline",
+            gap: 8,
+            paddingTop: 10,
+            borderTop: "1px solid rgba(255,255,255,0.05)",
+          }}>
+            <DashStat value={fmtUsd(BASKET_EARNED_30D)} label="fees earned" />
+            <DashStat value={String(activePools)} label="active pools" />
+            <DashStat value={String(ALPS_USERS)} label="users" />
+          </div>
+        </div>
+
+        {/* Yield (left) + Share Price (right) */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <div style={{
+            padding: "11px 12px 10px",
+            borderRadius: 12,
+            background: "rgba(255,255,255,0.04)",
+            border: "1px solid rgba(255,255,255,0.06)",
+          }}>
+            <div style={{ color: "rgba(255,255,255,0.55)", fontFamily: "var(--sans-stack)", fontSize: 11, fontWeight: 500 }}>
+              Current yield
+            </div>
+            <div style={{ marginTop: 5, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+              <span style={{ color: "rgb(134, 239, 172)", fontFamily: "var(--sans-stack)", fontSize: 18, fontWeight: 600, lineHeight: 1, letterSpacing: "-0.01em", fontVariantNumeric: "tabular-nums" }}>
+                {fmtPct(BASKET_APR_30D)}
+              </span>
+              <MiniSparkline data={APR_30D} width={56} height={18} stroke="rgba(134, 239, 172, 0.85)" label="Yield" formatValue={(v) => `${v.toFixed(1)}%`} />
+            </div>
+          </div>
+          <div style={{
+            padding: "11px 12px 10px",
+            borderRadius: 12,
+            background: "rgba(255,255,255,0.04)",
+            border: "1px solid rgba(255,255,255,0.06)",
+          }}>
+            <div style={{ color: "rgba(255,255,255,0.55)", fontFamily: "var(--sans-stack)", fontSize: 11, fontWeight: 500 }}>
+              Share price
+            </div>
+            <div style={{ marginTop: 5, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+              <span style={{ color: "#fff", fontFamily: "var(--sans-stack)", fontSize: 18, fontWeight: 600, lineHeight: 1, letterSpacing: "-0.01em", fontVariantNumeric: "tabular-nums" }}>
+                {fmtNum(SHARE_PRICE)}
+              </span>
+              <MiniSparkline data={SHARE_PRICE_30D} width={56} height={18} label="Share price" formatValue={(v) => `$${v.toFixed(4)}`} />
+            </div>
+          </div>
+        </div>
+
+        {/* Exposure — section title, gauges (by token), legend, table */}
+        <div style={{ display: "flex", flexDirection: "column", marginTop: 8 }}>
+          <div style={{ padding: "0 10px", marginBottom: 8 }}>
+            <SectionTitle>Exposure</SectionTitle>
+          </div>
+          {/* Gauges by TOKEN. No container chrome; tighter spacing.
+              Hovering a gauge lights its token's exposure rows. */}
+          <div style={{
+            display: "flex", alignItems: "center", gap: 16,
+            padding: "4px 6px 12px",
+          }}>
+            {ALLOCATIONS.map((a) => (
+              <span
+                key={a.slug}
+                onMouseEnter={() => setHoveredToken(a.slug)}
+                onMouseLeave={() => setHoveredToken(null)}
+                style={{ display: "inline-flex", cursor: "default" }}
+              >
+                <DashGauge
+                  pct={a.pct}
+                  color={a.color}
+                  chip={<TokenChip entry={a} size={16} radius={4} />}
+                />
+              </span>
+            ))}
+          </div>
+          <div style={{
+            display: "grid",
+            gridTemplateColumns: EXPOSURE_GRID,
+            alignItems: "center",
+            gap: 10,
+            padding: "0 10px",
+            marginBottom: 2,
+            color: "rgba(255,255,255,0.45)",
+            fontFamily: "var(--sans-stack)", fontSize: 10.5, fontWeight: 500,
+          }}>
+            <span>Assets</span>
+            <span style={{ textAlign: "right" }}>Share</span>
+            <span style={{ textAlign: "right" }}>Yield</span>
+            <span style={{ textAlign: "right" }}>Fees</span>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {POSITIONS_SORTED.map((p) => (
+              <ExposureRow
+                key={p.slug}
+                p={p}
+                dimmed={!poolContainsToken(p, hoveredToken)}
+              />
+            ))}
+          </div>
+        </div>
+
+        <div style={{ marginTop: 8, padding: "0 10px" }}>
+          <SectionTitle>Recent actions</SectionTitle>
         </div>
       </div>
 
+      {/* Only the action log scrolls. Equal top + bottom padding so
+          the first/last item never touches the scroll edge regardless
+          of scroll position. */}
       <div className="panel-scroll" style={{
-        marginTop: 14, flex: 1, minHeight: 0,
+        flex: 1, minHeight: 0,
         overflowY: "auto", overflowX: "hidden",
-        display: "flex", flexDirection: "column", gap: 8,
-        paddingRight: 4,
+        padding: "12px 14px 16px",
+        display: "flex", flexDirection: "column", gap: 4,
       }}>
-        {ACTIVITY.map((a, i) => (
-          <div key={i} style={{
-            display: "flex", alignItems: "flex-start", gap: 9,
-            padding: "8px 9px", borderRadius: 9,
-            background: "rgba(255,255,255,0.03)",
-            border: "1px solid rgba(255,255,255,0.05)",
+        {recentActions.map((m) => <ActionLogRow key={m.id} m={m} />)}
+      </div>
+    </div>
+  );
+}
+
+function AgentChatPanel() {
+  // Dev stub: seed synchronously to avoid first-paint flicker.
+  // Real backend: start empty, populate via `onHistory`.
+  const [messages, setMessages] = useState<AgentMessage[]>(() =>
+    IS_DEV_STUB ? INITIAL_WIRE_MESSAGES.map(toAgentMessage) : []
+  );
+  const [input, setInput] = useState("");
+  const [thinking, setThinking] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const didInitialScroll = useRef(false);
+  const streamRef = useRef<StreamHandle | null>(null);
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el || didInitialScroll.current) return;
+    el.scrollTop = el.scrollHeight;
+    didInitialScroll.current = true;
+  }, []);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !didInitialScroll.current) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+  }, [messages, thinking]);
+
+  useEffect(() => {
+    if (streamRef.current) return; // StrictMode guard
+    streamRef.current = subscribeAgentStream({
+      url: WSS_URL,
+      onHistory: (events) => {
+        setMessages(events.map(toAgentMessage));
+      },
+      onEvent: (e) => {
+        setMessages((prev) => {
+          // Dedupe by id — server echo of an optimistic user msg
+          // arrives with the same id we issued.
+          if (prev.some((m) => m.id === e.id)) return prev;
+          return [...prev, toAgentMessage(e)];
+        });
+        // Any reply landing means the agent's done thinking.
+        if (e.kind === "reply") setThinking(false);
+      },
+    });
+    return () => { streamRef.current?.close(); streamRef.current = null; };
+  }, []);
+
+  const handleSend = (e: React.FormEvent) => {
+    e.preventDefault();
+    const text = input.trim();
+    if (!text || thinking) return;
+    const cid = clientId();
+    const wireUser: WireMessage = {
+      id: cid,
+      ts: new Date().toISOString(),
+      kind: "user",
+      text,
+    };
+    setMessages((prev) => [...prev, toAgentMessage(wireUser)]);
+    streamRef.current?.send({ v: 1, type: "user_message", text, clientId: cid });
+    setInput("");
+    setThinking(true);
+    // Real backend emits the reply via `onEvent`; only the dev stub
+    // synthesizes locally.
+    if (IS_DEV_STUB) {
+      window.setTimeout(() => {
+        const reply = getAgentReply(text);
+        const wireReply: WireMessage = {
+          id: `r_${Date.now().toString(36)}`,
+          ts: new Date().toISOString(),
+          kind: "reply",
+          text: reply.text,
+          sources: reply.sources,
+          replyTo: cid,
+        };
+        setMessages((prev) => [...prev, toAgentMessage(wireReply)]);
+        setThinking(false);
+      }, 1500);
+    }
+  };
+
+  // Bar-click → scroll to the first signal/action message in that
+  // hour and flash for 2s. Tracks by message id so live events
+  // arriving mid-flash don't shift the highlight.
+  const [flashId, setFlashId] = useState<string | null>(null);
+  const flashTimerRef = useRef<number | null>(null);
+  const flashStartRef = useRef<number | null>(null);
+  const handleSelectHour = (hour: number) => {
+    const target = messages.find((m) =>
+      (m.kind === "signal" || m.kind === "action") && parseHour(m.iso) === hour
+    );
+    if (!target) return;
+    const container = scrollRef.current;
+    if (container) {
+      const el = container.querySelector<HTMLElement>(`[data-msg-id="${target.id}"]`);
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    if (flashTimerRef.current !== null) { window.clearTimeout(flashTimerRef.current); flashTimerRef.current = null; }
+    if (flashStartRef.current !== null) { window.clearTimeout(flashStartRef.current); flashStartRef.current = null; }
+    setFlashId(null);
+    flashStartRef.current = window.setTimeout(() => {
+      setFlashId(target.id);
+      flashStartRef.current = null;
+      flashTimerRef.current = window.setTimeout(() => {
+        setFlashId(null);
+        flashTimerRef.current = null;
+      }, 2000);
+    }, 250);
+  };
+
+  // Date shown at the top of the feed — the date of the most recent
+  // (last) message. Re-derives whenever the feed updates.
+  const topDate = messages.length > 0 ? messages[messages.length - 1].iso.split(" · ")[0] : "Today";
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      {/* Header */}
+      <div style={{
+        flexShrink: 0,
+        display: "flex", alignItems: "center", gap: 10,
+        padding: "14px 14px 12px",
+        borderBottom: "1px solid rgba(255,255,255,0.06)",
+      }}>
+        <div aria-hidden style={{
+          width: 32, height: 32, borderRadius: 8,
+          background: "rgba(255,255,255,0.06)",
+          display: "inline-flex", alignItems: "center", justifyContent: "center",
+          flexShrink: 0,
+        }}>
+          <span aria-hidden style={{ display: "block", width: 18, height: 18, ...MASK_STYLE }} />
+        </div>
+        <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ color: "#fff", fontFamily: "var(--sans-stack)", fontSize: 13, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1 }}>
+            Sherpa
+          </div>
+          {/* Histogram wrapped in a rectangle that mirrors the avatar
+              chrome on the left (same 32px height + radius), but with
+              a slightly muter bg so the avatar still reads as the
+              header's primary element. */}
+          <div style={{
+            marginLeft: "auto",
+            height: 32,
+            padding: "0 10px",
+            borderRadius: 8,
+            background: "rgba(255,255,255,0.035)",
+            display: "inline-flex", alignItems: "center",
             flexShrink: 0,
           }}>
-            {a.kind === "pair" ? (
-              <PoolPairChip left={a.left} right={a.right} size={14} />
-            ) : (
-              <TokenChip entry={a.token} size={14} radius={4} />
-            )}
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{
-                color: "rgba(255,255,255,0.92)",
-                fontFamily: "var(--sans-stack)",
-                fontSize: 11, lineHeight: 1.35, fontWeight: 400,
-              }}>
-                {a.text}
-              </div>
-              <div style={{
-                marginTop: 3,
-                color: "rgba(255,255,255,0.45)",
-                fontFamily: "var(--sans-stack)",
-                fontSize: 10, fontWeight: 500,
-                fontVariantNumeric: "tabular-nums",
-                letterSpacing: "0.02em",
-              }}>
-                {a.time}
-              </div>
-            </div>
+            <ActivityHistogram messages={messages} onSelectHour={handleSelectHour} />
           </div>
-        ))}
+        </div>
       </div>
+
+      {/* Messages feed */}
+      <div ref={scrollRef} className="panel-scroll" style={{
+        flex: 1, minHeight: 0,
+        overflowY: "auto", overflowX: "hidden",
+        padding: "14px 14px 12px",
+        display: "flex", flexDirection: "column", gap: 16,
+      }}>
+        {/* Date label — date of the latest message in the feed */}
+        <div style={{
+          color: "rgba(255,255,255,0.40)",
+          fontFamily: "var(--sans-stack)",
+          fontSize: 10, fontWeight: 500,
+          letterSpacing: "0.08em",
+          textTransform: "uppercase",
+          textAlign: "center",
+          flexShrink: 0,
+        }}>
+          {topDate}
+        </div>
+        {messages.map((m) => (
+          <MessageView key={m.id} m={m} todayLabel={topDate} flash={flashId === m.id} />
+        ))}
+        {thinking && (
+          <div style={{ display: "flex", alignItems: "center", gap: 9, paddingLeft: 2 }}>
+            <ThinkingMark size={22} />
+            <span style={{ color: "rgba(255,255,255,0.55)", fontFamily: "var(--sans-stack)", fontSize: 12, fontStyle: "italic" }}>
+              thinking…
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Input */}
+      <form
+        onSubmit={handleSend}
+        style={{
+          flexShrink: 0,
+          padding: "10px 12px 12px",
+          borderTop: "1px solid rgba(255,255,255,0.06)",
+        }}
+      >
+        <div style={{
+          display: "flex", alignItems: "center", gap: 8,
+          padding: "5px 5px 5px 14px",
+          background: "rgba(255,255,255,0.04)",
+          border: "1px solid rgba(255,255,255,0.10)",
+          borderRadius: 999,
+        }}>
+          <input
+            type="text"
+            placeholder="How can I help you?"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            disabled={thinking}
+            style={{
+              flex: 1, minWidth: 0,
+              height: 28,
+              background: "transparent", border: "none", outline: "none",
+              color: "#fff",
+              fontFamily: "var(--sans-stack)", fontSize: 13, fontWeight: 400,
+              lineHeight: "28px",
+              padding: 0,
+            }}
+          />
+          <button
+            type="submit"
+            disabled={thinking || !input.trim()}
+            aria-label="Send"
+            style={{
+              flexShrink: 0,
+              width: 26, height: 26, borderRadius: "50%",
+              background: input.trim() && !thinking ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.06)",
+              border: "none",
+              color: input.trim() && !thinking ? "#fff" : "rgba(255,255,255,0.35)",
+              display: "inline-flex", alignItems: "center", justifyContent: "center",
+              transition: "background 200ms ease, color 200ms ease",
+            }}
+          >
+            <StrokeIcon kind="arrow" size={12} />
+          </button>
+        </div>
+      </form>
     </div>
   );
 }
 
 /* ---------- Footer ---------- */
 
-function FooterRow() {
+// Slim strip rendered BELOW the main panel (outside its rounded
+// borders). Left button is a 1:1 copy of landing-face's HowItWorks
+// chip (text + 16×16 white-10 square wrapping a 10px arrow). Right
+// edge holds the vault link + version, same chip style as landing's
+// BuiltWith.
+function FooterStrip({
+  left, top, width, showHowItWorks, onToggleHowItWorks,
+}: {
+  left: number; top: number; width: number;
+  showHowItWorks: boolean;
+  onToggleHowItWorks: () => void;
+}) {
   return (
-    <div className="reveal" style={{ marginTop: 22, animationDelay: "500ms", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, color: "rgba(255,255,255,0.55)", fontFamily: "var(--sans-stack)", fontSize: 12 }}>
-      <a href="#" className="transition-colors duration-200 hover:text-mist" style={{ color: "rgba(255,255,255,0.55)", textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 6 }}>
-        Vault: 0xA1b2…f9c8
-        <StrokeIcon kind="external" size={11} />
-      </a>
-      <span style={{ color: "rgba(255,255,255,0.45)", fontVariantNumeric: "tabular-nums" }}>v0.0.1</span>
+    <div style={{
+      position: "absolute",
+      left, top, width,
+      display: "flex", alignItems: "center", justifyContent: "space-between",
+      gap: 16,
+      pointerEvents: "auto",
+      zIndex: 3,
+    }}>
+      <button
+        type="button"
+        onClick={onToggleHowItWorks}
+        aria-label={showHowItWorks ? "Back to dashboard" : "How it works"}
+        className="text-haze transition-colors hover:text-mist"
+        style={{
+          background: "transparent", border: "none", padding: 0,
+          fontFamily: "var(--sans-stack)", fontSize: 12,
+          display: "inline-flex", alignItems: "center", gap: 6,
+          cursor: "pointer",
+        }}
+      >
+        {showHowItWorks && (
+          <span
+            className="inline-flex items-center justify-center bg-white/10"
+            style={{ width: 16, height: 16, borderRadius: 4, position: "relative", top: "1px" }}
+          >
+            <svg
+              width="10"
+              height="10"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+              style={{ display: "block", marginLeft: "1px", transform: "rotate(180deg)" }}
+            >
+              <path d="M5 12h14M12 5l7 7-7 7" />
+            </svg>
+          </span>
+        )}
+        <span>{showHowItWorks ? "Back" : "How it works?"}</span>
+        {!showHowItWorks && (
+          <span
+            className="inline-flex items-center justify-center bg-white/10"
+            style={{ width: 16, height: 16, borderRadius: 4, position: "relative", top: "1px" }}
+          >
+            <svg
+              width="10"
+              height="10"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+              style={{ display: "block", marginLeft: "-1px" }}
+            >
+              <path d="M5 12h14M12 5l7 7-7 7" />
+            </svg>
+          </span>
+        )}
+      </button>
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 14 }}>
+        <a
+          href="#"
+          className="text-haze transition-colors hover:text-mist"
+          style={{
+            textDecoration: "none",
+            fontFamily: "var(--sans-stack)", fontSize: 12,
+            display: "inline-flex", alignItems: "center", gap: 6,
+          }}
+        >
+          <span>Vault: 0xA1b2…f9c8</span>
+          <span
+            className="inline-flex items-center justify-center bg-white/10"
+            style={{ width: 16, height: 16, borderRadius: 4, position: "relative", top: "1px" }}
+          >
+            <svg
+              width="10"
+              height="10"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+              style={{ display: "block" }}
+            >
+              <path d="M14 4h6v6" />
+              <path d="M20 4l-9 9" />
+              <path d="M19 13v6H5V5h6" />
+            </svg>
+          </span>
+        </a>
+        <span style={{ color: "rgba(255,255,255,0.45)", fontFamily: "var(--sans-stack)", fontSize: 12, fontVariantNumeric: "tabular-nums" }}>v0.0.1</span>
+      </span>
     </div>
   );
 }
+
 
 /* ---------- Page ---------- */
 
 export default function AppPage() {
   const layout = useFullLayout();
+  const scale = useShellScale();
+  const router = useRouter();
+  const [withdrawOpen, setWithdrawOpen] = useState(false);
+  const [showHowItWorks, setShowHowItWorks] = useState(false);
+  const [exiting, setExiting] = useState(false);
 
-  // Body height needs to fit the activity panel below the main panel,
-  // plus a small bottom margin. main panel sits at top: layout.main.top,
-  // activity sits at top: layout.main.top + layout.main.height + 14.
-  const minHeight = layout
-    ? `${layout.main.top + 2 * layout.main.height + 14 + 32}px`
-    : "100vh";
+  // When the user clicks the alps logo in the floating nav, kick all
+  // exit animations off in parallel (sidebars roll back behind the
+  // panel, nav drops, bento + footer fade) and fire the route swap
+  // so it lands ~the same time the animations finish.
+  const handleBack = () => {
+    if (exiting) return;
+    setExiting(true);
+    router.push("/");
+  };
+
+  const enterClass = exiting ? "app-bento-exit" : "app-bento-enter";
+  const leftSidebarClass = exiting ? "app-sidebar-left-exit" : "app-sidebar-left-enter";
+  const rightSidebarClass = exiting ? "app-sidebar-right-exit" : "app-sidebar-right-enter";
+  const footerClass = exiting ? "app-footer-exit" : "app-footer-enter";
 
   return (
-    <main style={{
-      position: "relative",
-      minHeight,
-      background: "transparent",
-      color: "#fff",
-      isolation: "isolate",
-    }}>
+    <main
+      className="fixed inset-0 overflow-hidden flex items-center justify-center"
+      style={{
+        background: "transparent",
+        color: "#fff",
+        isolation: "isolate",
+      }}
+    >
+      {/* Fixed-pixel canvas, scaled by the outer flex centerer.
+          Mirrors components/shell.tsx so /app and the landing page
+          resolve their layout against the same stable design space. */}
+      <div style={{
+        width: REF_W,
+        height: REF_H,
+        position: "relative",
+        transform: `scale(${scale})`,
+        transformOrigin: "center center",
+        flexShrink: 0,
+      }}>
       <style>{`
         .panel-scroll { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.10) transparent; }
         .panel-scroll::-webkit-scrollbar { width: 8px; }
@@ -1017,9 +2983,133 @@ export default function AppPage() {
           to   { transform: translateY(34px); opacity: 1; }
         }
         .app-nav-exit { animation: app-nav-exit 760ms cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+
+        /* Sidebars unroll out from behind the main panel on entry,
+           same easing as the nav. They start translated INTO the
+           main-panel area and slide outward to their resting spot;
+           lower z-index keeps them hidden behind the panel during
+           the transit. */
+        @keyframes app-sidebar-left-enter {
+          from { transform: translateX(calc(100% + 14px)); }
+          to   { transform: translateX(0); }
+        }
+        .app-sidebar-left-enter { animation: app-sidebar-left-enter 760ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+        @keyframes app-sidebar-right-enter {
+          from { transform: translateX(calc(-100% - 14px)); }
+          to   { transform: translateX(0); }
+        }
+        .app-sidebar-right-enter { animation: app-sidebar-right-enter 760ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+        /* Reverse on back-nav. */
+        @keyframes app-sidebar-left-exit {
+          from { transform: translateX(0); }
+          to   { transform: translateX(calc(100% + 14px)); }
+        }
+        .app-sidebar-left-exit { animation: app-sidebar-left-exit 760ms cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+
+        @keyframes app-sidebar-right-exit {
+          from { transform: translateX(0); }
+          to   { transform: translateX(calc(-100% - 14px)); }
+        }
+        .app-sidebar-right-exit { animation: app-sidebar-right-exit 760ms cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+
+        /* Snappy staggered fade for bento items. Pure opacity (no
+           transform) so the wrapper doesn't create a stacking
+           context that swallows backdrop-filter on inner Cards. */
+        @keyframes app-bento-enter {
+          from { opacity: 0; }
+          to   { opacity: 1; }
+        }
+        .app-bento-enter { animation: app-bento-enter 380ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+        @keyframes app-bento-exit {
+          from { opacity: 1; }
+          to   { opacity: 0; }
+        }
+        .app-bento-exit { animation: app-bento-exit 280ms cubic-bezier(0.4, 0, 1, 1) forwards; }
+
+        /* Footer strip — fades in/out behind the main panel just
+           like the nav, only vertical instead. */
+        @keyframes app-footer-enter {
+          from { opacity: 0; transform: translateY(-8px); }
+          to   { opacity: 1; transform: translateY(0); }
+        }
+        .app-footer-enter { animation: app-footer-enter 600ms cubic-bezier(0.16, 1, 0.3, 1) both; animation-delay: 200ms; }
+
+        @keyframes app-footer-exit {
+          from { opacity: 1; transform: translateY(0); }
+          to   { opacity: 0; transform: translateY(-8px); }
+        }
+        .app-footer-exit { animation: app-footer-exit 280ms cubic-bezier(0.4, 0, 1, 1) forwards; }
+
+        /* Agent thinking indicator — 5 streaks above the alps mountain
+           fade in one-by-one then together fade out, looping. */
+        @keyframes thinking-streak {
+          0%, 8%   { opacity: 0; }
+          30%, 80% { opacity: 1; }
+          100%     { opacity: 0; }
+        }
+        .thinking-streak { opacity: 0; animation: thinking-streak 2.4s ease-in-out infinite; }
+        .thinking-streak.streak-1 { animation-delay: 0ms; }
+        .thinking-streak.streak-2 { animation-delay: 140ms; }
+        .thinking-streak.streak-3 { animation-delay: 280ms; }
+        .thinking-streak.streak-4 { animation-delay: 420ms; }
+        .thinking-streak.streak-5 { animation-delay: 560ms; }
+
+        /* Message hover affordances. Copy button sits absolute inside
+           the body bubble's top-right; time sits absolute just below
+           the bubble. Both are hidden by default with no reserved
+           space, and just fade in on .chat-msg:hover.
+           On hover we also add an adaptive bottom margin (transition
+           in concert with the time fade) so the timestamp doesn't
+           crowd the next message. The transition makes neighbours
+           glide rather than jump. */
+        .chat-msg { position: relative; transition: margin-bottom 200ms ease; }
+        .chat-msg:hover { margin-bottom: 14px; }
+        .chat-msg-copy { opacity: 0; transition: opacity 160ms ease, background 180ms ease; }
+        .chat-msg-time { opacity: 0; transition: opacity 160ms ease; }
+        .chat-msg:hover .chat-msg-copy,
+        .chat-msg:hover .chat-msg-time { opacity: 1; }
+        .chat-msg-copy:hover { background: rgba(255,255,255,0.18) !important; }
+
+        /* Tx hash link in the action header — brighten both text and
+           the trailing arrow icon together on hover. */
+        .chat-tx-link:hover { color: rgba(255,255,255,0.95) !important; }
+
+        /* "Now" bar in the activity histogram — slow opacity pulse so
+           the rightmost (current hour) bar reads as live. */
+        @keyframes histo-now {
+          0%, 100% { opacity: 1; }
+          50%      { opacity: 0.55; }
+        }
+        .histo-now { animation: histo-now 2.2s ease-in-out infinite; }
+
+        /* Flash highlight applied to a chat-msg when its hour is
+           clicked in the histogram. Quick fade-in to a soft white
+           wash, then 2s decay back to transparent. */
+        @keyframes chat-msg-flash {
+          0%   { background-color: rgba(255,255,255,0.00); }
+          12%  { background-color: rgba(255,255,255,0.07); }
+          100% { background-color: rgba(255,255,255,0.00); }
+        }
+        .chat-msg-flash {
+          animation: chat-msg-flash 2s ease-out forwards;
+          border-radius: 12px;
+        }
+
+        /* Withdraw modal entry — backdrop fade + dialog scale. */
+        @keyframes withdraw-fade {
+          from { opacity: 0; }
+          to   { opacity: 1; }
+        }
+        @keyframes withdraw-pop {
+          from { opacity: 0; transform: scale(0.98); }
+          to   { opacity: 1; transform: scale(1); }
+        }
       `}</style>
 
-      {layout && <FloatingNav layout={layout.main} />}
+      {layout && <FloatingNav layout={layout.main} exiting={exiting} onBack={handleBack} />}
 
       {/* Main panel at the LMC rect. */}
       {layout && (
@@ -1032,89 +3122,129 @@ export default function AppPage() {
           isolation: "isolate",
           zIndex: 2,
         }}>
-          <PanelLandscape />
+          <PanelLandscape muted={showHowItWorks} />
           <div className="panel-scroll" style={{
             flex: 1, minHeight: 0,
             overflowY: "auto", overflowX: "hidden",
-            // Wheel-over-main scrolls interior only; cursor outside the
-            // panel scrolls the page down to the activity panel below.
-            overscrollBehavior: "contain",
-            position: "relative", zIndex: 1,
           }}>
-            <div style={{ padding: "26px 28px 28px" }}>
-              <Hero />
-
-              {/* USER — CTA on top, Position+APR sub-row, Allocation full width */}
-              <div style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 14 }}>
-                <div className="reveal" style={{ animationDelay: "200ms" }}>
-                  <VaultCard />
-                </div>
-                <div className="reveal" style={{ animationDelay: "260ms", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-                  <PositionCard />
-                  <HistoryCard />
-                </div>
-                <div className="reveal" style={{ animationDelay: "320ms" }}>
-                  <AllocationCard />
-                </div>
-              </div>
-
-              {/* PROTOCOL — vault-wide stats */}
-              <PageSection label="Protocol">
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-3.5 items-start">
-                  <div className="reveal" style={{ animationDelay: "180ms" }}>
-                    <VaultMetricsCard />
+            <div style={{ padding: "26px 28px 28px", height: "100%", display: "flex", flexDirection: "column" }}>
+              {showHowItWorks ? (
+                <LearnMoreContent open={true} inline />
+              ) : (
+                // 4-row × 3-col bento, sized to fill the panel:
+                //   row 1: Hero title (col 1)         | Placeholder upper (cols 2-3)
+                //   row 2: Summary card (col 1)       | Placeholder lower (cols 2-3)
+                //   row 3: Vault upper (col 1, span)  | Position (col 2) | Performance (col 3)
+                //   row 4: Vault lower (col 1, span)  | Activity (cols 2-3)
+                // Col 1 is wider so the Summary's prose fits comfortably.
+                // 4-row × 3-col bento (hero title dropped):
+                //   row 1: Vault (col 1, spans rows 1-3)   | Placeholder (cols 2-3)
+                //   row 2: Vault (continues)               | Position | Performance
+                //   row 3: Vault (continues)               | Activity (cols 2-3, spans rows 3-4)
+                //   row 4: Summary text (col 1)            | Activity (continues)
+                <div style={{
+                  display: "grid",
+                  gridTemplateColumns: "1.45fr 1fr 1fr",
+                  gridTemplateRows: "1fr 1fr 1fr 1fr",
+                  gap: 14,
+                  height: "100%",
+                  alignItems: "stretch",
+                }}>
+                  <div className={enterClass} style={{ animationDelay: exiting ? "0ms" : "180ms", gridColumn: "1", gridRow: "1 / 4", display: "flex", flexDirection: "column" }}>
+                    <VaultCard />
                   </div>
-                  <div className="reveal" style={{ animationDelay: "260ms" }}>
-                    <TvlChartCard />
+                  <div className={enterClass} style={{ animationDelay: exiting ? "20ms" : "240ms", gridColumn: "2", gridRow: "1", display: "flex", flexDirection: "column" }}>
+                    <UserPositionCard onWithdraw={() => setWithdrawOpen(true)} />
                   </div>
-                  <div className="reveal" style={{ animationDelay: "340ms" }}>
-                    <SharePriceChartCard />
+                  <div className={enterClass} style={{ animationDelay: exiting ? "40ms" : "300ms", gridColumn: "3", gridRow: "1", display: "flex", flexDirection: "column" }}>
+                    <UserAprCard />
+                  </div>
+                  <div className={enterClass} style={{ animationDelay: exiting ? "60ms" : "360ms", gridColumn: "2 / 4", gridRow: "2 / 4", display: "flex", flexDirection: "column" }}>
+                    <UserActivityCard />
+                  </div>
+                  {/* No entry animation on this segment — animating
+                      opacity on the Card or any ancestor leaves a
+                      compositor layer that prevents backdrop-filter
+                      from sampling the panel landscape. Static is
+                      the price for the blur to stay live. */}
+                  <div style={{ gridColumn: "1", gridRow: "4", display: "flex", flexDirection: "column" }}>
+                    <Card style={{
+                      display: "flex", alignItems: "center", height: "100%",
+                      backdropFilter: "blur(24px)",
+                      WebkitBackdropFilter: "blur(24px)",
+                    }}>
+                      <SummaryText />
+                    </Card>
                   </div>
                 </div>
-              </PageSection>
-
-              {/* STATS — fund flows + pool ranges (placeholder until Uniswap chart goes in) */}
-              <PageSection label="Stats">
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3.5 items-start">
-                  <div className="reveal" style={{ animationDelay: "180ms" }}>
-                    <FlowsCard />
-                  </div>
-                  <div className="reveal" style={{ animationDelay: "260ms" }}>
-                    <RangesCard />
-                  </div>
-                </div>
-              </PageSection>
-
-              <FooterRow />
+              )}
             </div>
           </div>
         </section>
       )}
 
 
-      {/* Activity panel — same LMC framing as main, sits below it,
-          scrolled into view. Greyscaled landscape so it reads as
-          recessed vs the colourful main panel above. */}
-      {layout && (
+      {/* Vault dashboard sidebar — mirrors Sherpa's chrome on the
+          left margin. Only renders when there's enough room. */}
+      {layout && layout.left && (
         <section style={{
           position: "absolute",
-          left: layout.main.left,
-          top: layout.main.top + layout.main.height + 14,
-          width: layout.main.width,
-          height: layout.main.height,
-          borderRadius: 20 * layout.main.scale,
+          left: layout.left.left,
+          top: layout.left.top,
+          width: layout.left.width,
+          height: layout.left.height,
+          borderRadius: 20 * layout.left.scale,
           overflow: "hidden",
           display: "flex", flexDirection: "column",
           isolation: "isolate",
-          zIndex: 2,
-        }}>
-          <PanelLandscape muted />
-
-          <div style={{ position: "relative", zIndex: 1, height: "100%" }}>
-            <ActivityPanelContent />
-          </div>
+          zIndex: 1,
+          background: "#0c0c10",
+          border: "1px solid rgba(255,255,255,0.08)",
+        }} className={leftSidebarClass}>
+          <DashboardPanel />
         </section>
       )}
+
+      {/* Agent chat sidebar — solid shadcn/midnight palette, no
+          landscape inside. Only renders when there's enough room. */}
+      {layout && layout.right && (
+        <section style={{
+          position: "absolute",
+          left: layout.right.left,
+          top: layout.right.top,
+          width: layout.right.width,
+          height: layout.right.height,
+          borderRadius: 20 * layout.right.scale,
+          overflow: "hidden",
+          display: "flex", flexDirection: "column",
+          isolation: "isolate",
+          zIndex: 1,
+          background: "#0c0c10",
+          border: "1px solid rgba(255,255,255,0.08)",
+        }} className={rightSidebarClass}>
+          <AgentChatPanel />
+        </section>
+      )}
+
+      {/* Bottom strip — sits in the gap between the main panel's
+          bottom edge and the canvas inset. Left/right text mirrors
+          the landing's footer pattern. */}
+      {layout && (
+        <div className={footerClass}>
+          <FooterStrip
+            left={layout.main.left}
+            width={layout.main.width}
+            top={layout.main.top + layout.main.height + 12}
+            showHowItWorks={showHowItWorks}
+            onToggleHowItWorks={() => setShowHowItWorks((v) => !v)}
+          />
+        </div>
+      )}
+
+      </div>
+      {/* Modal is portalled to <body>, so it stays outside the
+          scaled canvas and renders in viewport space. */}
+      {withdrawOpen && <WithdrawModal onClose={() => setWithdrawOpen(false)} />}
     </main>
   );
 }
