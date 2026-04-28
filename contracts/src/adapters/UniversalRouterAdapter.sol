@@ -33,6 +33,12 @@ import {IUniversalRouter} from "../interfaces/external/IUniversalRouter.sol";
 contract UniversalRouterAdapter is ILiquidityAdapter {
     using SafeERC20 for IERC20;
 
+    /// @notice WETH on Base. URAdapter pools that route native ETH still need
+    /// a V3 spot pool for the per-tx notional cap valuation; we substitute
+    /// WETH for `address(0)` when querying the V3 factory. Same predeploy on
+    /// Base mainnet and Base Sepolia.
+    address public constant WRAPPED_NATIVE = 0x4200000000000000000000000000000000000006;
+
     IUniversalRouter public immutable router;
     IPermit2 public immutable permit2;
     IUniswapV3Factory public immutable factory;
@@ -77,44 +83,48 @@ contract UniversalRouterAdapter is ILiquidityAdapter {
         uint256 amountOutMin,
         bytes calldata extra
     ) external payable onlyVault returns (uint256 amountOut) {
-        // URAdapter routes ERC20 swaps through Permit2 → Universal Router.
-        // Native-ETH swap routing through UR is a separate adapter feature
-        // (UNWRAP_WETH command etc.); reject msg.value here so it can't
-        // accumulate (slither: locking-ether).
-        if (msg.value != 0) revert UnexpectedEth();
         if (tokenIn != pool.token0 && tokenIn != pool.token1) revert UnknownToken(tokenIn);
         address tokenOut = tokenIn == pool.token0 ? pool.token1 : pool.token0;
 
         (bytes memory commands, bytes[] memory inputs, uint256 deadline) = abi.decode(extra, (bytes, bytes[], uint256));
 
-        IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
+        // Pull input. Native ETH (token == address(0)) arrives as msg.value
+        // and gets forwarded to UR; ERC20s use the Permit2 flow.
+        if (tokenIn == address(0)) {
+            require(msg.value == amountIn, "ETH value mismatch");
+        } else {
+            if (msg.value != 0) revert UnexpectedEth();
+            IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
+            // Permit2 approval flow: one-shot infinite ERC20 approval to Permit2,
+            // then a per-call exact-amount Permit2 grant to the Universal Router.
+            // Setting the per-call grant to exactly `amountIn` with `expiration =
+            // deadline` keeps the surface tight: any leftover allowance after
+            // this call expires with `deadline`.
+            _ensurePermit2(tokenIn);
+            permit2.approve(tokenIn, address(router), uint160(amountIn), uint48(deadline));
+        }
 
-        // Permit2 approval flow: one-shot infinite ERC20 approval to Permit2,
-        // then a per-call exact-amount Permit2 grant to the Universal Router.
-        // Setting the per-call grant to exactly `amountIn` with `expiration =
-        // deadline` keeps the surface tight: any leftover allowance after
-        // this call expires with `deadline`.
-        _ensurePermit2(tokenIn);
-        permit2.approve(tokenIn, address(router), uint160(amountIn), uint48(deadline));
+        uint256 vaultOutBefore = _balanceOfHolder(tokenOut, msg.sender);
 
-        uint256 vaultOutBefore = IERC20(tokenOut).balanceOf(msg.sender);
-
-        router.execute(commands, inputs, deadline);
+        router.execute{value: tokenIn == address(0) ? amountIn : 0}(commands, inputs, deadline);
 
         // Sweep any tokens left on the adapter back to the vault. UR may
         // deliver output to the adapter (if commands set recipient = adapter)
         // or leave unused input behind on a partial fill. Either way the
         // vault should receive everything.
-        uint256 adapterOutBal = IERC20(tokenOut).balanceOf(address(this));
-        if (adapterOutBal > 0) IERC20(tokenOut).safeTransfer(msg.sender, adapterOutBal);
-        uint256 adapterInBal = IERC20(tokenIn).balanceOf(address(this));
-        if (adapterInBal > 0) IERC20(tokenIn).safeTransfer(msg.sender, adapterInBal);
+        _sweep(tokenOut, msg.sender);
+        _sweep(tokenIn, msg.sender);
 
-        uint256 vaultOutAfter = IERC20(tokenOut).balanceOf(msg.sender);
+        uint256 vaultOutAfter = _balanceOfHolder(tokenOut, msg.sender);
         amountOut = vaultOutAfter - vaultOutBefore;
 
         if (amountOut < amountOutMin) revert InsufficientOutput(amountOutMin, amountOut);
     }
+
+    /// @notice Receive native ETH from Universal Router (when tokenOut is
+    /// native or routes that use UNWRAP_WETH end up here). Forwarded to the
+    /// vault by `_sweep` at the end of `swapExactIn`.
+    receive() external payable {}
 
     // -------- ILiquidityAdapter (liquidity path is unsupported) --------
 
@@ -123,6 +133,8 @@ contract UniversalRouterAdapter is ILiquidityAdapter {
         payable
         returns (uint256, uint128, uint256, uint256)
     {
+        // Function reverts unconditionally; msg.value (if any) bubbles back
+        // with the revert and the caller's balance is unchanged.
         revert NotSupported();
     }
 
@@ -185,8 +197,30 @@ contract UniversalRouterAdapter is ILiquidityAdapter {
     }
 
     function _poolSqrtPrice(PoolRegistry.Pool calldata pool) internal view returns (uint160 sqrtPriceX96) {
-        address poolAddr = factory.getPool(pool.token0, pool.token1, pool.fee);
+        // V3 factory only knows ERC20 tokens; substitute WRAPPED_NATIVE for
+        // address(0) so we can still resolve a spot pool for native-ETH UR
+        // entries (the V4 native pool's WETH twin lives at the V3 0.05% tier).
+        address t0 = pool.token0 == address(0) ? WRAPPED_NATIVE : pool.token0;
+        address t1 = pool.token1 == address(0) ? WRAPPED_NATIVE : pool.token1;
+        address poolAddr = factory.getPool(t0, t1, pool.fee);
         if (poolAddr == address(0)) revert PoolNotFound();
         (sqrtPriceX96,,,,,,) = IUniswapV3Pool(poolAddr).slot0();
+    }
+
+    function _balanceOfHolder(address token, address holder) internal view returns (uint256) {
+        return token == address(0) ? holder.balance : IERC20(token).balanceOf(holder);
+    }
+
+    function _sweep(address token, address to) internal {
+        if (token == address(0)) {
+            uint256 bal = address(this).balance;
+            if (bal > 0) {
+                (bool ok,) = to.call{value: bal}("");
+                require(ok, "ETH sweep failed");
+            }
+        } else {
+            uint256 bal = IERC20(token).balanceOf(address(this));
+            if (bal > 0) IERC20(token).safeTransfer(to, bal);
+        }
     }
 }

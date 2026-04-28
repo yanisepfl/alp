@@ -31,7 +31,7 @@
     "label": "ETH/USDC dynamic-fee (V4 hooked)",
     "kind": "v4",
     "lpKey": "0x3c2dc617a21e5a3e538545c17b037dcfae2a3a4985cccefd577ac5efd2ad63b8",
-    "urKey": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "urKey": "0xb0439ebe5ff5774d05ce8aa45e4d863c9cdc4b414b26d67f3dd5dba958d5d0f1",
     "token0": "0x0000000000000000000000000000000000000000",
     "token1": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     "decimals0": 18,

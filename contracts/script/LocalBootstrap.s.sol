@@ -76,186 +76,186 @@ contract LocalBootstrap is Script {
     // Seed amount (10k USDC)
     uint256 constant SEED_USDC = 10_000e6;
 
-    function run() external {
-        // -------- Phase 1: deploy + register (deployer key) --------
-        vm.startBroadcast(DEPLOYER_KEY);
-        PoolRegistry registry = new PoolRegistry(DEPLOYER, DEPLOYER);
-        ALPVault vault = new ALPVault(IERC20(USDC), "ALP USDC Vault", "alpUSDC", registry, DEPLOYER, AGENT, DEPLOYER);
+    // Storage slots for bootstrap output. Putting these here (rather than
+    // stack locals in run()) keeps the function within via_ir's stack
+    // budget — the script needs ~12 contract refs / pool keys live at once
+    // for printing the env block, which exceeds the 16-slot Yul ceiling
+    // when also building V4 PoolKey structs inline.
+    PoolRegistry internal sRegistry;
+    ALPVault internal sVault;
+    UniV3Adapter internal sV3Adapter;
+    UniV4Adapter internal sV4Adapter;
+    UniversalRouterAdapter internal sUrAdapter;
+    bytes32 internal sV4HookKey;
+    bytes32 internal sCbbtcKey;
+    bytes32 internal sUsdtKey;
+    bytes32 internal sUrWethKey;
+    bytes32 internal sUrEthKey;
+    bytes32 internal sUrCbbtcKey;
+    bytes32 internal sUrUsdtKey;
 
-        UniV3Adapter v3Adapter = new UniV3Adapter(
+    function run() external {
+        _phase1Deploy();
+        _phase2Seed();
+        _phase3Print();
+    }
+
+    function _phase1Deploy() internal {
+        vm.startBroadcast(DEPLOYER_KEY);
+        sRegistry = new PoolRegistry(DEPLOYER, DEPLOYER);
+        sVault = new ALPVault(IERC20(USDC), "ALP USDC Vault", "alpUSDC", sRegistry, DEPLOYER, AGENT, DEPLOYER);
+        sV3Adapter = new UniV3Adapter(
             INonfungiblePositionManager(V3_NPM),
             ISwapRouter02(V3_SWAP_ROUTER),
             IUniswapV3Factory(V3_FACTORY),
-            address(vault)
+            address(sVault)
         );
-
-        UniV4Adapter v4Adapter = new UniV4Adapter(
+        sV4Adapter = new UniV4Adapter(
             IPositionManager(V4_POSITION_MANAGER),
             IPoolManager(V4_POOL_MANAGER),
             IUniswapV4Router04(payable(V4_SWAP_ROUTER)),
             IPermit2(PERMIT2),
-            address(vault)
+            address(sVault)
+        );
+        sUrAdapter = new UniversalRouterAdapter(
+            IUniversalRouter(UNIVERSAL_ROUTER), IPermit2(PERMIT2), IUniswapV3Factory(V3_FACTORY), address(sVault)
         );
 
-        UniversalRouterAdapter urAdapter = new UniversalRouterAdapter(
-            IUniversalRouter(UNIVERSAL_ROUTER), IPermit2(PERMIT2), IUniswapV3Factory(V3_FACTORY), address(vault)
+        sRegistry.setHookAllowed(V4_HOOK, true);
+        sVault.bootstrapAdapter(V3_NPM, address(sV3Adapter));
+        sVault.bootstrapAdapter(V4_POSITION_MANAGER, address(sV4Adapter));
+
+        // LP entries. Allocation caps: 30% volatile / 100% stable, modelled
+        // loosely on JLP/GLP composition.
+        sV4HookKey = sRegistry.addPool(
+            _lpPool(address(sV4Adapter), ETH_NATIVE, USDC, V4_HOOK_FEE, V4_HOOK_TICK_SPACING, V4_HOOK, 3_000)
+        );
+        sCbbtcKey = sRegistry.addPool(
+            _lpPool(address(sV3Adapter), _low(USDC, CBBTC), _high(USDC, CBBTC), 500, 10, address(0), 3_000)
+        );
+        sUsdtKey = sRegistry.addPool(
+            _lpPool(address(sV3Adapter), _low(USDC, USDT), _high(USDC, USDT), 100, 1, address(0), 10_000)
         );
 
-        registry.setHookAllowed(V4_HOOK, true);
-        vault.bootstrapAdapter(V3_NPM, address(v3Adapter));
-        vault.bootstrapAdapter(V4_POSITION_MANAGER, address(v4Adapter));
+        // URAdapter swap-only entries. Two ETH↔USDC entries — WETH for V3,
+        // native ETH for V4.
+        sUrWethKey =
+            sRegistry.addPool(_swapPool(address(sUrAdapter), _low(USDC, WETH), _high(USDC, WETH), 500, 10));
+        sUrEthKey = sRegistry.addPool(_swapPool(address(sUrAdapter), ETH_NATIVE, USDC, 500, 10));
+        sUrCbbtcKey =
+            sRegistry.addPool(_swapPool(address(sUrAdapter), _low(USDC, CBBTC), _high(USDC, CBBTC), 500, 10));
+        sUrUsdtKey =
+            sRegistry.addPool(_swapPool(address(sUrAdapter), _low(USDC, USDT), _high(USDC, USDT), 100, 1));
 
-        // LP-pool entries.
-        // Per-pool allocation caps modeled loosely on JLP/GLP composition:
-        // stables can absorb 100% of the vault, volatile pairs are capped at
-        // 30% so a single position can't dominate.
-        // V4 hooked ETH/USDC pool with token0 = native ETH (the V4 sentinel
-        // address(0)). Hook is owner-allowlisted above.
-        bytes32 v4HookKey = registry.addPool(
-            _lpPool(address(v4Adapter), ETH_NATIVE, USDC, V4_HOOK_FEE, V4_HOOK_TICK_SPACING, V4_HOOK, 3_000)
-        );
-        bytes32 cbbtcKey = registry.addPool(
-            _lpPool(address(v3Adapter), _low(USDC, CBBTC), _high(USDC, CBBTC), 500, 10, address(0), 3_000)
-        );
-        bytes32 usdtKey = registry.addPool(
-            _lpPool(address(v3Adapter), _low(USDC, USDT), _high(USDC, USDT), 100, 1, address(0), 10_000)
-        );
+        // Per-tx swap cap = 50% of TAV. Worst case: full unwind of the
+        // 100%-capped USDT pool needs ~50% swap; volatile (30% cap) at most
+        // ~15%.
+        sVault.setSwapNotionalCapBps(5_000);
 
-        // URAdapter swap-only entries (one per pair we expect to swap)
-        bytes32 urEthKey = registry.addPool(_swapPool(address(urAdapter), _low(USDC, WETH), _high(USDC, WETH), 500, 10));
-        bytes32 urCbbtcKey =
-            registry.addPool(_swapPool(address(urAdapter), _low(USDC, CBBTC), _high(USDC, CBBTC), 500, 10));
-        bytes32 urUsdtKey = registry.addPool(_swapPool(address(urAdapter), _low(USDC, USDT), _high(USDC, USDT), 100, 1));
-
-        // -------- Phase 2: deployer deposits USDC into the vault --------
-        // The shell wrapper pre-funded DEPLOYER with USDC via anvil storage
-        // manipulation. Now DEPLOYER approves and deposits — vault holds the
-        // USDC and DEPLOYER holds shares.
-        IERC20(USDC).approve(address(vault), SEED_USDC);
-        vault.deposit(SEED_USDC, DEPLOYER);
-        // Top up the vault with native ETH for the V4 native-pool seed.
-        // Real flow: agent swaps USDC → ETH via UR. For the bootstrap demo
-        // we send ETH directly to keep the seed deterministic. 0.5 ETH ≈
-        // $1700 keeps the resulting V4 position under the 30% pool cap on
-        // a $10k vault.
-        (bool ok,) = address(vault).call{value: 0.5 ether}("");
+        // Deployer deposits USDC + tops up vault with native ETH for V4 seed.
+        IERC20(USDC).approve(address(sVault), SEED_USDC);
+        sVault.deposit(SEED_USDC, DEPLOYER);
+        (bool ok,) = address(sVault).call{value: 0.5 ether}("");
         require(ok, "vault ETH funding failed");
         vm.stopBroadcast();
+    }
 
-        // -------- Phase 3: agent seeds two demo positions --------
-        // a) cbBTC OUT-OF-RANGE above current tick → single-sided USDC.
-        //    After remove the vault gets back all USDC, forcing the executor
-        //    to swap half → cbBTC via the URAdapter (= Trading API call) on
-        //    the next rebalance. Designed to exercise the full loop.
-        // b) USDT IN-RANGE around current spot, ±50 ticks initial seed (wider
-        //    than the agent's planned ±2). Agent will hold this on every
-        //    tick until USDT actually depegs — useful as the "well-behaved"
-        //    counterexample alongside (a).
+    function _phase2Seed() internal {
         vm.startBroadcast(AGENT_KEY);
-
-        // (a) cbBTC out-of-range above
-        int24 cbbtcTick = _currentTick(USDC, CBBTC, 500);
-        // 500 ticks above current, 500 wide. Always strictly above current
-        // tick → V3 mint takes only USDC (token0) for this position.
-        int24 cbbtcLower = _alignUp(cbbtcTick + 500, 10);
-        int24 cbbtcUpper = cbbtcLower + 500;
-        // Seed size = 2k USDC. With a 10k vault that's 20% — fits under the
-        // pool's 30% allocation cap, and after a forced rebalance the new
-        // in-range position will be roughly the same size.
-        bool usdcIsT0Cbbtc = USDC == _low(USDC, CBBTC);
-        uint256 cbbtcAdd0 = usdcIsT0Cbbtc ? 2_000e6 : 0;
-        uint256 cbbtcAdd1 = usdcIsT0Cbbtc ? 0 : 2_000e6;
-        vault.executeAddLiquidity(
-            cbbtcKey, cbbtcAdd0, cbbtcAdd1, 0, 0, abi.encode(cbbtcLower, cbbtcUpper, block.timestamp + 600, uint256(0))
-        );
-
-        // (b) USDT in-range. Need both legs, so swap a small amount of USDC
-        //     to USDT first via the V3 0.01% pool.
-        vault.executeSwap(usdtKey, USDC, 2_500e6, 1, "");
-        int24 usdtTick = _currentTick(USDC, USDT, 100);
-        int24 usdtLower = _alignDown(usdtTick - 50, 1);
-        int24 usdtUpper = _alignUp(usdtTick + 50, 1);
-        uint256 vaultUsdc = IERC20(USDC).balanceOf(address(vault));
-        uint256 vaultUsdt = IERC20(USDT).balanceOf(address(vault));
-        bool usdcIsT0Usdt = USDC == _low(USDC, USDT);
-        uint256 usdtAdd0 = usdcIsT0Usdt ? vaultUsdc : vaultUsdt;
-        uint256 usdtAdd1 = usdcIsT0Usdt ? vaultUsdt : vaultUsdc;
-        vault.executeAddLiquidity(
-            usdtKey, usdtAdd0, usdtAdd1, 0, 0, abi.encode(usdtLower, usdtUpper, block.timestamp + 600, uint256(0))
-        );
-
-        // (c) V4 native-ETH pool. Seed an in-range position spanning ±5%.
-        // V4 returns the pool's current tick via PoolManager.getSlot0; we
-        // hard-code a wide ±~10% band here for simplicity since the V4
-        // adapter doesn't expose currentTick yet.
-        // Position seed: 2 ETH + matching USDC at the current spot.
-        // Alphix pool: token0 = native ETH, token1 = USDC.
-        // tickSpacing = 60.
-        uint160 v4SqrtPrice = ILiquidityAdapter(address(v4Adapter))
-            .getSpotSqrtPriceX96(
-                PoolRegistry.Pool({
-                    adapter: address(v4Adapter),
-                    token0: ETH_NATIVE,
-                    token1: USDC,
-                    hooks: V4_HOOK,
-                    fee: V4_HOOK_FEE,
-                    tickSpacing: V4_HOOK_TICK_SPACING,
-                    maxAllocationBps: 3_000,
-                    enabled: true
-                })
-            );
-        // Convert sqrtPriceX96 → tick via TickMath. Inline approximation:
-        // tick = log_{sqrt(1.0001)}(sqrtPriceX96 / Q96) * 2. Simpler: encode
-        // a wide band [tick - 600, tick + 600] (≈ ±6% on ETH, generously
-        // in-range under any normal market). For reproducibility, we let the
-        // V4 PositionManager compute liquidity from the desired amounts.
-        // Use ±600 ticks (10 spacings of 60) around the current sqrtPrice's
-        // tick; we approximate by bracketing widely.
-        int24 ethTick = _tickFromSqrtPriceX96(v4SqrtPrice);
-        int24 ethLower = _alignDown(ethTick - 600, V4_HOOK_TICK_SPACING);
-        int24 ethUpper = _alignUp(ethTick + 600, V4_HOOK_TICK_SPACING);
-        uint256 ethAmount = 0.5 ether;
-        // Cap USDC side at the value of the ETH side so the V4 mint doesn't
-        // try to consume more than the new position can absorb at this
-        // tight range. ETH price ≈ vault.totalAssets - balances; we approximate
-        // by using a fixed ratio (~$3500/ETH) so the seed stays deterministic.
-        uint256 vaultUsdcForEth = ethAmount * 3500 / 1e12; // 0.5 ETH * 3500 / 1e12 = 1.75e6 = 1.75 USDC? need scaling
-        vaultUsdcForEth = (ethAmount * 3500e6) / 1e18; // proper scaling: ETH amount × USDC price × 1e6 / 1e18
-        // V4 PoolKey orders by Currency.unwrap; native ETH (0) < USDC.
-        // amount0 = ETH, amount1 = USDC.
-        vault.executeAddLiquidity(
-            v4HookKey,
-            ethAmount,
-            vaultUsdcForEth,
-            0,
-            0,
-            abi.encode(ethLower, ethUpper, block.timestamp + 600, uint256(0))
-        );
+        _seedCbbtc(sVault, sCbbtcKey);
+        _seedUsdt(sVault, sUsdtKey);
+        _seedV4(sVault, sV4Adapter, sV4HookKey);
         vm.stopBroadcast();
+    }
 
-        // -------- Phase 4: print env block --------
+    function _phase3Print() internal view {
         console2.log("");
         console2.log("# === AGENT_ENV (paste into agent/.env) ===");
         console2.log("BASE_RPC_URL=http://localhost:8545");
-        console2.log("VAULT_ADDRESS=", address(vault));
-        console2.log("REGISTRY_ADDRESS=", address(registry));
-        console2.log("V3_ADAPTER_ADDRESS=", address(v3Adapter));
-        console2.log("V4_ADAPTER_ADDRESS=", address(v4Adapter));
-        console2.log("UR_ADAPTER_ADDRESS=", address(urAdapter));
+        console2.log("VAULT_ADDRESS=", address(sVault));
+        console2.log("REGISTRY_ADDRESS=", address(sRegistry));
+        console2.log("V3_ADAPTER_ADDRESS=", address(sV3Adapter));
+        console2.log("V4_ADAPTER_ADDRESS=", address(sV4Adapter));
+        console2.log("UR_ADAPTER_ADDRESS=", address(sUrAdapter));
         console2.log("AGENT_PRIVATE_KEY=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d");
         console2.log("");
         console2.log("# Pool keys");
-        console2.log("V4_ETH_USDC_KEY=", uint256(v4HookKey));
-        console2.log("V3_USDC_CBBTC_KEY=  ", uint256(cbbtcKey));
-        console2.log("V3_USDC_USDT_KEY=   ", uint256(usdtKey));
-        console2.log("UR_USDC_WETH_KEY=   ", uint256(urEthKey));
-        console2.log("UR_USDC_CBBTC_KEY=  ", uint256(urCbbtcKey));
-        console2.log("UR_USDC_USDT_KEY=   ", uint256(urUsdtKey));
+        console2.log("V4_ETH_USDC_KEY=", uint256(sV4HookKey));
+        console2.log("V3_USDC_CBBTC_KEY=  ", uint256(sCbbtcKey));
+        console2.log("V3_USDC_USDT_KEY=   ", uint256(sUsdtKey));
+        console2.log("UR_USDC_WETH_KEY=   ", uint256(sUrWethKey));
+        console2.log("UR_ETH_USDC_KEY=    ", uint256(sUrEthKey));
+        console2.log("UR_USDC_CBBTC_KEY=  ", uint256(sUrCbbtcKey));
+        console2.log("UR_USDC_USDT_KEY=   ", uint256(sUrUsdtKey));
         console2.log("");
         console2.log("# Vault state");
-        console2.log("vault USDC balance:", IERC20(USDC).balanceOf(address(vault)));
-        console2.log("vault CBBTC balance:", IERC20(CBBTC).balanceOf(address(vault)));
-        console2.log("vault tracked positions in cbBTC pool: 1 (full-range, in-range)");
+        console2.log("vault USDC balance:", IERC20(USDC).balanceOf(address(sVault)));
+        console2.log("vault CBBTC balance:", IERC20(CBBTC).balanceOf(address(sVault)));
+    }
+
+    /// @dev cbBTC seed: out-of-range above current tick (single-sided USDC).
+    /// 2k USDC is 20% of the $10k vault, comfortably under the pool's 30% cap.
+    function _seedCbbtc(ALPVault vault, bytes32 cbbtcKey) internal {
+        int24 tick = _currentTick(USDC, CBBTC, 500);
+        int24 lower = _alignUp(tick + 500, 10);
+        int24 upper = lower + 500;
+        bool usdcIsT0 = USDC == _low(USDC, CBBTC);
+        vault.executeAddLiquidity(
+            cbbtcKey,
+            usdcIsT0 ? 2_000e6 : 0,
+            usdcIsT0 ? 0 : 2_000e6,
+            0,
+            0,
+            abi.encode(lower, upper, block.timestamp + 600, uint256(0))
+        );
+    }
+
+    /// @dev USDT seed: in-range ±50 ticks (wider than the agent's planned
+    /// ±2). Swaps 2.5k USDC → USDT first so the LP add has both legs.
+    function _seedUsdt(ALPVault vault, bytes32 usdtKey) internal {
+        vault.executeSwap(usdtKey, USDC, 2_500e6, 1, "");
+        int24 tick = _currentTick(USDC, USDT, 100);
+        int24 lower = _alignDown(tick - 50, 1);
+        int24 upper = _alignUp(tick + 50, 1);
+        uint256 bUsdc = IERC20(USDC).balanceOf(address(vault));
+        uint256 bUsdt = IERC20(USDT).balanceOf(address(vault));
+        bool usdcIsT0 = USDC == _low(USDC, USDT);
+        vault.executeAddLiquidity(
+            usdtKey,
+            usdcIsT0 ? bUsdc : bUsdt,
+            usdcIsT0 ? bUsdt : bUsdc,
+            0,
+            0,
+            abi.encode(lower, upper, block.timestamp + 600, uint256(0))
+        );
+    }
+
+    function _seedV4(ALPVault vault, UniV4Adapter v4Adapter, bytes32 v4HookKey) internal {
+        // ±~6% band around current spot (10 spacings of 60), in-range for
+        // normal market conditions. Sized at 0.5 ETH ≈ $1.7k so the resulting
+        // V4 position fits under the pool's 30% allocation cap on a $10k vault.
+        uint160 sqrtPrice = ILiquidityAdapter(address(v4Adapter)).getSpotSqrtPriceX96(
+            PoolRegistry.Pool({
+                adapter: address(v4Adapter),
+                token0: ETH_NATIVE,
+                token1: USDC,
+                hooks: V4_HOOK,
+                fee: V4_HOOK_FEE,
+                tickSpacing: V4_HOOK_TICK_SPACING,
+                maxAllocationBps: 3_000,
+                enabled: true
+            })
+        );
+        int24 tick = _tickFromSqrtPriceX96(sqrtPrice);
+        int24 lower = _alignDown(tick - 600, V4_HOOK_TICK_SPACING);
+        int24 upper = _alignUp(tick + 600, V4_HOOK_TICK_SPACING);
+        uint256 ethAmount = 0.5 ether;
+        // USDC side scaled to roughly match ETH value at ~$3500/ETH so the
+        // V4 mint absorbs both sides cleanly at this band.
+        uint256 usdcAmount = (ethAmount * 3500e6) / 1e18;
+        vault.executeAddLiquidity(
+            v4HookKey, ethAmount, usdcAmount, 0, 0, abi.encode(lower, upper, block.timestamp + 600, uint256(0))
+        );
     }
 
     function _lpPool(address adapter, address t0, address t1, uint24 fee, int24 spacing, address hook, uint16 maxBps)
