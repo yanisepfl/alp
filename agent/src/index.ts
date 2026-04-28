@@ -2,7 +2,7 @@
 import { loadConfig } from "./config.js";
 import { KvActivityStore } from "./log.js";
 import type { PositionHysteresis } from "./planner.js";
-import { runTick } from "./runner.js";
+import { runTick, type RunOptions } from "./runner.js";
 
 interface Env {
   ACTIVITY_LOG: KVNamespace;
@@ -17,6 +17,8 @@ interface Env {
   LIQUIDITY_SLIPPAGE_BPS?: string;
   HYSTERESIS_N?: string;
   HYSTERESIS_CLOSER_FRACTION?: string;
+  TRADING_API_BASE?: string;
+  TRADING_API_KEY?: string;
 }
 
 const HYSTERESIS_KEY = "__hysteresis__";
@@ -28,32 +30,60 @@ export default {
     if (url.pathname === "/agent/activity" && req.method === "GET") {
       return handleActivity(env, url);
     }
+    if (url.pathname === "/agent/dryrun" && req.method === "GET") {
+      // Dry-run is read-only and safe to expose unauthenticated. Returns the
+      // plan the agent would execute against current chain state. Useful for
+      // the demo to verify the agent reads chain state correctly without
+      // spending gas.
+      return runAndRespond(env, { dryRun: true });
+    }
     if (url.pathname === "/trigger" && req.method === "POST") {
-      return handleTrigger(req, env);
+      return handleAuthedRun(req, env, () => ({}));
+    }
+    if (url.pathname === "/force-rebalance" && req.method === "POST") {
+      return handleAuthedRun(req, env, (body) => ({
+        force: true,
+        positionKey: body.positionKey,
+      }));
     }
     return new Response("not found", { status: 404 });
   },
 };
 
-async function handleTrigger(req: Request, env: Env): Promise<Response> {
-  // HMAC auth: caller must include `x-signature` header carrying the
-  // hex-encoded HMAC-SHA256 of the raw body keyed by `HMAC_SECRET`.
+async function handleAuthedRun(
+  req: Request,
+  env: Env,
+  optionsFromBody: (body: { positionKey?: string }) => RunOptions,
+): Promise<Response> {
   const sig = req.headers.get("x-signature");
   const body = await req.text();
   if (!sig || !(await verifyHmac(env.HMAC_SECRET, body, sig))) {
     return new Response("unauthorised", { status: 401 });
   }
+  let parsed: { positionKey?: string } = {};
+  if (body.length > 0) {
+    try {
+      parsed = JSON.parse(body) as { positionKey?: string };
+    } catch {
+      return new Response("invalid json", { status: 400 });
+    }
+  }
+  return runAndRespond(env, optionsFromBody(parsed));
+}
 
+async function runAndRespond(env: Env, options: RunOptions): Promise<Response> {
   const config = loadConfig(env as unknown as Record<string, string | undefined>);
   const store = new KvActivityStore(env.ACTIVITY_LOG);
-
   const result = await runTick({
     config,
     store,
     loadHysteresis: async () => loadHysteresis(env.ACTIVITY_LOG),
     saveHysteresis: async (s) => saveHysteresis(env.ACTIVITY_LOG, s),
+    options,
   });
-  return new Response(JSON.stringify(result), { headers: { "content-type": "application/json" } });
+  return new Response(JSON.stringify(result), {
+    headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
+  });
 }
 
 async function handleActivity(env: Env, url: URL): Promise<Response> {

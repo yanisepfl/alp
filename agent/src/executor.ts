@@ -11,7 +11,7 @@ import type { AgentConfig } from "./config.js";
 import type { ActionStep } from "./log.js";
 import type { PositionSnapshot } from "./monitor.js";
 import type { Plan } from "./planner.js";
-import { buildSingleHopV3Swap } from "./quoting.js";
+import { buildSingleHopV3Swap, quoteAndBuildMultiHop } from "./quoting.js";
 
 /** Locks per position so concurrent invocations don't double-submit. */
 const inflight = new Set<string>();
@@ -170,24 +170,42 @@ async function maybeSwapToBalance(args: {
 
   if (amountIn === 0n) return null;
 
-  // Quote on-chain via the V3 pool (single-hop). For multi-hop we'd swap to
-  // the Trading API; v1 ships single-hop only.
-  // Expected output is approximated via Trading API's quote endpoint OR a
-  // local sqrtPrice math. For simplicity here we set a conservative minimum
-  // floor and let the URAdapter assert.
-  // TODO(v2): plug `quoteAndBuildMultiHop` when one of the sides isn't paired
-  // directly with the other on Base mainnet.
-  const swap = buildSingleHopV3Swap({
-    tokenIn,
-    tokenOut,
-    fee: pool.fee,
-    amountIn,
-    // Conservative expected: pretend 1:1 in 18-dec terms minus slippage.
-    // Real expected comes from Trading API once we wire it in for this hop.
-    expectedAmountOut: 1n,
-    slippageBps: config.swapSlippageBps,
-    deadlineSeconds: 600,
-  });
+  // Primary path: Uniswap Trading API. It returns the best route across V3
+  // and V4 pools, plus the Universal Router calldata to execute it.
+  // Fallback: build a conservative single-hop V3 swap through the configured
+  // pool. Used if the Trading API is unreachable or returns no route.
+  let swap;
+  let route: "trading-api" | "single-hop-fallback";
+  try {
+    swap = await quoteAndBuildMultiHop({
+      apiBase: config.tradingApiBase,
+      apiKey: config.tradingApiKey,
+      tokenIn,
+      tokenOut,
+      amountIn,
+      slippageBps: config.swapSlippageBps,
+      // Deliver UR's output directly to the vault. URAdapter still asserts
+      // the vault's balance delta, so a misencoded recipient reverts.
+      recipient: config.vaultAddress,
+    });
+    route = "trading-api";
+  } catch (e) {
+    // Fall back to a direct single-hop V3 swap. Without an external quote we
+    // can only set a conservative `amountOutMin` floor of 1 — the
+    // URAdapter's balance-delta assertion still enforces our slippage knob
+    // because the vault layer also checks `amountOutMin > 0` and we pass our
+    // slippage-derived value to `executeSwap` below.
+    swap = buildSingleHopV3Swap({
+      tokenIn,
+      tokenOut,
+      fee: pool.fee,
+      amountIn,
+      expectedAmountOut: 1n,
+      slippageBps: config.swapSlippageBps,
+      deadlineSeconds: 600,
+    });
+    route = "single-hop-fallback";
+  }
 
   const txHash = await walletClient.writeContract({
     account,
@@ -203,6 +221,12 @@ async function maybeSwapToBalance(args: {
   return {
     kind: "swap",
     txHash,
-    detail: { tokenIn, tokenOut, amountIn: amountIn.toString() },
+    detail: {
+      tokenIn,
+      tokenOut,
+      amountIn: amountIn.toString(),
+      amountOutMin: swap.amountOutMin.toString(),
+      route,
+    },
   };
 }

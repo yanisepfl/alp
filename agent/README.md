@@ -41,13 +41,27 @@ src/
 
 Set per-pool in the config, not on-chain — easy to retune.
 
+## HTTP surface
+
+| Route | Auth | Description |
+|-------|------|-------------|
+| `POST /trigger` | HMAC | Normal scheduled tick (KeeperHub fires this every 30 min). |
+| `POST /force-rebalance` | HMAC | Demo button: ignore hysteresis and rebalance now. Body `{}` rebalances every position; body `{"positionKey": "..."}` rebalances just one. |
+| `GET /agent/dryrun` | none | Read-only: returns the plan the agent would execute against current chain state. Spends no gas. Use this to verify the agent is reading state correctly. |
+| `GET /agent/activity?limit=N` | none | Recent decisions + tx hashes. Frontend feed. |
+
+`HMAC` requires `x-signature: <hex HMAC-SHA256(body, HMAC_SECRET)>`.
+
 ## Local run
 
 ```bash
 cp .env.example .env
 # fill in values
 pnpm install
-pnpm local
+pnpm local                      # one tick, real submission
+pnpm local -- --dry             # one tick, plan only (no txs)
+pnpm local -- --force           # rebalance every position now
+pnpm local -- --force <key>     # rebalance just one position
 ```
 
 ## Deploy

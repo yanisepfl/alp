@@ -14,12 +14,38 @@ import type { AgentConfig } from "./config.js";
 import { executeRebalance } from "./executor.js";
 import { type ActivityStore, planToActivityRow } from "./log.js";
 import { snapshotPositions } from "./monitor.js";
-import { freshHysteresis, planAll, positionKey, type PositionHysteresis } from "./planner.js";
+import {
+  computeNewRange,
+  freshHysteresis,
+  planAll,
+  positionKey,
+  type Plan,
+  type PositionHysteresis,
+} from "./planner.js";
 
 export interface TickResult {
   observedPositions: number;
   rebalances: number;
   errors: string[];
+  /** Populated when `dryRun = true`: the action plan the agent would have
+   *  executed. Useful for live verification without spending gas. */
+  plans?: Array<{ positionKey: string; pool: string; action: string; reason: string }>;
+}
+
+/** Optional override for /trigger and /force-rebalance.
+ *
+ *  - `force = true` ignores hysteresis and treats every position (or just
+ *    `positionKey` if set) as if it needed a rebalance, recentering the range
+ *    around the current spot. Used by the demo "rebalance now" button.
+ *  - `dryRun = true` skips on-chain submission entirely and returns the plan
+ *    list. Used to verify the agent reads chain state correctly without
+ *    spending money.
+ */
+export interface RunOptions {
+  force?: boolean;
+  /** If set with `force`, only this position is rebalanced. Otherwise all. */
+  positionKey?: string;
+  dryRun?: boolean;
 }
 
 /** One full agent tick: snapshot, plan, execute, log. */
@@ -28,8 +54,9 @@ export async function runTick(args: {
   store: ActivityStore;
   loadHysteresis: () => Promise<Map<string, PositionHysteresis>>;
   saveHysteresis: (state: Map<string, PositionHysteresis>) => Promise<void>;
+  options?: RunOptions;
 }): Promise<TickResult> {
-  const { config, store, loadHysteresis, saveHysteresis } = args;
+  const { config, store, loadHysteresis, saveHysteresis, options = {} } = args;
 
   const account = privateKeyToAccount(config.agentPrivateKey);
   const publicClient = createPublicClient({ chain: base, transport: http(config.rpcUrl) }) as PublicClient;
@@ -43,7 +70,41 @@ export async function runTick(args: {
 
   const snapshots = await snapshotPositions(publicClient, config);
   const prior = await loadHysteresis();
-  const plans = planAll(config, snapshots, prior);
+  let plans = planAll(config, snapshots, prior);
+
+  // Force overrides: replace the planner's verdict with an unconditional
+  // rebalance for the targeted position(s). Hysteresis state is not consulted
+  // and not advanced (the position is reset to fresh on success).
+  if (options.force) {
+    plans = plans.map((p): Plan => {
+      if (options.positionKey && positionKey(p.position) !== options.positionKey) return p;
+      const { newTickLower, newTickUpper } = computeNewRange(p.position.pool, p.position.currentTick);
+      return {
+        position: p.position,
+        prior: p.prior,
+        action: {
+          kind: "rebalance",
+          reason: `forced rebalance${options.positionKey ? ` for ${options.positionKey}` : " (all positions)"}`,
+          newTickLower,
+          newTickUpper,
+        },
+      };
+    });
+  }
+
+  if (options.dryRun) {
+    return {
+      observedPositions: snapshots.length,
+      rebalances: 0,
+      errors: [],
+      plans: plans.map((p) => ({
+        positionKey: positionKey(p.position),
+        pool: p.position.pool.label,
+        action: p.action.kind,
+        reason: p.action.reason,
+      })),
+    };
+  }
 
   const errors: string[] = [];
   let rebalances = 0;

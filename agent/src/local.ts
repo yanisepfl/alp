@@ -13,7 +13,17 @@ async function main() {
   const store = new MemoryActivityStore();
   const state = new Map<string, PositionHysteresis>();
 
-  console.log("Running one tick…");
+  // Mode: `pnpm local` runs once. Append `--dry` to print the plan without
+  // submitting any transactions. Append `--force [positionKey]` to override
+  // hysteresis and rebalance now.
+  const args = process.argv.slice(2);
+  const dryRun = args.includes("--dry");
+  const forceIdx = args.indexOf("--force");
+  const force = forceIdx !== -1;
+  const nextArg = args[forceIdx + 1];
+  const positionKey = force && nextArg && !nextArg.startsWith("--") ? nextArg : undefined;
+
+  console.log(`Running one tick (dryRun=${dryRun}, force=${force}, positionKey=${positionKey ?? "all"})…`);
   const result = await runTick({
     config,
     store,
@@ -22,6 +32,7 @@ async function main() {
       state.clear();
       for (const [k, v] of s) state.set(k, v);
     },
+    options: { dryRun, force, positionKey },
   });
   console.log("Result:", result);
   console.log("Activity:", await store.recent(20));

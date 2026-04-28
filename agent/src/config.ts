@@ -39,6 +39,10 @@ export interface AgentConfig {
   /** Hysteresis "got closer" threshold: if 2nd-obs distance is < this fraction
    * of 1st-obs distance, we wait another tick. */
   hysteresisCloserFraction: number;
+  /** Base URL for the Uniswap Trading API (e.g. https://trade-api.gateway.uniswap.org). */
+  tradingApiBase: string;
+  /** Optional API key for the Trading API. Public free tier works without one. */
+  tradingApiKey?: string;
   /** Pools the agent monitors. */
   pools: PoolConfig[];
 }
@@ -84,6 +88,8 @@ export function loadConfig(env: Record<string, string | undefined>): AgentConfig
     liquiditySlippageBps: Number(env.LIQUIDITY_SLIPPAGE_BPS ?? 100), // 1.00%
     hysteresisN: Number(env.HYSTERESIS_N ?? 2),
     hysteresisCloserFraction: Number(env.HYSTERESIS_CLOSER_FRACTION ?? 0.5),
+    tradingApiBase: env.TRADING_API_BASE ?? "https://trade-api.gateway.uniswap.org",
+    tradingApiKey: env.TRADING_API_KEY,
     // Pool list is populated post-deployment via `bootstrapPools.ts`.
     pools: [],
   };
