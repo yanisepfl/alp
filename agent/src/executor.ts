@@ -6,7 +6,7 @@ import {
   type WalletClient,
 } from "viem";
 
-import { vaultAbi } from "./abi.js";
+import { registryAbi, v3FactoryAbi, v3PoolAbi, vaultAbi } from "./abi.js";
 import type { AgentConfig } from "./config.js";
 import type { ActionStep } from "./log.js";
 import type { PositionSnapshot } from "./monitor.js";
@@ -54,8 +54,9 @@ export async function executeRebalance(args: {
       abi: vaultAbi,
       functionName: "executeRemoveLiquidity",
       args: [pool.lpKey, pos.positionId, pos.liquidity, 0n, 0n, removeExtra],
+      gas: 2_000_000n,
     });
-    await publicClient.waitForTransactionReceipt({ hash: removeTx });
+    await waitForOk(publicClient, removeTx, "executeRemoveLiquidity");
     steps.push({ kind: "remove", txHash: removeTx, detail: { positionId: pos.positionId.toString() } });
 
     // 2. Swap one-sided into balanced. After remove, the vault holds whichever
@@ -82,8 +83,43 @@ export async function executeRebalance(args: {
       [{ type: "int24" }, { type: "int24" }, { type: "uint256" }, { type: "uint256" }],
       [plan.action.newTickLower, plan.action.newTickUpper, deadline, 0n],
     );
-    const bal0 = await readErc20Balance(publicClient, pool.token0, config.vaultAddress);
-    const bal1 = await readErc20Balance(publicClient, pool.token1, config.vaultAddress);
+    let bal0 = await readErc20Balance(publicClient, pool.token0, config.vaultAddress);
+    let bal1 = await readErc20Balance(publicClient, pool.token1, config.vaultAddress);
+
+    // Cap the add against the pool's `maxAllocationBps`. Without this the
+    // agent would dump the entire vault balance into a single pool and
+    // revert as soon as the result exceeds the cap. We value (bal0, bal1)
+    // in base-asset units via the V3 pool's spot price, then scale down
+    // proportionally if needed.
+    const { maxAllocationBps } = await publicClient.readContract({
+      address: config.registryAddress,
+      abi: registryAbi,
+      functionName: "getPool",
+      args: [pool.lpKey],
+    });
+    if (maxAllocationBps < 10_000) {
+      const tav = await publicClient.readContract({
+        address: config.vaultAddress,
+        abi: vaultAbi,
+        functionName: "totalAssets",
+      });
+      const maxValueBase = (tav * BigInt(maxAllocationBps)) / 10_000n;
+      const addValueBase = await valueInBase({
+        publicClient,
+        pool,
+        bal0,
+        bal1,
+        baseAsset: vaultBaseAsset,
+      });
+      if (addValueBase > maxValueBase && addValueBase > 0n) {
+        // Apply a small safety margin (-1%) so post-tx valuation drift
+        // doesn't trip the cap on the contract-side check.
+        const scaledBps = (maxValueBase * 9_900n) / addValueBase;
+        bal0 = (bal0 * scaledBps) / 10_000n;
+        bal1 = (bal1 * scaledBps) / 10_000n;
+      }
+    }
+
     const addTx = await walletClient.writeContract({
       account,
       chain: null,
@@ -94,13 +130,23 @@ export async function executeRebalance(args: {
         pool.lpKey,
         bal0,
         bal1,
-        // 1% slippage floor on the LP add itself.
-        (bal0 * BigInt(10_000 - config.liquiditySlippageBps)) / 10_000n,
-        (bal1 * BigInt(10_000 - config.liquiditySlippageBps)) / 10_000n,
+        // amountMins set to 0 because V3's mint only consumes the ratio
+        // dictated by the new range, which generally won't match (bal0,
+        // bal1) — the limiting token determines liquidity and the other
+        // gets refunded. A meaningful slippage check requires pre-computing
+        // the expected ratio via LiquidityAmounts; deferred to v2. The
+        // URAdapter's swap-side slippage check already protects against
+        // price-move MEV during the rebalance.
+        0n,
+        0n,
         addExtra,
       ],
+      // Generous fixed gas budget. viem's auto-estimate hugs the simulation
+      // value too tightly for this call — the post-add cap check iterates
+      // every tracked position and can run out at the very last step.
+      gas: 3_000_000n,
     });
-    await publicClient.waitForTransactionReceipt({ hash: addTx });
+    await waitForOk(publicClient, addTx, "executeAddLiquidity");
     steps.push({
       kind: "add",
       txHash: addTx,
@@ -128,6 +174,61 @@ const erc20BalanceAbi = [
 
 async function readErc20Balance(client: PublicClient, token: Address, holder: Address): Promise<bigint> {
   return client.readContract({ address: token, abi: erc20BalanceAbi, functionName: "balanceOf", args: [holder] });
+}
+
+/** Await a tx receipt and throw if it reverted. viem's
+ *  `waitForTransactionReceipt` returns the receipt regardless of status, so we
+ *  have to check explicitly — otherwise a reverted on-chain tx silently
+ *  propagates through the activity log as "success". */
+async function waitForOk(client: PublicClient, hash: `0x${string}`, label: string): Promise<void> {
+  const receipt = await client.waitForTransactionReceipt({ hash });
+  if (receipt.status !== "success") {
+    throw new Error(`${label} reverted (tx ${hash})`);
+  }
+}
+
+const V3_FACTORY: Address = "0x33128a8fC17869897dcE68Ed026d694621f6FDfD";
+
+/** Value (bal0, bal1) in base-asset units using the pool's V3 spot price.
+ *  Used to enforce the per-pool `maxAllocationBps` from the agent side. */
+async function valueInBase(args: {
+  publicClient: PublicClient;
+  pool: import("./config.js").PoolConfig;
+  bal0: bigint;
+  bal1: bigint;
+  baseAsset: Address;
+}): Promise<bigint> {
+  const { publicClient, pool, bal0, bal1, baseAsset } = args;
+  const poolAddr = await publicClient.readContract({
+    address: V3_FACTORY,
+    abi: v3FactoryAbi,
+    functionName: "getPool",
+    args: [pool.token0, pool.token1, pool.fee],
+  });
+  if (poolAddr === "0x0000000000000000000000000000000000000000") return bal0 + bal1;
+  const slot0 = await publicClient.readContract({
+    address: poolAddr,
+    abi: v3PoolAbi,
+    functionName: "slot0",
+  });
+  const sqrtPriceX96 = slot0[0];
+  // Convert sqrtPriceX96 → price (token1 per token0) in fixed-point.
+  // price = (sqrtPriceX96 / 2^96)^2
+  const Q96 = 2n ** 96n;
+  // Use the same split-step pattern the vault uses to avoid overflow.
+  const numerator = sqrtPriceX96 * sqrtPriceX96;
+  const denominator = Q96 * Q96;
+  // Value of bal0 in token1 units = bal0 * price.
+  // Value of bal1 in token1 units = bal1.
+  const bal0InToken1 = (bal0 * numerator) / denominator;
+  const totalInToken1 = bal0InToken1 + bal1;
+  // Convert total back to base-asset units.
+  if (pool.token1 === baseAsset) {
+    return totalInToken1;
+  }
+  // Base = token0. Convert token1 back to token0 via the same price.
+  // total_in_token0 = totalInToken1 / price = totalInToken1 * denominator / numerator
+  return (totalInToken1 * denominator) / numerator;
 }
 
 /** Inspect the vault balances of token0/token1 and swap half of the heavier
@@ -195,6 +296,7 @@ async function maybeSwapToBalance(args: {
     // URAdapter's balance-delta assertion still enforces our slippage knob
     // because the vault layer also checks `amountOutMin > 0` and we pass our
     // slippage-derived value to `executeSwap` below.
+    console.warn(`[trading-api] quote failed, falling back to single-hop: ${(e as Error).message}`);
     swap = buildSingleHopV3Swap({
       tokenIn,
       tokenOut,
@@ -214,8 +316,9 @@ async function maybeSwapToBalance(args: {
     abi: vaultAbi,
     functionName: "executeSwap",
     args: [pool.urKey, tokenIn, amountIn, swap.amountOutMin, swap.extra],
+    gas: 2_000_000n,
   });
-  await publicClient.waitForTransactionReceipt({ hash: txHash });
+  await waitForOk(publicClient, txHash, "executeSwap");
   // Suppress unused-variable lints for parameters reserved for v2 wiring.
   void deadline;
   return {

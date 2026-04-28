@@ -28,7 +28,12 @@ export function buildSingleHopV3Swap(args: {
   slippageBps: number;
   deadlineSeconds: number;
 }): SwapCalldata {
-  const amountOutMin = (args.expectedAmountOut * BigInt(10_000 - args.slippageBps)) / 10_000n;
+  // Vault rejects amountOutMin = 0 (SlippageMinRequired). When the caller
+  // hasn't supplied a real expected-out (passes 1n as sentinel), floor at 1
+  // so the vault accepts and the URAdapter's balance-delta assertion enforces
+  // the actual safety. Real quotes get the proper percentage haircut.
+  const computed = (args.expectedAmountOut * BigInt(10_000 - args.slippageBps)) / 10_000n;
+  const amountOutMin = computed > 0n ? computed : 1n;
   const path = encodePacked(
     ["address", "uint24", "address"],
     [args.tokenIn, args.fee, args.tokenOut],

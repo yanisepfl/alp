@@ -18,6 +18,7 @@ import {UniversalRouterAdapter} from "../src/adapters/UniversalRouterAdapter.sol
 import {INonfungiblePositionManager} from "../src/interfaces/external/INonfungiblePositionManager.sol";
 import {ISwapRouter02} from "../src/interfaces/external/ISwapRouter02.sol";
 import {IUniswapV3Factory} from "../src/interfaces/external/IUniswapV3Factory.sol";
+import {IUniswapV3Pool} from "../src/interfaces/external/IUniswapV3Pool.sol";
 import {IUniversalRouter} from "../src/interfaces/external/IUniversalRouter.sol";
 
 /// @notice One-shot bootstrap of the ALP stack against an Anvil fork of Base
@@ -101,21 +102,21 @@ contract LocalBootstrap is Script {
         // support to UniV4Adapter (currently does IERC20.safeTransferFrom on
         // both tokens). Out of scope for the demo bootstrap; the hook
         // allowlist plumbing is in place for any ERC20-paired hooked pool.
+        // Per-pool allocation caps modeled loosely on JLP/GLP composition:
+        // stables can absorb 100% of the vault, volatile pairs are capped at
+        // 30% so a single position can't dominate.
         bytes32 cbbtcKey = registry.addPool(
-            _pool(address(v3Adapter), _low(USDC, CBBTC), _high(USDC, CBBTC), 500, 10, address(0), true)
+            _lpPool(address(v3Adapter), _low(USDC, CBBTC), _high(USDC, CBBTC), 500, 10, address(0), 3_000)
         );
-        bytes32 usdtKey =
-            registry.addPool(_pool(address(v3Adapter), _low(USDC, USDT), _high(USDC, USDT), 100, 1, address(0), true));
+        bytes32 usdtKey = registry.addPool(
+            _lpPool(address(v3Adapter), _low(USDC, USDT), _high(USDC, USDT), 100, 1, address(0), 10_000)
+        );
 
         // URAdapter swap-only entries (one per pair we expect to swap)
-        bytes32 urEthKey = registry.addPool(
-            _pool(address(urAdapter), _low(USDC, WETH), _high(USDC, WETH), 500, 10, address(0), false)
-        );
-        bytes32 urCbbtcKey = registry.addPool(
-            _pool(address(urAdapter), _low(USDC, CBBTC), _high(USDC, CBBTC), 500, 10, address(0), false)
-        );
-        bytes32 urUsdtKey =
-            registry.addPool(_pool(address(urAdapter), _low(USDC, USDT), _high(USDC, USDT), 100, 1, address(0), false));
+        bytes32 urEthKey = registry.addPool(_swapPool(address(urAdapter), _low(USDC, WETH), _high(USDC, WETH), 500, 10));
+        bytes32 urCbbtcKey =
+            registry.addPool(_swapPool(address(urAdapter), _low(USDC, CBBTC), _high(USDC, CBBTC), 500, 10));
+        bytes32 urUsdtKey = registry.addPool(_swapPool(address(urAdapter), _low(USDC, USDT), _high(USDC, USDT), 100, 1));
 
         // -------- Phase 2: deployer deposits USDC into the vault --------
         // The shell wrapper pre-funded DEPLOYER with USDC via anvil storage
@@ -125,37 +126,46 @@ contract LocalBootstrap is Script {
         vault.deposit(SEED_USDC, DEPLOYER);
         vm.stopBroadcast();
 
-        // -------- Phase 3: agent opens an in-range V3 USDC/cbBTC position --------
+        // -------- Phase 3: agent seeds two demo positions --------
+        // a) cbBTC OUT-OF-RANGE above current tick → single-sided USDC.
+        //    After remove the vault gets back all USDC, forcing the executor
+        //    to swap half → cbBTC via the URAdapter (= Trading API call) on
+        //    the next rebalance. Designed to exercise the full loop.
+        // b) USDT IN-RANGE around current spot, ±50 ticks initial seed (wider
+        //    than the agent's planned ±2). Agent will hold this on every
+        //    tick until USDT actually depegs — useful as the "well-behaved"
+        //    counterexample alongside (a).
         vm.startBroadcast(AGENT_KEY);
 
-        // 1. Swap 5k USDC → cbBTC through the cbBTC LP pool itself
-        // (single-hop V3 swap via UniV3Adapter). amountOutMin=1 because we
-        // accept any non-zero output for the seed; production agent uses real
-        // slippage tolerance.
-        vault.executeSwap(cbbtcKey, USDC, SEED_USDC / 2, 1, "");
-
-        // 2. Add liquidity full-range so the position is definitely in-range
-        // at the current spot. Real agent sets a tighter range; the
-        // bootstrap goes wide so we don't have to compute spot ticks.
-        uint256 vaultUsdcAfterSwap = IERC20(USDC).balanceOf(address(vault));
-        uint256 vaultCbbtcAfterSwap = IERC20(CBBTC).balanceOf(address(vault));
-
-        // Token0/token1 ordering for the cbBTC pool (CBBTC < USDC numerically)
-        address t0 = _low(USDC, CBBTC);
-        bool usdcIsToken0 = (t0 == USDC);
-        uint256 amount0 = usdcIsToken0 ? vaultUsdcAfterSwap : vaultCbbtcAfterSwap;
-        uint256 amount1 = usdcIsToken0 ? vaultCbbtcAfterSwap : vaultUsdcAfterSwap;
-
+        // (a) cbBTC out-of-range above
+        int24 cbbtcTick = _currentTick(USDC, CBBTC, 500);
+        // 500 ticks above current, 500 wide. Always strictly above current
+        // tick → V3 mint takes only USDC (token0) for this position.
+        int24 cbbtcLower = _alignUp(cbbtcTick + 500, 10);
+        int24 cbbtcUpper = cbbtcLower + 500;
+        // Seed size = 2k USDC. With a 10k vault that's 20% — fits under the
+        // pool's 30% allocation cap, and after a forced rebalance the new
+        // in-range position will be roughly the same size.
+        bool usdcIsT0Cbbtc = USDC == _low(USDC, CBBTC);
+        uint256 cbbtcAdd0 = usdcIsT0Cbbtc ? 2_000e6 : 0;
+        uint256 cbbtcAdd1 = usdcIsT0Cbbtc ? 0 : 2_000e6;
         vault.executeAddLiquidity(
-            cbbtcKey,
-            amount0,
-            amount1,
-            0,
-            0,
-            // V3 add encoding: tickLower, tickUpper, deadline, existingPositionId
-            // Wide range: [-887270, 887270] is the V3 max range modulo spacing.
-            // For tickSpacing=10: floor(-887270/10)*10 = -887270, ceil(887270/10)*10 = 887270.
-            abi.encode(int24(-887_270), int24(887_270), block.timestamp + 600, uint256(0))
+            cbbtcKey, cbbtcAdd0, cbbtcAdd1, 0, 0, abi.encode(cbbtcLower, cbbtcUpper, block.timestamp + 600, uint256(0))
+        );
+
+        // (b) USDT in-range. Need both legs, so swap a small amount of USDC
+        //     to USDT first via the V3 0.01% pool.
+        vault.executeSwap(usdtKey, USDC, 2_500e6, 1, "");
+        int24 usdtTick = _currentTick(USDC, USDT, 100);
+        int24 usdtLower = _alignDown(usdtTick - 50, 1);
+        int24 usdtUpper = _alignUp(usdtTick + 50, 1);
+        uint256 vaultUsdc = IERC20(USDC).balanceOf(address(vault));
+        uint256 vaultUsdt = IERC20(USDT).balanceOf(address(vault));
+        bool usdcIsT0Usdt = USDC == _low(USDC, USDT);
+        uint256 usdtAdd0 = usdcIsT0Usdt ? vaultUsdc : vaultUsdt;
+        uint256 usdtAdd1 = usdcIsT0Usdt ? vaultUsdt : vaultUsdc;
+        vault.executeAddLiquidity(
+            usdtKey, usdtAdd0, usdtAdd1, 0, 0, abi.encode(usdtLower, usdtUpper, block.timestamp + 600, uint256(0))
         );
         vm.stopBroadcast();
 
@@ -183,7 +193,7 @@ contract LocalBootstrap is Script {
         console2.log("vault tracked positions in cbBTC pool: 1 (full-range, in-range)");
     }
 
-    function _pool(address adapter, address t0, address t1, uint24 fee, int24 spacing, address hook, bool enabled)
+    function _lpPool(address adapter, address t0, address t1, uint24 fee, int24 spacing, address hook, uint16 maxBps)
         internal
         pure
         returns (PoolRegistry.Pool memory)
@@ -195,12 +205,45 @@ contract LocalBootstrap is Script {
             fee: fee,
             tickSpacing: spacing,
             hooks: hook,
-            // Demo bootstrap: 10_000 (100%) so a single seed position can
-            // sit alone in a pool without tripping the per-pool allocation
-            // cap. Production guardian sets this much tighter per pool.
-            maxAllocationBps: enabled ? uint16(10_000) : uint16(1),
-            enabled: enabled
+            maxAllocationBps: maxBps,
+            enabled: true
         });
+    }
+
+    function _swapPool(address adapter, address t0, address t1, uint24 fee, int24 spacing)
+        internal
+        pure
+        returns (PoolRegistry.Pool memory)
+    {
+        return PoolRegistry.Pool({
+            adapter: adapter,
+            token0: t0,
+            token1: t1,
+            fee: fee,
+            tickSpacing: spacing,
+            hooks: address(0),
+            // Min legal value; URAdapter pools never participate in LP allocation.
+            maxAllocationBps: 1,
+            enabled: false
+        });
+    }
+
+    function _currentTick(address tokenA, address tokenB, uint24 fee) internal view returns (int24 tick) {
+        address poolAddr = IUniswapV3Factory(V3_FACTORY).getPool(tokenA, tokenB, fee);
+        require(poolAddr != address(0), "no V3 pool");
+        (, tick,,,,,) = IUniswapV3Pool(poolAddr).slot0();
+    }
+
+    function _alignUp(int24 v, int24 spacing) internal pure returns (int24) {
+        int24 mod = v % spacing;
+        if (mod == 0) return v;
+        return v > 0 ? v + (spacing - mod) : v - mod;
+    }
+
+    function _alignDown(int24 v, int24 spacing) internal pure returns (int24) {
+        int24 mod = v % spacing;
+        if (mod == 0) return v;
+        return v > 0 ? v - mod : v - (spacing + mod);
     }
 
     function _low(address a, address b) internal pure returns (address) {

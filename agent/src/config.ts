@@ -50,23 +50,27 @@ export interface AgentConfig {
 /** Map a volatility profile to a position-range width.
  *
  *  - `stable`: returned in *ticks* (tight band for pegged pairs).
- *  - everything else: returned as a price-band fraction (e.g. 0.10 = ±10%).
+ *  - everything else: returned as a price-band fraction (e.g. 0.05 = ±5%).
  *
  *  Conversion to actual tick offsets happens in `planner.ts`, where pool
  *  spacing is also factored in.
+ *
+ *  Widths are intentionally tight: the whole point of the agent is to give
+ *  the vault a *reason* to rebalance. Wider ranges = fewer rebalances =
+ *  less to demo and less LP fee capture from staying near spot.
  */
 export function widthForProfile(p: VolatilityProfile):
   | { kind: "ticks"; halfWidthTicks: number }
   | { kind: "pct"; halfWidthPct: number } {
   switch (p) {
     case "stable":
-      return { kind: "ticks", halfWidthTicks: 8 };
+      return { kind: "ticks", halfWidthTicks: 2 };
     case "low":
-      return { kind: "pct", halfWidthPct: 0.10 };
+      return { kind: "pct", halfWidthPct: 0.05 };
     case "mid":
-      return { kind: "pct", halfWidthPct: 0.25 };
+      return { kind: "pct", halfWidthPct: 0.10 };
     case "high":
-      return { kind: "pct", halfWidthPct: 0.50 };
+      return { kind: "pct", halfWidthPct: 0.20 };
   }
 }
 

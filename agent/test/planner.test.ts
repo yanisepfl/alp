@@ -104,16 +104,16 @@ describe("computeNewRange", () => {
   it("respects tickSpacing for stable profile", () => {
     const stablePool: PoolConfig = { ...POOL, profile: "stable", tickSpacing: 1 };
     const r = computeNewRange(stablePool, 0);
-    expect(r.newTickLower).toBe(-8);
-    expect(r.newTickUpper).toBe(8);
+    expect(r.newTickLower).toBe(-2);
+    expect(r.newTickUpper).toBe(2);
   });
 
-  it("computes ±25% as ~2231 ticks rounded to spacing for mid profile", () => {
+  it("computes ±10% as ~954 ticks rounded to spacing for mid profile", () => {
     const r = computeNewRange(POOL, 0);
-    // log_{1.0001}(1.25) ≈ 2231.43
-    // ceil(2231 / 10) * 10 = 2240
-    expect(r.newTickUpper).toBe(2240);
-    expect(r.newTickLower).toBe(-2240);
+    // log_{1.0001}(1.10) ≈ 953.10
+    // ceil(953 / 10) * 10 = 960
+    expect(r.newTickUpper).toBe(960);
+    expect(r.newTickLower).toBe(-960);
   });
 
   it("snaps the centre to a tickSpacing boundary", () => {

@@ -124,6 +124,30 @@ export const v3PoolAbi = [
   },
 ] as const;
 
+export const registryAbi = [
+  {
+    type: "function",
+    name: "getPool",
+    stateMutability: "view",
+    inputs: [{ name: "key", type: "bytes32" }],
+    outputs: [
+      {
+        type: "tuple",
+        components: [
+          { name: "adapter", type: "address" },
+          { name: "token0", type: "address" },
+          { name: "token1", type: "address" },
+          { name: "hooks", type: "address" },
+          { name: "fee", type: "uint24" },
+          { name: "tickSpacing", type: "int24" },
+          { name: "maxAllocationBps", type: "uint16" },
+          { name: "enabled", type: "bool" },
+        ],
+      },
+    ],
+  },
+] as const;
+
 export const v3FactoryAbi = [
   {
     type: "function",

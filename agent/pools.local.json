@@ -10,5 +10,17 @@
     "fee": 500,
     "tickSpacing": 10,
     "profile": "mid"
+  },
+  {
+    "label": "USDC/USDT 0.01%",
+    "lpKey": "0xf6cc83685d69ee89a8153c0dc91d28883777eada019f5028261d839449a685c6",
+    "urKey": "0x1a2acd7f36f5ef809207e3de6ace7f16a132b89ad336dff7419622e744d1b933",
+    "token0": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "token1": "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2",
+    "decimals0": 6,
+    "decimals1": 6,
+    "fee": 100,
+    "tickSpacing": 1,
+    "profile": "stable"
   }
 ]
