@@ -57,6 +57,14 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     /// hot path or the wind-down path.
     uint256 public constant MAX_POSITIONS_PER_POOL = 4;
 
+    /// @notice Max acceptable slippage on the auto-unwind non-base→base
+    /// swap, in basis points. The unwind path is triggered by a user's
+    /// withdraw shortfall; if the swap moves more than this against the
+    /// vault, the swap silently fails-soft and the user's withdraw
+    /// reverts with `InsufficientLiquidityAfterUnwind` rather than the
+    /// vault eating an arbitrary loss.
+    uint256 public constant UNWIND_SLIPPAGE_BPS = 200; // 2%
+
     PoolRegistry public immutable registry;
 
     /// @notice Per-tx swap cap, expressed in basis points of `totalAssets()`.
@@ -154,6 +162,7 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     error InsufficientLiquidityAfterUnwind(uint256 needed, uint256 available);
     error SameBlockMintAndRedeem();
     error InvalidFeeBps(uint256 bps);
+    error EthTransferFailed();
 
     modifier onlyAgent() {
         if (msg.sender != agent) revert NotAgent();
@@ -187,10 +196,12 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     /// native ETH credit the vault.
     receive() external payable {}
 
-    /// @notice Balance of `token` held by the vault. Native ETH resolves to
-    /// `address(this).balance`; ERC20s use `balanceOf`.
-    function _balanceOf(address token) internal view returns (uint256) {
-        return token == address(0) ? address(this).balance : IERC20(token).balanceOf(address(this));
+    /// @notice Balance of `token` held by `holder`. Native ETH (the V4
+    /// sentinel `address(0)`) resolves to `holder.balance`; ERC20s use
+    /// `balanceOf`. Called with `address(this)` for the vault's own
+    /// balances and with `receiver` for redeem slippage delta checks.
+    function _balanceOf(address token, address holder) internal view returns (uint256) {
+        return token == address(0) ? holder.balance : IERC20(token).balanceOf(holder);
     }
 
     // -------- Role management --------
@@ -365,7 +376,7 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         // attributes idle non-base. Matches the historic semantics of
         // _alreadyCounted but without the per-call O(N) scan.
         if (_valuationPoolByToken[nonBase] == key) {
-            uint256 idleNonBase = _balanceOf(nonBase);
+            uint256 idleNonBase = _balanceOf(nonBase, address(this));
             if (idleNonBase > 0) {
                 value += _convertToBase(idleNonBase, sqrtPriceX96, !baseIsToken0);
             }
@@ -490,6 +501,14 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     ) external onlyAgent whenNotPaused nonReentrant returns (uint256 amount0Out, uint256 amount1Out, bool burned) {
         PoolRegistry.Pool memory pool = _requireTrackedPool(poolKey);
         if (_positionIndex[poolKey][positionId] == 0) revert PositionNotTracked(poolKey, positionId);
+        // Harvest accrued fees across every tracked position before the
+        // remove. Otherwise Uniswap's decrease-liquidity action bundles
+        // principal + pending fees into a single transfer and the base
+        // portion of the fees would never reach the book rail. Iterating
+        // all pools is slightly more gas than harvesting just this one,
+        // but it keeps the bytecode footprint within EIP-170 and ensures
+        // book/market stay aligned across the agent's full surface.
+        _harvestAllPositions();
         (amount0Out, amount1Out, burned) =
             ILiquidityAdapter(pool.adapter).removeLiquidity(pool, positionId, liquidity, amount0Min, amount1Min, extra);
         // Tracking cleanup runs after the adapter call because we need its
@@ -595,6 +614,10 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         uint256 idsLen = ids.length;
         bytes memory extra = abi.encode(deadline, true);
 
+        // Single harvest across every tracked position. Same rationale as
+        // executeRemoveLiquidity: keeps bookTAV aligned with the base-side
+        // fees that the per-position remove would otherwise bundle and hide.
+        _harvestAllPositions();
         for (uint256 i; i < idsLen;) {
             uint128 liquidity = adapter_.getPositionLiquidity(pool, ids[i]);
             // A zero reading can mean the position was already burned OR
@@ -602,12 +625,16 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
             // Skip the position without untracking; a real burn will surface
             // via the next `executeRemoveLiquidity` and untrack cleanly.
             if (liquidity > 0) {
-                (uint256 amount0Out, uint256 amount1Out, bool burned) =
-                    adapter_.removeLiquidity(pool, ids[i], liquidity, 0, 0, extra);
-                if (burned) {
-                    _untrackPosition(poolKey, ids[i]);
-                }
-                emit LiquidityRemoved(poolKey, ids[i], amount0Out, amount1Out);
+                // try/catch so a single broken position (paused pool,
+                // malicious hook, NFT-state oddity) doesn't DoS the rest
+                // of the wind-down. Skipped positions can be investigated
+                // via PositionTracked events or swept manually.
+                try adapter_.removeLiquidity(pool, ids[i], liquidity, 0, 0, extra) returns (
+                    uint256 amount0Out, uint256 amount1Out, bool burned
+                ) {
+                    if (burned) _untrackPosition(poolKey, ids[i]);
+                    emit LiquidityRemoved(poolKey, ids[i], amount0Out, amount1Out);
+                } catch {}
             }
             unchecked {
                 ++i;
@@ -702,13 +729,43 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         uint256 supply = totalSupply();
         require(supply > 0 && shares > 0, "ALP: zero shares");
 
-        // Snapshot pre-call idle balances of every relevant token so we can
-        // distinguish "what was already in the vault" (user gets ratio of
-        // it) from "what the position peel just released" (user gets ALL
-        // of those, since the peel was sized to their share).
+        // Crystallize accrued LP fees into idle balance + bookTAV BEFORE
+        // snapshotting. Without this, Uniswap's decrease-liquidity action
+        // (called inside the per-position peel below) would settle 100%
+        // of pending fees on every touched position; `_settleInKind` would
+        // then route 100% of that fee inflow to the redeemer regardless of
+        // their share — a one-shot fee-extraction path. Harvest first → the
+        // peel only releases ratio*principal → fees get distributed strictly
+        // pro-rata.
+        _harvestAllPositions();
+
+        // Snapshot pre-peel idle balances. The base is snapshotted directly;
+        // every non-base token reachable via an active pool gets one entry
+        // in the parallel arrays so phase 2 can use the same delta+ratio
+        // formula `_settleInKind` uses for the base, instead of paying out
+        // ratio of the post-peel balance (which would silently dilute the
+        // redeemer's slice of the peeled portion).
         address base = asset();
         uint256 baseIdleBefore = IERC20(base).balanceOf(address(this));
         uint256 numPools = _activePoolKeys.length;
+        // Over-snapshot: one entry per active pool, valuation/orphan gate
+        // applied in the distribution loop. Cheaper bytecode than gating
+        // here too.
+        address[] memory nonBaseTokens = new address[](numPools);
+        uint256[] memory nonBaseIdleBefore = new uint256[](numPools);
+        for (uint256 i; i < numPools; ++i) {
+            PoolRegistry.Pool memory pool = _trackedPools[_activePoolKeys[i]];
+            address nb = (pool.token0 == base) ? pool.token1 : pool.token0;
+            nonBaseTokens[i] = nb;
+            nonBaseIdleBefore[i] = _balanceOf(nb, address(this));
+        }
+        // Snapshot receiver's pre-call balances for every expectedTokens
+        // entry so the slippage check can compare a real delta instead of
+        // the receiver's absolute holdings.
+        uint256[] memory receiverBalBefore = new uint256[](expectedTokens.length);
+        for (uint256 k; k < expectedTokens.length; ++k) {
+            receiverBalBefore[k] = _balanceOf(expectedTokens[k], receiver);
+        }
 
         // Phase 1: peel ratio × current liquidity from every tracked
         // position. This puts the user's slice of position-held tokens into
@@ -738,57 +795,37 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
 
         // Phase 2: settle. Burn shares first, decrement bookTAV
         // proportionally, then transfer the user's slice of every relevant
-        // token. Slice math:
-        //   user_amount = baseIdleBefore * ratio + (balance_now - baseIdleBefore)
-        // i.e. ratio of pre-existing idle + everything that the peel just
-        // added (which was already sized to the user's share).
+        // token. Slice math (per token):
+        //   user_amount = (now_balance - idleBefore) + ratio * idleBefore
+        // i.e. ALL of the peeled inflow (sized to user share) plus ratio of
+        // the pre-peel idle. Same formula on base and non-base rails so the
+        // user is never under-paid the slice they just earned.
         _burn(owner, shares);
-        bookTAV = bookTAV > Math.mulDiv(bookTAV, shares, supply, Math.Rounding.Floor)
-            ? bookTAV - Math.mulDiv(bookTAV, shares, supply, Math.Rounding.Floor)
-            : 0;
+        uint256 bookSlice = Math.mulDiv(bookTAV, shares, supply, Math.Rounding.Floor);
+        bookTAV = bookTAV > bookSlice ? bookTAV - bookSlice : 0;
 
         emit RedeemedInKind(owner, receiver, shares);
 
         // Distribute the base asset.
-        uint256 baseAmt = _settleInKind(base, baseIdleBefore, shares, supply, receiver);
-        // Distribute every non-base token associated with an active pool.
+        _settleInKind(base, baseIdleBefore, shares, supply, receiver);
+        // Distribute every non-base token whose valuation slot belongs to
+        // an active, non-orphaned pool. Same snapshot-aware delta+ratio
+        // formula as the base rail, so non-base redeemers aren't
+        // under-paid their peeled slice.
         for (uint256 i; i < numPools; ++i) {
             bytes32 key = _activePoolKeys[i];
-            PoolRegistry.Pool memory pool = _trackedPools[key];
-            address nonBase = (pool.token0 == base) ? pool.token1 : pool.token0;
-            // Skip duplicates — only the designated valuation pool for this
-            // token does the distribution.
-            if (_valuationPoolByToken[nonBase] != key) continue;
-            // Snapshot the non-base idle BEFORE peel for proper slicing.
-            // We don't have the snapshot, so approximate: send ratio of
-            // current balance. This slightly under-pays the redeemer for
-            // the peeled amount but never over-pays the vault.
-            uint256 nonBaseBalance = _balanceOf(nonBase);
-            uint256 nonBaseAmt = Math.mulDiv(nonBaseBalance, shares, supply);
-            if (nonBaseAmt > 0) {
-                if (nonBase == address(0)) {
-                    (bool ok,) = receiver.call{value: nonBaseAmt}("");
-                    require(ok, "ETH transfer failed");
-                } else {
-                    IERC20(nonBase).safeTransfer(receiver, nonBaseAmt);
-                }
-                emit InKindToken(nonBase, nonBaseAmt);
-            }
+            if (_orphanedPool[key]) continue;
+            address nb = nonBaseTokens[i];
+            if (_valuationPoolByToken[nb] != key) continue;
+            _settleInKind(nb, nonBaseIdleBefore[i], shares, supply, receiver);
         }
 
-        // Verify caller-supplied per-token minimums.
+        // Verify caller-supplied per-token minimums against the actual
+        // delta paid this call (not the receiver's absolute balance).
+        // address(0) routes through `.balance` so the slippage check works
+        // for native-ETH receivers too.
         for (uint256 k; k < expectedTokens.length; ++k) {
-            uint256 paid = expectedTokens[k] == base ? baseAmt : 0;
-            if (expectedTokens[k] != base) {
-                // Token was distributed in the loop above; we can't easily
-                // extract its paid amount without storing per-token, so
-                // re-check via the receiver's balance delta is awkward.
-                // Simpler honest check: require the receiver hold at least
-                // minAmounts[k] of expectedTokens[k] right now (assumes the
-                // receiver started with 0 of that token, which is the
-                // typical case for an EOA exit).
-                paid = IERC20(expectedTokens[k]).balanceOf(receiver);
-            }
+            uint256 paid = _balanceOf(expectedTokens[k], receiver) - receiverBalBefore[k];
             if (paid < minAmounts[k]) revert SlippageExceeded(paid, minAmounts[k]);
         }
     }
@@ -797,7 +834,7 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         internal
         returns (uint256 amount)
     {
-        uint256 nowBalance = IERC20(token).balanceOf(address(this));
+        uint256 nowBalance = _balanceOf(token, address(this));
         // Pre-existing idle: user gets ratio. Peeled-this-call: user gets
         // all (sized to their share already). Combined:
         //   ratio_idle + peeled = ratio*idle + (now - idle)
@@ -806,7 +843,12 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
             ? (nowBalance - idleBefore) + Math.mulDiv(idleBefore, shares, supply)
             : Math.mulDiv(nowBalance, shares, supply);
         if (amount > 0) {
-            IERC20(token).safeTransfer(receiver, amount);
+            if (token == address(0)) {
+                (bool ok,) = receiver.call{value: amount}("");
+                if (!ok) revert EthTransferFailed();
+            } else {
+                IERC20(token).safeTransfer(receiver, amount);
+            }
             emit InKindToken(token, amount);
         }
     }
@@ -862,12 +904,14 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     /// @inheritdoc ERC4626
     /// @dev User specifies a target asset count to receive. We gross-up the
     /// asset count so the share burn covers `assets + fee`; the fee stays
-    /// in the vault.
+    /// in the vault. Math is pinned to the redeem-direction rail
+    /// (`totalAssets() = MIN(book, market)`) so withdraw cannot be a
+    /// cheaper exit than the equivalent redeem when the rails are split.
     function previewWithdraw(uint256 assets) public view virtual override returns (uint256) {
         uint256 grossNeeded = entryExitFeeBps == 0
             ? assets
             : Math.mulDiv(assets, BPS_DENOM, BPS_DENOM - entryExitFeeBps, Math.Rounding.Ceil);
-        return _convertToShares(grossNeeded, Math.Rounding.Ceil);
+        return Math.mulDiv(grossNeeded, totalSupply() + 10 ** _decimalsOffset(), totalAssets() + 1, Math.Rounding.Ceil);
     }
 
     /// @inheritdoc ERC4626
@@ -908,11 +952,25 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         // gross `assets` is what crossed the door.
         bookTAV += assets;
         super._deposit(caller, receiver, assets, shares);
-        // Same-block lockout stamps both the receiver and the caller so the
-        // attacker can't bypass by routing the deposit to a fresh address
-        // while still planning to redeem old shares of their own.
-        _lastMintBlock[receiver] = block.number;
+        // Same-block lockout stamps the caller (the funding source) only.
+        // Letting third-party deposits poison a victim's slot is a free
+        // same-block-redeem grief vector; the receiver's slot is updated
+        // through `_update` below, so any shares they end up holding still
+        // propagate the caller's stamp via the share transfer.
         _lastMintBlock[caller] = block.number;
+    }
+
+    /// @dev Override OpenZeppelin's ERC20 transfer hook so the same-block
+    /// lockout follows the shares. Without this, an attacker could deposit
+    /// in block N, transfer the shares to a fresh address, and redeem in
+    /// the same block from the unstamped address — fully bypassing the
+    /// flash-loan defence.
+    function _update(address from, address to, uint256 value) internal override {
+        super._update(from, to, value);
+        if (from != address(0) && to != address(0)) {
+            uint256 fromStamp = _lastMintBlock[from];
+            if (fromStamp > _lastMintBlock[to]) _lastMintBlock[to] = fromStamp;
+        }
     }
 
     function _withdraw(address caller, address receiver, address owner_, uint256 assets, uint256 shares)
@@ -938,16 +996,15 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
             idle = IERC20(asset()).balanceOf(address(this));
             if (idle < assets) revert InsufficientLiquidityAfterUnwind(assets, idle);
         }
-        // Book rail decrements *proportionally* to share burn rather than by
-        // the absolute asset amount. This keeps book and market in lock-step
-        // ratios across redemptions; an absolute decrement would let book
-        // deplete to zero while market still held value, stranding residual
-        // value un-claimable for late redeemers.
-        uint256 supply = totalSupply();
-        if (supply > 0) {
-            uint256 bookSlice = Math.mulDiv(bookTAV, shares, supply, Math.Rounding.Floor);
-            bookTAV = bookTAV > bookSlice ? bookTAV - bookSlice : 0;
-        }
+        // Decrement bookTAV by the actual NET assets paid out (which is what
+        // crossed the boundary), not by `bookTAV * shares / supply`. With a
+        // non-zero entry/exit fee the share burn corresponds to gross =
+        // assets + fee; using the proportional formula would drop bookTAV by
+        // the full gross, hiding the retained fee from book and forcing
+        // late redeemers to settle on a stale rail. The retained fee stays
+        // as donated value to the remaining holders, with bookTAV catching
+        // up to the new per-share value automatically.
+        bookTAV = bookTAV > assets ? bookTAV - assets : 0;
         super._withdraw(caller, receiver, owner_, assets, shares);
     }
 
@@ -1047,24 +1104,36 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
                     if (toPeel == 0) toPeel = 1;
                 }
 
-                (,, bool burned) = adapter_.removeLiquidity(pool, ids[j], toPeel, 0, 0, removeExtra);
-                if (burned) {
-                    _untrackPosition(key, ids[j]);
-                }
+                // Wrap removeLiquidity in try/catch so a single broken pool
+                // (paused, malicious hook, NFT-state oddity) doesn't DoS
+                // every user's withdraw — the loop continues to other
+                // positions / pools and the outer `idle < assets` check at
+                // the call site surfaces the shortfall cleanly.
+                try adapter_.removeLiquidity(pool, ids[j], toPeel, 0, 0, removeExtra) returns (
+                    uint256, uint256, bool burned
+                ) {
+                    if (burned) _untrackPosition(key, ids[j]);
+                } catch {}
             }
 
-            // Swap any non-base proceeds in this pool back to base. Skipped
-            // silently on revert (dust below router minimum, etc.).
+            // Swap any non-base proceeds in this pool back to base. Slippage
+            // floor derived from this pool's spot ± UNWIND_SLIPPAGE_BPS so a
+            // third-party MEV bot can't sandwich the auto-unwind swap and
+            // siphon value from remaining holders. Skipped silently on
+            // revert (dust below router minimum, slippage trip, etc.).
             address nonBase = baseIsToken0 ? pool.token1 : pool.token0;
-            uint256 nonBaseBal = _balanceOf(nonBase);
+            uint256 nonBaseBal = _balanceOf(nonBase, address(this));
             if (nonBaseBal > 0) {
+                uint256 expected = _convertToBase(nonBaseBal, sqrtPriceX96, !baseIsToken0);
+                uint256 minOut = expected == 0 ? 1 : (expected * (BPS_DENOM - UNWIND_SLIPPAGE_BPS)) / BPS_DENOM;
+                if (minOut == 0) minOut = 1;
                 uint256 ethValue = 0;
                 if (nonBase == address(0)) {
                     ethValue = nonBaseBal;
                 } else {
                     IERC20(nonBase).forceApprove(pool.adapter, nonBaseBal);
                 }
-                try adapter_.swapExactIn{value: ethValue}(pool, nonBase, nonBaseBal, 1, swapExtra) {} catch {}
+                try adapter_.swapExactIn{value: ethValue}(pool, nonBase, nonBaseBal, minOut, swapExtra) {} catch {}
                 if (nonBase != address(0)) IERC20(nonBase).forceApprove(pool.adapter, 0);
             }
         }
@@ -1123,13 +1192,28 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         if (idx == 0) return;
 
         // If the pool we're dropping was the valuation source for its
-        // non-base token, clear the mapping. The next pool tracked that
-        // contains the same token will claim the slot.
+        // non-base token, try to hand the slot to a surviving pool that
+        // still pairs with the same token — otherwise the token's idle
+        // balance silently disappears from `_marketTAV` until/unless a
+        // fresh pool with that token gets registered.
         PoolRegistry.Pool memory pool = _trackedPools[key];
         address base = asset();
         address nonBase = pool.token0 == base ? pool.token1 : pool.token0;
         if (_valuationPoolByToken[nonBase] == key) {
             delete _valuationPoolByToken[nonBase];
+            // Scan remaining active pools (excluding the one being dropped,
+            // which is at index `idx-1` and will be removed below) for any
+            // that contains nonBase, and reassign the slot.
+            uint256 numActive = _activePoolKeys.length;
+            for (uint256 i; i < numActive; ++i) {
+                bytes32 candidate = _activePoolKeys[i];
+                if (candidate == key) continue;
+                PoolRegistry.Pool memory p = _trackedPools[candidate];
+                if (p.token0 == nonBase || p.token1 == nonBase) {
+                    _valuationPoolByToken[nonBase] = candidate;
+                    break;
+                }
+            }
         }
 
         uint256 last = _activePoolKeys.length - 1;

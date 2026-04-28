@@ -173,6 +173,12 @@ const erc20BalanceAbi = [
 ] as const;
 
 async function readErc20Balance(client: PublicClient, token: Address, holder: Address): Promise<bigint> {
+  // V4 native-ETH pools store currency0 = address(0); the vault holds those
+  // legs as plain ETH balance, not as an ERC20 entry. Route through eth_getBalance
+  // for the native sentinel, ERC20.balanceOf otherwise.
+  if (token === "0x0000000000000000000000000000000000000000") {
+    return client.getBalance({ address: holder });
+  }
   return client.readContract({ address: token, abi: erc20BalanceAbi, functionName: "balanceOf", args: [holder] });
 }
 

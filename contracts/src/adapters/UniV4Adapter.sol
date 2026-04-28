@@ -12,9 +12,12 @@ import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {Position} from "@uniswap/v4-core/src/libraries/Position.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
 import {PositionInfo, PositionInfoLibrary} from "@uniswap/v4-periphery/src/libraries/PositionInfoLibrary.sol";
+
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 
 import {IPermit2} from "permit2/src/interfaces/IPermit2.sol";
 
@@ -265,18 +268,63 @@ contract UniV4Adapter is ILiquidityAdapter {
         view
         returns (uint256 amount0, uint256 amount1)
     {
-        try positionManager.getPoolAndPositionInfo(positionId) returns (PoolKey memory, PositionInfo info) {
+        try positionManager.getPoolAndPositionInfo(positionId) returns (PoolKey memory key, PositionInfo info) {
             uint128 liquidity = positionManager.getPositionLiquidity(positionId);
             if (liquidity == 0) return (0, 0);
+            int24 tickLower = info.tickLower();
+            int24 tickUpper = info.tickUpper();
             (amount0, amount1) = LiquidityMath.getAmountsForLiquidity(
-                sqrtPriceX96,
-                TickMath.getSqrtPriceAtTick(info.tickLower()),
-                TickMath.getSqrtPriceAtTick(info.tickUpper()),
-                liquidity
+                sqrtPriceX96, TickMath.getSqrtPriceAtTick(tickLower), TickMath.getSqrtPriceAtTick(tickUpper), liquidity
             );
+            // Add accrued (uncollected) fees so marketTAV doesn't lag book
+            // between harvests. V4 stores fee-growth deltas (not owed
+            // amounts), so we recompute owed = (currentInside - lastInside)
+            // * liquidity / Q128 from PoolManager state via StateLibrary.
+            (uint256 fee0, uint256 fee1) = _accruedFees(key, positionId, tickLower, tickUpper, liquidity);
+            amount0 += fee0;
+            amount1 += fee1;
         } catch {
             return (0, 0);
         }
+    }
+
+    /// @dev Read pending (uncollected) LP fees for a V4 position. Returns
+    /// (0, 0) if any of the underlying state reads revert (e.g. pool not
+    /// initialised yet) so callers iterating positions never bubble a
+    /// failure.
+    function _accruedFees(PoolKey memory key, uint256 positionId, int24 tickLower, int24 tickUpper, uint128 liquidity)
+        internal
+        view
+        returns (uint256 fee0, uint256 fee1)
+    {
+        PoolId id = key.toId();
+        bytes32 positionKey =
+            Position.calculatePositionKey(address(positionManager), tickLower, tickUpper, bytes32(positionId));
+        try this._feeGrowthAndPosition(id, tickLower, tickUpper, positionKey) returns (
+            uint256 currentInside0, uint256 currentInside1, uint256 lastInside0, uint256 lastInside1
+        ) {
+            unchecked {
+                uint256 delta0 = currentInside0 - lastInside0;
+                uint256 delta1 = currentInside1 - lastInside1;
+                uint256 q128 = 1 << 128;
+                fee0 = FullMath.mulDiv(delta0, liquidity, q128);
+                fee1 = FullMath.mulDiv(delta1, liquidity, q128);
+            }
+        } catch {
+            return (0, 0);
+        }
+    }
+
+    /// @dev External wrapper so the StateLibrary calls can be try/catched
+    /// from `_accruedFees` even though they're internal-only views.
+    function _feeGrowthAndPosition(PoolId id, int24 tickLower, int24 tickUpper, bytes32 positionKey)
+        external
+        view
+        returns (uint256 currentInside0, uint256 currentInside1, uint256 lastInside0, uint256 lastInside1)
+    {
+        require(msg.sender == address(this), "internal");
+        (currentInside0, currentInside1) = poolManager.getFeeGrowthInside(id, tickLower, tickUpper);
+        (, lastInside0, lastInside1) = poolManager.getPositionInfo(id, positionKey);
     }
 
     function poolKeyForPosition(uint256 positionId) external view returns (bytes32) {

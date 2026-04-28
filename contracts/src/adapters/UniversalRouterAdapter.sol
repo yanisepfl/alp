@@ -57,6 +57,7 @@ contract UniversalRouterAdapter is ILiquidityAdapter {
     error InsufficientOutput(uint256 minOut, uint256 actualOut);
     error PoolNotFound();
     error UnexpectedEth();
+    error UnexpectedAdapterBalance();
 
     modifier onlyVault() {
         if (msg.sender != vault) revert NotVault();
@@ -85,6 +86,15 @@ contract UniversalRouterAdapter is ILiquidityAdapter {
     ) external payable onlyVault returns (uint256 amountOut) {
         if (tokenIn != pool.token0 && tokenIn != pool.token1) revert UnknownToken(tokenIn);
         address tokenOut = tokenIn == pool.token0 ? pool.token1 : pool.token0;
+
+        // Belt-and-suspenders against slippage-bypass-via-donation: the
+        // adapter holds nothing between calls, so any pre-call balance of
+        // tokenIn or tokenOut is either an attacker-planted donation or a
+        // bug. Either way, refusing to swap when the adapter is "dirty"
+        // closes the loophole where attacker pre-sends tokenOut to inflate
+        // the post-swap balance delta and silently bypass amountOutMin.
+        if (_balanceOfHolder(tokenIn, address(this)) != 0) revert UnexpectedAdapterBalance();
+        if (_balanceOfHolder(tokenOut, address(this)) != 0) revert UnexpectedAdapterBalance();
 
         (bytes memory commands, bytes[] memory inputs, uint256 deadline) = abi.decode(extra, (bytes, bytes[], uint256));
 

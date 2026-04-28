@@ -139,13 +139,10 @@ contract LocalBootstrap is Script {
 
         // URAdapter swap-only entries. Two ETH↔USDC entries — WETH for V3,
         // native ETH for V4.
-        sUrWethKey =
-            sRegistry.addPool(_swapPool(address(sUrAdapter), _low(USDC, WETH), _high(USDC, WETH), 500, 10));
+        sUrWethKey = sRegistry.addPool(_swapPool(address(sUrAdapter), _low(USDC, WETH), _high(USDC, WETH), 500, 10));
         sUrEthKey = sRegistry.addPool(_swapPool(address(sUrAdapter), ETH_NATIVE, USDC, 500, 10));
-        sUrCbbtcKey =
-            sRegistry.addPool(_swapPool(address(sUrAdapter), _low(USDC, CBBTC), _high(USDC, CBBTC), 500, 10));
-        sUrUsdtKey =
-            sRegistry.addPool(_swapPool(address(sUrAdapter), _low(USDC, USDT), _high(USDC, USDT), 100, 1));
+        sUrCbbtcKey = sRegistry.addPool(_swapPool(address(sUrAdapter), _low(USDC, CBBTC), _high(USDC, CBBTC), 500, 10));
+        sUrUsdtKey = sRegistry.addPool(_swapPool(address(sUrAdapter), _low(USDC, USDT), _high(USDC, USDT), 100, 1));
 
         // Per-tx swap cap = 50% of TAV. Worst case: full unwind of the
         // 100%-capped USDT pool needs ~50% swap; volatile (30% cap) at most
@@ -234,18 +231,19 @@ contract LocalBootstrap is Script {
         // ±~6% band around current spot (10 spacings of 60), in-range for
         // normal market conditions. Sized at 0.5 ETH ≈ $1.7k so the resulting
         // V4 position fits under the pool's 30% allocation cap on a $10k vault.
-        uint160 sqrtPrice = ILiquidityAdapter(address(v4Adapter)).getSpotSqrtPriceX96(
-            PoolRegistry.Pool({
-                adapter: address(v4Adapter),
-                token0: ETH_NATIVE,
-                token1: USDC,
-                hooks: V4_HOOK,
-                fee: V4_HOOK_FEE,
-                tickSpacing: V4_HOOK_TICK_SPACING,
-                maxAllocationBps: 3_000,
-                enabled: true
-            })
-        );
+        uint160 sqrtPrice = ILiquidityAdapter(address(v4Adapter))
+            .getSpotSqrtPriceX96(
+                PoolRegistry.Pool({
+                    adapter: address(v4Adapter),
+                    token0: ETH_NATIVE,
+                    token1: USDC,
+                    hooks: V4_HOOK,
+                    fee: V4_HOOK_FEE,
+                    tickSpacing: V4_HOOK_TICK_SPACING,
+                    maxAllocationBps: 3_000,
+                    enabled: true
+                })
+            );
         int24 tick = _tickFromSqrtPriceX96(sqrtPrice);
         int24 lower = _alignDown(tick - 600, V4_HOOK_TICK_SPACING);
         int24 upper = _alignUp(tick + 600, V4_HOOK_TICK_SPACING);

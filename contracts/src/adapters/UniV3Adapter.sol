@@ -76,12 +76,6 @@ contract UniV3Adapter is ILiquidityAdapter {
         IERC20(pool.token0).safeTransferFrom(msg.sender, address(this), amount0Desired);
         IERC20(pool.token1).safeTransferFrom(msg.sender, address(this), amount1Desired);
 
-        // Track balance-before so the refund step works correctly with
-        // fee-on-transfer non-base tokens (where `amountUsed` reported by
-        // NPM does not match the actual amount removed from this contract).
-        uint256 bal0Before = IERC20(pool.token0).balanceOf(address(this));
-        uint256 bal1Before = IERC20(pool.token1).balanceOf(address(this));
-
         IERC20(pool.token0).forceApprove(address(npm), amount0Desired);
         IERC20(pool.token1).forceApprove(address(npm), amount1Desired);
 
@@ -117,9 +111,14 @@ contract UniV3Adapter is ILiquidityAdapter {
         IERC20(pool.token0).forceApprove(address(npm), 0);
         IERC20(pool.token1).forceApprove(address(npm), 0);
 
-        uint256 leftover0 = IERC20(pool.token0).balanceOf(address(this)) - (bal0Before - amount0Desired);
-        uint256 leftover1 = IERC20(pool.token1).balanceOf(address(this)) - (bal1Before - amount1Desired);
+        // Refund anything left on the adapter after NPM consumed its share —
+        // works for both standard ERC20s and fee-on-transfer tokens (where
+        // `amountUsed` from NPM does not equal the actual balance delta on
+        // this contract). The adapter never custodies value between calls,
+        // so any residual balance belongs to the vault.
+        uint256 leftover0 = IERC20(pool.token0).balanceOf(address(this));
         if (leftover0 > 0) IERC20(pool.token0).safeTransfer(msg.sender, leftover0);
+        uint256 leftover1 = IERC20(pool.token1).balanceOf(address(this));
         if (leftover1 > 0) IERC20(pool.token1).safeTransfer(msg.sender, leftover1);
     }
 
@@ -272,11 +271,25 @@ contract UniV3Adapter is ILiquidityAdapter {
             uint128,
             uint128
         ) {
-            // Match PoolRegistry.poolKey for V3: hooks=0, tickSpacing=0.
-            return keccak256(abi.encode(address(this), token0, token1, fee, int24(0), address(0)));
+            // Match PoolRegistry.poolKey for V3: derive the canonical
+            // tickSpacing for the fee tier so the computed key matches what
+            // the guardian registered. (Registry forbids tickSpacing == 0.)
+            int24 spacing = _v3SpacingForFee(fee);
+            return keccak256(abi.encode(address(this), token0, token1, fee, spacing, address(0)));
         } catch {
             return bytes32(0);
         }
+    }
+
+    /// @dev Internal mirror of `v3TickSpacingForFee` for use by view methods.
+    /// Returns 0 for non-standard fees so the resulting key is obviously
+    /// invalid rather than reverting (callers iterate; reverts would brick).
+    function _v3SpacingForFee(uint24 fee) internal pure returns (int24) {
+        if (fee == 100) return 1;
+        if (fee == 500) return 10;
+        if (fee == 3000) return 60;
+        if (fee == 10_000) return 200;
+        return 0;
     }
 
     function getSpotSqrtPriceX96(PoolRegistry.Pool calldata pool) external view returns (uint160 sqrtPriceX96) {
