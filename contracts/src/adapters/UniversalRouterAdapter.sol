@@ -75,7 +75,7 @@ contract UniversalRouterAdapter is ILiquidityAdapter {
         uint256 amountIn,
         uint256 amountOutMin,
         bytes calldata extra
-    ) external onlyVault returns (uint256 amountOut) {
+    ) external payable onlyVault returns (uint256 amountOut) {
         if (tokenIn != pool.token0 && tokenIn != pool.token1) revert UnknownToken(tokenIn);
         address tokenOut = tokenIn == pool.token0 ? pool.token1 : pool.token0;
 
@@ -114,7 +114,7 @@ contract UniversalRouterAdapter is ILiquidityAdapter {
 
     function addLiquidity(PoolRegistry.Pool calldata, uint256, uint256, uint256, uint256, bytes calldata)
         external
-        pure
+        payable
         returns (uint256, uint128, uint256, uint256)
     {
         revert NotSupported();

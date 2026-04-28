@@ -59,7 +59,12 @@ contract UniV3Adapter is ILiquidityAdapter {
         uint256 amount0Min,
         uint256 amount1Min,
         bytes calldata extra
-    ) external onlyVault returns (uint256 positionId, uint128 liquidity, uint256 amount0Used, uint256 amount1Used) {
+    )
+        external
+        payable
+        onlyVault
+        returns (uint256 positionId, uint128 liquidity, uint256 amount0Used, uint256 amount1Used)
+    {
         (int24 tickLower, int24 tickUpper, uint256 deadline, uint256 existingPositionId) =
             abi.decode(extra, (int24, int24, uint256, uint256));
 
@@ -172,7 +177,7 @@ contract UniV3Adapter is ILiquidityAdapter {
         uint256 amountIn,
         uint256 amountOutMin,
         bytes calldata extra
-    ) external onlyVault returns (uint256 amountOut) {
+    ) external payable onlyVault returns (uint256 amountOut) {
         if (tokenIn != pool.token0 && tokenIn != pool.token1) revert UnknownToken(tokenIn);
         address tokenOut = (tokenIn == pool.token0) ? pool.token1 : pool.token0;
 

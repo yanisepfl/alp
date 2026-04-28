@@ -24,6 +24,7 @@ RPC=http://localhost:8545
 USDC=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
 DEPLOYER=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
 SEED_USDC=10000000000  # 10k USDC (6 decimals)
+SEED_ETH_HEX=0x56bc75e2d63100000  # 100 ETH for the deployer (covers gas + V4 native-ETH seed)
 
 : "${BASE_RPC_URL:?BASE_RPC_URL must be set (e.g. https://mainnet.base.org)}"
 
@@ -71,6 +72,10 @@ fund_token() {
   return 1
 }
 fund_token "$DEPLOYER" "$SEED_USDC"
+
+# Top up DEPLOYER ETH so V4 native-ETH seed has plenty of headroom
+cast rpc anvil_setBalance "$DEPLOYER" "$SEED_ETH_HEX" --rpc-url $RPC >/dev/null
+echo "[bootstrap] funded DEPLOYER with 100 ETH (for gas + native-ETH seed)"
 
 echo "[bootstrap] running LocalBootstrap.s.sol against the fork..."
 cd "$CONTRACTS"

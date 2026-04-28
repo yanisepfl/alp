@@ -15,6 +15,9 @@ import {PoolRegistry} from "../src/PoolRegistry.sol";
 import {UniV3Adapter} from "../src/adapters/UniV3Adapter.sol";
 import {UniV4Adapter} from "../src/adapters/UniV4Adapter.sol";
 import {UniversalRouterAdapter} from "../src/adapters/UniversalRouterAdapter.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+
+import {ILiquidityAdapter} from "../src/interfaces/ILiquidityAdapter.sol";
 import {INonfungiblePositionManager} from "../src/interfaces/external/INonfungiblePositionManager.sol";
 import {ISwapRouter02} from "../src/interfaces/external/ISwapRouter02.sol";
 import {IUniswapV3Factory} from "../src/interfaces/external/IUniswapV3Factory.sol";
@@ -22,15 +25,20 @@ import {IUniswapV3Pool} from "../src/interfaces/external/IUniswapV3Pool.sol";
 import {IUniversalRouter} from "../src/interfaces/external/IUniversalRouter.sol";
 
 /// @notice One-shot bootstrap of the ALP stack against an Anvil fork of Base
-/// mainnet. Deploys all contracts, registers the V3 USDC/cbBTC + V3 USDC/USDT
-/// LP pools and three URAdapter swap entries, allowlists the Alphix hook
-/// (for future use once native-ETH support lands in V4Adapter), and seeds an
-/// in-range V3 USDC/cbBTC position so the agent has something to monitor.
+/// mainnet. Deploys all contracts, registers a V4 hooked native-ETH/USDC
+/// pool plus V3 USDC/cbBTC and V3 USDC/USDT LP pools and three URAdapter
+/// swap entries. Seeds three demo positions:
+///   (a) cbBTC out-of-range above current tick — single-sided USDC, designed
+///       to exercise the agent's swap-then-add rebalance path.
+///   (b) USDT in-range — wide ±50 ticks, the "well-behaved" counterpart.
+///   (c) V4 native-ETH/USDC — proves the V4 native-ETH plumbing end-to-end
+///       (vault holds native ETH, msg.value forwarded through the adapter
+///       to V4's SETTLE).
 ///
 /// The script does NOT fund USDC itself — `scripts/local-fork.sh` pre-funds
 /// the deployer via anvil storage manipulation before running the script.
 /// The deployer then `vault.deposit`s the USDC inside this script, after
-/// which the agent (anvil account 1) opens the position.
+/// which the agent (anvil account 1) opens the positions.
 ///
 /// Output: prints every deployed address + each registered pool key in a
 /// `# AGENT_ENV` block ready to be copy-pasted into `agent/.env`.
@@ -52,10 +60,12 @@ contract LocalBootstrap is Script {
     address constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
     address constant UNIVERSAL_ROUTER = 0x6fF5693b99212Da76ad316178A184AB56D299b43;
 
-    // Alphix V4 ETH/USDC pool config from the team brief
-    address constant ALPHIX_HOOK = 0x7cBbfF9C4fcd74B221C535F4fB4B1Db04F1B9044;
-    int24 constant ALPHIX_TICK_SPACING = 60;
-    uint24 constant ALPHIX_FEE = 499;
+    // V4 hooked ETH/USDC pool. fee = DYNAMIC_FEE_FLAG (0x800000) tells the
+    // V4 PoolManager that the hook supplies LP fees per swap; the static
+    // initial value (499 = 0.0499%) sits inside the hook, not the PoolKey.
+    address constant V4_HOOK = 0x7cBbfF9C4fcd74B221C535F4fB4B1Db04F1B9044;
+    int24 constant V4_HOOK_TICK_SPACING = 60;
+    uint24 constant V4_HOOK_FEE = 0x800000;
 
     // Anvil default funded accounts
     address constant DEPLOYER = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
@@ -91,7 +101,7 @@ contract LocalBootstrap is Script {
             IUniversalRouter(UNIVERSAL_ROUTER), IPermit2(PERMIT2), IUniswapV3Factory(V3_FACTORY), address(vault)
         );
 
-        registry.setHookAllowed(ALPHIX_HOOK, true);
+        registry.setHookAllowed(V4_HOOK, true);
         vault.bootstrapAdapter(V3_NPM, address(v3Adapter));
         vault.bootstrapAdapter(V4_POSITION_MANAGER, address(v4Adapter));
 
@@ -99,11 +109,10 @@ contract LocalBootstrap is Script {
         // Per-pool allocation caps modeled loosely on JLP/GLP composition:
         // stables can absorb 100% of the vault, volatile pairs are capped at
         // 30% so a single position can't dominate.
-        // Alphix V4 ETH/USDC pool (hook allowlisted above; uses native ETH
-        // as token0). Registry accepts it; opening positions there requires
-        // the V4 adapter's native-ETH path (separate work item).
-        bytes32 alphixKey = registry.addPool(
-            _lpPool(address(v4Adapter), ETH_NATIVE, USDC, ALPHIX_FEE, ALPHIX_TICK_SPACING, ALPHIX_HOOK, 3_000)
+        // V4 hooked ETH/USDC pool with token0 = native ETH (the V4 sentinel
+        // address(0)). Hook is owner-allowlisted above.
+        bytes32 v4HookKey = registry.addPool(
+            _lpPool(address(v4Adapter), ETH_NATIVE, USDC, V4_HOOK_FEE, V4_HOOK_TICK_SPACING, V4_HOOK, 3_000)
         );
         bytes32 cbbtcKey = registry.addPool(
             _lpPool(address(v3Adapter), _low(USDC, CBBTC), _high(USDC, CBBTC), 500, 10, address(0), 3_000)
@@ -124,6 +133,13 @@ contract LocalBootstrap is Script {
         // USDC and DEPLOYER holds shares.
         IERC20(USDC).approve(address(vault), SEED_USDC);
         vault.deposit(SEED_USDC, DEPLOYER);
+        // Top up the vault with native ETH for the V4 native-pool seed.
+        // Real flow: agent swaps USDC → ETH via UR. For the bootstrap demo
+        // we send ETH directly to keep the seed deterministic. 0.5 ETH ≈
+        // $1700 keeps the resulting V4 position under the 30% pool cap on
+        // a $10k vault.
+        (bool ok,) = address(vault).call{value: 0.5 ether}("");
+        require(ok, "vault ETH funding failed");
         vm.stopBroadcast();
 
         // -------- Phase 3: agent seeds two demo positions --------
@@ -167,6 +183,54 @@ contract LocalBootstrap is Script {
         vault.executeAddLiquidity(
             usdtKey, usdtAdd0, usdtAdd1, 0, 0, abi.encode(usdtLower, usdtUpper, block.timestamp + 600, uint256(0))
         );
+
+        // (c) V4 native-ETH pool. Seed an in-range position spanning ±5%.
+        // V4 returns the pool's current tick via PoolManager.getSlot0; we
+        // hard-code a wide ±~10% band here for simplicity since the V4
+        // adapter doesn't expose currentTick yet.
+        // Position seed: 2 ETH + matching USDC at the current spot.
+        // Alphix pool: token0 = native ETH, token1 = USDC.
+        // tickSpacing = 60.
+        uint160 v4SqrtPrice = ILiquidityAdapter(address(v4Adapter))
+            .getSpotSqrtPriceX96(
+                PoolRegistry.Pool({
+                    adapter: address(v4Adapter),
+                    token0: ETH_NATIVE,
+                    token1: USDC,
+                    hooks: V4_HOOK,
+                    fee: V4_HOOK_FEE,
+                    tickSpacing: V4_HOOK_TICK_SPACING,
+                    maxAllocationBps: 3_000,
+                    enabled: true
+                })
+            );
+        // Convert sqrtPriceX96 → tick via TickMath. Inline approximation:
+        // tick = log_{sqrt(1.0001)}(sqrtPriceX96 / Q96) * 2. Simpler: encode
+        // a wide band [tick - 600, tick + 600] (≈ ±6% on ETH, generously
+        // in-range under any normal market). For reproducibility, we let the
+        // V4 PositionManager compute liquidity from the desired amounts.
+        // Use ±600 ticks (10 spacings of 60) around the current sqrtPrice's
+        // tick; we approximate by bracketing widely.
+        int24 ethTick = _tickFromSqrtPriceX96(v4SqrtPrice);
+        int24 ethLower = _alignDown(ethTick - 600, V4_HOOK_TICK_SPACING);
+        int24 ethUpper = _alignUp(ethTick + 600, V4_HOOK_TICK_SPACING);
+        uint256 ethAmount = 0.5 ether;
+        // Cap USDC side at the value of the ETH side so the V4 mint doesn't
+        // try to consume more than the new position can absorb at this
+        // tight range. ETH price ≈ vault.totalAssets - balances; we approximate
+        // by using a fixed ratio (~$3500/ETH) so the seed stays deterministic.
+        uint256 vaultUsdcForEth = ethAmount * 3500 / 1e12; // 0.5 ETH * 3500 / 1e12 = 1.75e6 = 1.75 USDC? need scaling
+        vaultUsdcForEth = (ethAmount * 3500e6) / 1e18; // proper scaling: ETH amount × USDC price × 1e6 / 1e18
+        // V4 PoolKey orders by Currency.unwrap; native ETH (0) < USDC.
+        // amount0 = ETH, amount1 = USDC.
+        vault.executeAddLiquidity(
+            v4HookKey,
+            ethAmount,
+            vaultUsdcForEth,
+            0,
+            0,
+            abi.encode(ethLower, ethUpper, block.timestamp + 600, uint256(0))
+        );
         vm.stopBroadcast();
 
         // -------- Phase 4: print env block --------
@@ -181,7 +245,7 @@ contract LocalBootstrap is Script {
         console2.log("AGENT_PRIVATE_KEY=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d");
         console2.log("");
         console2.log("# Pool keys");
-        console2.log("ALPHIX_V4_ETH_USDC_KEY=", uint256(alphixKey));
+        console2.log("V4_ETH_USDC_KEY=", uint256(v4HookKey));
         console2.log("V3_USDC_CBBTC_KEY=  ", uint256(cbbtcKey));
         console2.log("V3_USDC_USDT_KEY=   ", uint256(usdtKey));
         console2.log("UR_USDC_WETH_KEY=   ", uint256(urEthKey));
@@ -239,6 +303,10 @@ contract LocalBootstrap is Script {
         int24 mod = v % spacing;
         if (mod == 0) return v;
         return v > 0 ? v + (spacing - mod) : v - mod;
+    }
+
+    function _tickFromSqrtPriceX96(uint160 sqrtPriceX96) internal pure returns (int24) {
+        return TickMath.getTickAtSqrtPrice(sqrtPriceX96);
     }
 
     function _alignDown(int24 v, int24 spacing) internal pure returns (int24) {

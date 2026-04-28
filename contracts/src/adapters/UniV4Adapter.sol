@@ -93,20 +93,35 @@ contract UniV4Adapter is ILiquidityAdapter {
         uint256 amount0Min,
         uint256 amount1Min,
         bytes calldata extra
-    ) external onlyVault returns (uint256 positionId, uint128 liquidity, uint256 amount0Used, uint256 amount1Used) {
+    )
+        external
+        payable
+        onlyVault
+        returns (uint256 positionId, uint128 liquidity, uint256 amount0Used, uint256 amount1Used)
+    {
         AddLiquidityVars memory v;
         (v.tickLower, v.tickUpper, v.deadline, v.existingPositionId) =
             abi.decode(extra, (int24, int24, uint256, uint256));
 
-        IERC20(pool.token0).safeTransferFrom(msg.sender, address(this), amount0Desired);
-        IERC20(pool.token1).safeTransferFrom(msg.sender, address(this), amount1Desired);
-
-        _ensurePermit2(pool.token0);
-        _ensurePermit2(pool.token1);
+        // Pull tokens. Native ETH (token == address(0)) arrives as msg.value
+        // and needs no transfer or Permit2 setup. ERC20s use the standard
+        // transferFrom + lazy Permit2 bootstrap.
+        if (pool.token0 == address(0)) {
+            require(msg.value == amount0Desired, "ETH value mismatch");
+        } else {
+            IERC20(pool.token0).safeTransferFrom(msg.sender, address(this), amount0Desired);
+            _ensurePermit2(pool.token0);
+        }
+        if (pool.token1 == address(0)) {
+            require(msg.value == amount1Desired, "ETH value mismatch");
+        } else {
+            IERC20(pool.token1).safeTransferFrom(msg.sender, address(this), amount1Desired);
+            _ensurePermit2(pool.token1);
+        }
 
         v.poolKey = _toPoolKey(pool);
-        v.bal0Before = IERC20(pool.token0).balanceOf(address(this));
-        v.bal1Before = IERC20(pool.token1).balanceOf(address(this));
+        v.bal0Before = _selfBalance(pool.token0);
+        v.bal1Before = _selfBalance(pool.token1);
 
         liquidity = _quoteLiquidity(v.poolKey, v.tickLower, v.tickUpper, amount0Desired, amount1Desired);
         if (liquidity == 0) revert InsufficientLiquidityComputed();
@@ -119,13 +134,13 @@ contract UniV4Adapter is ILiquidityAdapter {
             _increaseLiquidity(v.poolKey, v.existingPositionId, liquidity, amount0Desired, amount1Desired, v.deadline);
         }
 
-        uint256 bal0After = IERC20(pool.token0).balanceOf(address(this));
-        uint256 bal1After = IERC20(pool.token1).balanceOf(address(this));
+        uint256 bal0After = _selfBalance(pool.token0);
+        uint256 bal1After = _selfBalance(pool.token1);
         amount0Used = v.bal0Before - bal0After;
         amount1Used = v.bal1Before - bal1After;
         if (amount0Used < amount0Min || amount1Used < amount1Min) revert InsufficientLiquidityComputed();
-        if (bal0After > 0) IERC20(pool.token0).safeTransfer(msg.sender, bal0After);
-        if (bal1After > 0) IERC20(pool.token1).safeTransfer(msg.sender, bal1After);
+        if (bal0After > 0) _sendTo(pool.token0, msg.sender, bal0After);
+        if (bal1After > 0) _sendTo(pool.token1, msg.sender, bal1After);
     }
 
     function removeLiquidity(
@@ -164,13 +179,13 @@ contract UniV4Adapter is ILiquidityAdapter {
             params[1] = abi.encode(currency0, currency1, msg.sender);
         }
 
-        uint256 bal0Before = IERC20(pool.token0).balanceOf(msg.sender);
-        uint256 bal1Before = IERC20(pool.token1).balanceOf(msg.sender);
+        uint256 bal0Before = _balanceOfHolder(pool.token0, msg.sender);
+        uint256 bal1Before = _balanceOfHolder(pool.token1, msg.sender);
 
         positionManager.modifyLiquidities(abi.encode(actions, params), deadline);
 
-        amount0Out = IERC20(pool.token0).balanceOf(msg.sender) - bal0Before;
-        amount1Out = IERC20(pool.token1).balanceOf(msg.sender) - bal1Before;
+        amount0Out = _balanceOfHolder(pool.token0, msg.sender) - bal0Before;
+        amount1Out = _balanceOfHolder(pool.token1, msg.sender) - bal1Before;
     }
 
     function collectFees(PoolRegistry.Pool calldata pool, uint256 positionId)
@@ -187,13 +202,13 @@ contract UniV4Adapter is ILiquidityAdapter {
         params[0] = abi.encode(positionId, uint128(0), uint128(0), uint128(0), bytes(""));
         params[1] = abi.encode(currency0, currency1, msg.sender);
 
-        uint256 bal0Before = IERC20(pool.token0).balanceOf(msg.sender);
-        uint256 bal1Before = IERC20(pool.token1).balanceOf(msg.sender);
+        uint256 bal0Before = _balanceOfHolder(pool.token0, msg.sender);
+        uint256 bal1Before = _balanceOfHolder(pool.token1, msg.sender);
 
         positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp);
 
-        amount0 = IERC20(pool.token0).balanceOf(msg.sender) - bal0Before;
-        amount1 = IERC20(pool.token1).balanceOf(msg.sender) - bal1Before;
+        amount0 = _balanceOfHolder(pool.token0, msg.sender) - bal0Before;
+        amount1 = _balanceOfHolder(pool.token1, msg.sender) - bal1Before;
     }
 
     function swapExactIn(
@@ -202,7 +217,7 @@ contract UniV4Adapter is ILiquidityAdapter {
         uint256 amountIn,
         uint256 amountOutMin,
         bytes calldata extra
-    ) external onlyVault returns (uint256 amountOut) {
+    ) external payable onlyVault returns (uint256 amountOut) {
         if (tokenIn != pool.token0 && tokenIn != pool.token1) revert UnknownToken(tokenIn);
         bool zeroForOne = (tokenIn == pool.token0);
         address tokenOut = zeroForOne ? pool.token1 : pool.token0;
@@ -212,14 +227,21 @@ contract UniV4Adapter is ILiquidityAdapter {
         // payloads to V3 and V4 adapters without conditional encoding.
         uint256 deadline = extra.length == 0 ? block.timestamp : abi.decode(extra, (uint256));
 
-        IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
-        _ensureRouterApproval(tokenIn);
+        // Native ETH input arrives as msg.value; ERC20 input is pulled.
+        if (tokenIn == address(0)) {
+            require(msg.value == amountIn, "ETH value mismatch");
+        } else {
+            IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
+            _ensureRouterApproval(tokenIn);
+        }
 
         PoolKey memory key = _toPoolKey(pool);
 
-        uint256 balBefore = IERC20(tokenOut).balanceOf(msg.sender);
-        swapRouter.swapExactTokensForTokens(amountIn, amountOutMin, zeroForOne, key, "", msg.sender, deadline);
-        amountOut = IERC20(tokenOut).balanceOf(msg.sender) - balBefore;
+        uint256 balBefore = _balanceOfHolder(tokenOut, msg.sender);
+        swapRouter.swapExactTokensForTokens{value: tokenIn == address(0) ? amountIn : 0}(
+            amountIn, amountOutMin, zeroForOne, key, "", msg.sender, deadline
+        );
+        amountOut = _balanceOfHolder(tokenOut, msg.sender) - balBefore;
     }
 
     function getPositionAmounts(PoolRegistry.Pool calldata pool, uint256 positionId)
@@ -361,7 +383,7 @@ contract UniV4Adapter is ILiquidityAdapter {
         params[2] = abi.encode(key.currency0, address(this));
         params[3] = abi.encode(key.currency1, address(this));
 
-        positionManager.modifyLiquidities(abi.encode(actions, params), deadline);
+        positionManager.modifyLiquidities{value: _ethValueFor(key)}(abi.encode(actions, params), deadline);
     }
 
     function _increaseLiquidity(
@@ -381,7 +403,40 @@ contract UniV4Adapter is ILiquidityAdapter {
         params[2] = abi.encode(key.currency0, address(this));
         params[3] = abi.encode(key.currency1, address(this));
 
-        positionManager.modifyLiquidities(abi.encode(actions, params), deadline);
+        positionManager.modifyLiquidities{value: _ethValueFor(key)}(abi.encode(actions, params), deadline);
+    }
+
+    /// @dev Forward the adapter's current native-ETH balance with the V4 call
+    /// when one of the pool's currencies is native. The vault always sends
+    /// the exact amount as msg.value beforehand, so address(this).balance
+    /// equals what the V4 SETTLE expects. Returns 0 for ERC20-only pools.
+    function _ethValueFor(PoolKey memory key) internal view returns (uint256) {
+        if (Currency.unwrap(key.currency0) == address(0) || Currency.unwrap(key.currency1) == address(0)) {
+            return address(this).balance;
+        }
+        return 0;
+    }
+
+    /// @dev Receive native ETH. The V4 PoolManager forwards take outputs to
+    /// `msg.sender` of `modifyLiquidities` (= the adapter). The adapter then
+    /// forwards them to the vault via `_sendTo`.
+    receive() external payable {}
+
+    function _selfBalance(address token) internal view returns (uint256) {
+        return token == address(0) ? address(this).balance : IERC20(token).balanceOf(address(this));
+    }
+
+    function _balanceOfHolder(address token, address holder) internal view returns (uint256) {
+        return token == address(0) ? holder.balance : IERC20(token).balanceOf(holder);
+    }
+
+    function _sendTo(address token, address to, uint256 amount) internal {
+        if (token == address(0)) {
+            (bool ok,) = to.call{value: amount}("");
+            require(ok, "ETH transfer failed");
+        } else {
+            IERC20(token).safeTransfer(to, amount);
+        }
     }
 
     /// @dev Permit2 plumbing for the PositionManager (which pulls tokens via

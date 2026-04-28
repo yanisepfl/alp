@@ -26,7 +26,7 @@ interface ILiquidityAdapter {
         uint256 amount0Min,
         uint256 amount1Min,
         bytes calldata extra
-    ) external returns (uint256 positionId, uint128 liquidity, uint256 amount0Used, uint256 amount1Used);
+    ) external payable returns (uint256 positionId, uint128 liquidity, uint256 amount0Used, uint256 amount1Used);
 
     /// @notice Remove `liquidity` from `positionId` and forward the released
     /// tokens (and any owed fees) to `msg.sender`.
@@ -57,7 +57,7 @@ interface ILiquidityAdapter {
         uint256 amountIn,
         uint256 amountOutMin,
         bytes calldata extra
-    ) external returns (uint256 amountOut);
+    ) external payable returns (uint256 amountOut);
 
     /// @notice Decompose an open position into the underlying token amounts at
     /// the pool's current spot price. Returns 0,0 for burned or unknown
