@@ -1,0 +1,17 @@
+name = "alp-agent"
+main = "src/index.ts"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[kv_namespaces]]
+binding = "ACTIVITY_LOG"
+id = "REPLACE_WITH_KV_ID"
+
+# Vars set via `wrangler secret put`:
+#   AGENT_PRIVATE_KEY        agent hot wallet private key (0x-prefixed)
+#   HMAC_SECRET              shared secret with KeeperHub for webhook auth
+#   BASE_RPC_URL             Base mainnet RPC URL
+#   VAULT_ADDRESS            deployed ALPVault address
+#   REGISTRY_ADDRESS         deployed PoolRegistry address
+#   V3_ADAPTER_ADDRESS       deployed UniV3Adapter address
+#   UR_ADAPTER_ADDRESS       deployed UniversalRouterAdapter address
