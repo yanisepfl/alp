@@ -801,8 +801,9 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         // the pre-peel idle. Same formula on base and non-base rails so the
         // user is never under-paid the slice they just earned.
         _burn(owner, shares);
-        uint256 bookSlice = Math.mulDiv(bookTAV, shares, supply, Math.Rounding.Floor);
-        bookTAV = bookTAV > bookSlice ? bookTAV - bookSlice : 0;
+        // mulDiv with Floor rounding and shares <= supply means the slice
+        // can never exceed bookTAV, so the ternary safety branch is dead.
+        bookTAV -= Math.mulDiv(bookTAV, shares, supply, Math.Rounding.Floor);
 
         emit RedeemedInKind(owner, receiver, shares);
 
@@ -869,14 +870,14 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     function _convertToShares(uint256 assets, Math.Rounding rounding) internal view override returns (uint256) {
         uint256 mkt = _marketTAV();
         uint256 effectiveTAV = bookTAV > mkt ? bookTAV : mkt;
-        return Math.mulDiv(assets, totalSupply() + 10 ** _decimalsOffset(), effectiveTAV + 1, rounding);
+        return Math.mulDiv(assets, totalSupply() + 1e6, effectiveTAV + 1, rounding);
     }
 
     /// @dev Raw fee-free asset math against the redeem-direction rail
     /// `MIN(book, market)` (returned by `totalAssets()`). Mirror of
     /// `_convertToShares`.
     function _convertToAssets(uint256 shares, Math.Rounding rounding) internal view override returns (uint256) {
-        return Math.mulDiv(shares, totalAssets() + 1, totalSupply() + 10 ** _decimalsOffset(), rounding);
+        return Math.mulDiv(shares, totalAssets() + 1, totalSupply() + 1e6, rounding);
     }
 
     // -------- ERC-4626 preview overrides with correct fee direction --------
@@ -911,7 +912,7 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         uint256 grossNeeded = entryExitFeeBps == 0
             ? assets
             : Math.mulDiv(assets, BPS_DENOM, BPS_DENOM - entryExitFeeBps, Math.Rounding.Ceil);
-        return Math.mulDiv(grossNeeded, totalSupply() + 10 ** _decimalsOffset(), totalAssets() + 1, Math.Rounding.Ceil);
+        return Math.mulDiv(grossNeeded, totalSupply() + 1e6, totalAssets() + 1, Math.Rounding.Ceil);
     }
 
     /// @inheritdoc ERC4626
@@ -931,7 +932,7 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     function _convertToAssetsAtDepositRail(uint256 shares, Math.Rounding rounding) internal view returns (uint256) {
         uint256 mkt = _marketTAV();
         uint256 effectiveTAV = bookTAV > mkt ? bookTAV : mkt;
-        return Math.mulDiv(shares, effectiveTAV + 1, totalSupply() + 10 ** _decimalsOffset(), rounding);
+        return Math.mulDiv(shares, effectiveTAV + 1, totalSupply() + 1e6, rounding);
     }
 
     function _deposit(address caller, address receiver, uint256 assets, uint256 shares)
@@ -952,24 +953,30 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         // gross `assets` is what crossed the door.
         bookTAV += assets;
         super._deposit(caller, receiver, assets, shares);
-        // Same-block lockout stamps the caller (the funding source) only.
-        // Letting third-party deposits poison a victim's slot is a free
-        // same-block-redeem grief vector; the receiver's slot is updated
-        // through `_update` below, so any shares they end up holding still
-        // propagate the caller's stamp via the share transfer.
+        // Stamping happens inside `_update` below — it covers BOTH the
+        // mint into `receiver` (so a third-party-funded deposit can't
+        // bypass the lockout via a fresh receiver) AND any subsequent
+        // share transfer (so the lockout follows the shares). We also
+        // stamp the caller here so a depositor with pre-existing shares
+        // can't deposit-and-immediately-withdraw within the same block.
         _lastMintBlock[caller] = block.number;
     }
 
-    /// @dev Override OpenZeppelin's ERC20 transfer hook so the same-block
-    /// lockout follows the shares. Without this, an attacker could deposit
-    /// in block N, transfer the shares to a fresh address, and redeem in
-    /// the same block from the unstamped address — fully bypassing the
-    /// flash-loan defence.
+    /// @dev Override OpenZeppelin's ERC20 transfer hook to keep the same-
+    /// block lockout glued to the shares. On mint (`from == address(0)`)
+    /// we stamp the recipient so a third-party-funded deposit cannot
+    /// bypass the lockout by routing to a fresh receiver. On transfer we
+    /// propagate the sender's stamp so the lockout cannot be stripped by
+    /// vault.transfer(fresh, shares). Burns (`to == address(0)`) are
+    /// no-ops. The third-party-deposit grief cost (anyone can lock a
+    /// victim out for one block by depositing dust to their address) is
+    /// accepted as the cheapest available defence against the more
+    /// severe redeemInKind flash-loan bypass it closes.
     function _update(address from, address to, uint256 value) internal override {
         super._update(from, to, value);
-        if (from != address(0) && to != address(0)) {
-            uint256 fromStamp = _lastMintBlock[from];
-            if (fromStamp > _lastMintBlock[to]) _lastMintBlock[to] = fromStamp;
+        if (to != address(0)) {
+            uint256 stamp = from == address(0) ? block.number : _lastMintBlock[from];
+            if (stamp > _lastMintBlock[to]) _lastMintBlock[to] = stamp;
         }
     }
 
