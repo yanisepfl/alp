@@ -4,38 +4,25 @@ import { useEffect, useState } from "react";
 import { Scenery } from "./scenery";
 import { LandingFace } from "./landing-face";
 
-// "Subwebsite" canvas. The whole design lives at a fixed 2300×1300, so
-// every percentage position inside resolves against a stable pixel box —
-// nothing inside is dynamic. Scaling only kicks in when the viewport
-// drops below SCALE_REF — above that the canvas stays at native size and
-// any overflow is clipped by the outer wrapper's overflow-hidden.
+// Landing canvas — fixed 2300×1300 design surface. The outer wrapper
+// scales it via the `--shell-scale` CSS variable defined in
+// globals.css, so every percentage / px position inside resolves
+// against a stable pixel box. Above the scale-ref viewport the canvas
+// renders at native size and any overflow is clipped by the parent's
+// overflow-hidden; below it, it shrinks proportionally so nothing
+// gets cut off.
 const REF_W = 2300;
 const REF_H = 1300;
-const SCALE_REF_W = 1800;
-const SCALE_REF_H = (SCALE_REF_W * REF_H) / REF_W;
 
 export function Shell() {
   const [learnMore, setLearnMore] = useState(false);
-  const [scale, setScale] = useState(1);
-
-  useEffect(() => {
-    const compute = () => {
-      setScale(
-        Math.min(1, window.innerWidth / SCALE_REF_W, window.innerHeight / SCALE_REF_H),
-      );
-    };
-    compute();
-    window.addEventListener("resize", compute);
-    return () => window.removeEventListener("resize", compute);
-  }, []);
 
   // Mark the entry choreography as seen on this browser. An inline script
   // in app/layout.tsx reads this flag on the next load (synchronously,
-  // before React hydrates) and sets `data-intro-played` on <html>, which
-  // globals.css uses to skip the lockup glide and word-by-word reveal.
-  // Set on first mount — even a partial first view counts as "seen".
-  // localStorage (not sessionStorage) so the flag survives new tabs and
-  // browser restarts; clear it via DevTools to rewatch the intro.
+  // before React hydrates) and injects a style that disables the lockup
+  // glide and word-by-word reveal animations. Set on first mount — even a
+  // partial first view counts as "seen". localStorage (not sessionStorage)
+  // so the flag survives new tabs and browser restarts.
   useEffect(() => {
     try {
       localStorage.setItem("alp:intro-played", "1");
@@ -51,7 +38,7 @@ export function Shell() {
         style={{
           width: REF_W,
           height: REF_H,
-          transform: `scale(${scale})`,
+          transform: "scale(var(--shell-scale))",
           transformOrigin: "center center",
           flexShrink: 0,
         }}

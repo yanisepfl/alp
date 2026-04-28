@@ -11,6 +11,59 @@
 :root {
   color-scheme: dark;
   --sans-stack: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  /* Single source of truth for canvas scaling. Used by both pages
+     (landing's Shell + /app's outer wrapper) and the persistent
+     backdrop. CSS-only — no JS measurement, no SSR/CSR mismatch, no
+     route-transition timing issues. The canvas hits scale=1 at
+     viewport ≥ 1920×1017; below that it shrinks proportionally.
+     The width reference (1920) is sized for /app's full panel +
+     sidebar combo with comfortable side margins; landing only uses
+     the panel itself, so it has more breathing room at scale=1.
+     Length-by-length division yields a unitless number, which
+     scale() requires. */
+  --shell-scale: min(
+    1,
+    calc(100vw / 1920px),
+    calc(100vh / 1017px)
+  );
+
+  /* The central panel rect — shared by landing and /app. Both pages
+     render the SAME centered rectangle at the SAME size; whatever
+     surrounds it (decorative scenery on landing, sidebars on /app)
+     keys off these vars so every component agrees on where the
+     panel lives. Edit these to resize the panel everywhere.
+
+     `--panel-left` defaults to centered (landing's resting state).
+     /app overrides it on its <main> so panel + sidebar combo is
+     centered instead — the override propagates to descendants but
+     not to PersistentBackdrop (sibling in layout.tsx), so landing
+     stays centered without extra logic. */
+  --panel-w-design: 1380px;
+  --panel-h-design: 780px;
+  --panel-w: calc(var(--panel-w-design) * var(--shell-scale));
+  --panel-h: calc(var(--panel-h-design) * var(--shell-scale));
+  --panel-left: calc((100vw - var(--panel-w)) / 2);
+  --panel-top: calc((100vh - var(--panel-h)) / 2);
+  --panel-right: calc(var(--panel-left) + var(--panel-w));
+  --panel-bottom: calc(var(--panel-top) + var(--panel-h));
+
+  /* Right-sidebar slot used on /app. Width is fixed in design px and
+     scales with the canvas, so the sidebar holds its proportions
+     across viewports instead of stretching to the right edge. The
+     gap is the visible breathing room between panel and sidebar.
+     `--combo-w` is the full panel + gap + sidebar block — /app
+     centers this instead of just the panel. */
+  --sidebar-w-design: 480px;
+  --sidebar-gap-design: 16px;
+  --sidebar-w: calc(var(--sidebar-w-design) * var(--shell-scale));
+  --sidebar-gap: calc(var(--sidebar-gap-design) * var(--shell-scale));
+  --combo-w: calc(var(--panel-w) + var(--sidebar-gap) + var(--sidebar-w));
+  /* Distance the canvas must travel on /app entry: from landing's
+     centered panel position to /app's combo-centered position. Used
+     by the canvas slide-in keyframes so the panel glides leftward
+     in lockstep with the sidebar emerging from behind it. */
+  --canvas-shift: calc((var(--sidebar-gap) + var(--sidebar-w)) / 2);
 }
 
 html, body {

@@ -15,80 +15,38 @@ import {
 } from "@/lib/agent-stream";
 import { LearnMoreContent, SummaryText } from "@/components/landing-face";
 
-/* ---------- Panel rect math (mirrors Shell + Scenery from the landing) ---------- */
+/* ---------- Panel rect ---------- */
 
-const REF_W = 2300;
-const REF_H = 1300;
-const SCALE_REF_W = 1800;
-const SCALE_REF_H = (SCALE_REF_W * REF_H) / REF_W;
-const PANEL_INSET = 0.20;
+// The main panel is the same centered, scaled rectangle that the
+// landing page renders — design size 1380×780, scaled to viewport
+// by the `--shell-scale` CSS var in globals.css. The /app canvas
+// matches the panel exactly: every chrome element (nav above,
+// footer below, bento inside) positions against (0, 0, PANEL_W,
+// PANEL_H) and rides the same outer transform.
+//
+// A single right-side sidebar (Sherpa agent OR vault stats, toggled
+// by the tab pill above it) lives in raw viewport space — no
+// transform. It stretches from the panel's right edge plus a gap to
+// the viewport's right edge minus a margin, so on wider screens the
+// sidebar gets more room. CSS clamps width at 0 on narrow viewports
+// (negative calc result), letting the sidebar collapse without a JS
+// breakpoint.
+const PANEL_W = 1380;
+const PANEL_H = 780;
+
+// Floating nav design height — measured from the FloatingNav pill
+// (8 + max(button=29, logo=22) + 8 inner padding + 1+1 border).
+// Pulled out as a constant because the sidebar tab pill scales its
+// height to this value via --shell-scale, so the two chrome strips
+// share a baseline + height at every viewport.
+const NAV_DESIGN_HEIGHT = 47;
 
 type PanelLayout = { left: number; top: number; width: number; height: number; scale: number };
-type FullLayout = { main: PanelLayout; left: PanelLayout | null; right: PanelLayout | null };
+type SidebarTab = "agent" | "stats";
 
-// Side panels (Dashboard left, Sherpa right) sit in the side margins
-// next to the main panel. Capped at MAX so they don't balloon on wide
-// monitors; only render if at least MIN of margin is free.
-const SIDE_PANEL_MIN_WIDTH = 240;
-const SIDE_PANEL_MAX_WIDTH = 400;
-const SIDE_PANEL_GAP = 14;
-const SIDE_PANEL_OUTER_MARGIN = 14;
-
-// Layout positions are resolved against the fixed canvas (REF_W ×
-// REF_H). The outer Shell scales the whole canvas via CSS transform
-// — same approach as the landing page in components/shell.tsx — so
-// every percentage / px value below is design-stable, no per-frame
-// math needed.
-function computeFullLayout(): FullLayout {
-  const canvasW = REF_W;
-  const canvasH = REF_H;
-
-  const mainLeft = canvasW * PANEL_INSET;
-  const mainTop = canvasH * PANEL_INSET;
-  const mainW = canvasW * (1 - 2 * PANEL_INSET);
-  const mainH = canvasH * (1 - 2 * PANEL_INSET);
-  // `scale` stays 1 inside the canvas — the outer Shell handles the
-  // viewport scaling via transform: scale().
-  const main: PanelLayout = { left: mainLeft, top: mainTop, width: mainW, height: mainH, scale: 1 };
-
-  const rightLeft = mainLeft + mainW + SIDE_PANEL_GAP;
-  const rightAvail = canvasW - rightLeft - SIDE_PANEL_OUTER_MARGIN;
-  const right: PanelLayout | null =
-    rightAvail >= SIDE_PANEL_MIN_WIDTH
-      ? { left: rightLeft, top: mainTop, width: Math.min(SIDE_PANEL_MAX_WIDTH, rightAvail), height: mainH, scale: 1 }
-      : null;
-
-  const leftAvail = mainLeft - SIDE_PANEL_OUTER_MARGIN - SIDE_PANEL_GAP;
-  const leftW = Math.min(SIDE_PANEL_MAX_WIDTH, leftAvail);
-  const left: PanelLayout | null =
-    leftAvail >= SIDE_PANEL_MIN_WIDTH
-      ? { left: mainLeft - SIDE_PANEL_GAP - leftW, top: mainTop, width: leftW, height: mainH, scale: 1 }
-      : null;
-
-  return { main, left, right };
-}
-
-// Layout is now fully static — same numbers every render. Kept the
-// hook signature so call sites don't churn.
-function useFullLayout(): FullLayout | null {
-  return computeFullLayout();
-}
-
-// Outer canvas scale — mirrors components/shell.tsx so /app and
-// landing scale identically.
-function useShellScale(): number {
-  const [scale, setScale] = useState<number>(() =>
-    typeof window === "undefined" ? 1 : Math.min(1, window.innerWidth / SCALE_REF_W, window.innerHeight / SCALE_REF_H)
-  );
-  useEffect(() => {
-    const compute = () =>
-      setScale(Math.min(1, window.innerWidth / SCALE_REF_W, window.innerHeight / SCALE_REF_H));
-    compute();
-    window.addEventListener("resize", compute);
-    return () => window.removeEventListener("resize", compute);
-  }, []);
-  return scale;
-}
+// Singleton: the main panel fills the canvas exactly. Passed to
+// FloatingNav / FooterStrip so they can position relative to it.
+const MAIN_PANEL: PanelLayout = { left: 0, top: 0, width: PANEL_W, height: PANEL_H, scale: 1 };
 
 // Landscape filter — colour-preserving, just slightly desaturated and dimmed.
 // Used on the main panel + nav pill so the colour reads through.
@@ -441,7 +399,11 @@ function CardLabel({ icon, children }: { icon: keyof typeof ICONS | keyof typeof
       letterSpacing: "0.02em", lineHeight: 1, width: "max-content",
     }}>
       {isFilled ? <FilledIcon kind={icon} size={12} /> : <StrokeIcon kind={icon} size={11} />}
-      {children}
+      {/* Inter at this size has its x-height-center below its
+          line-box-center, so flex-center-aligned text reads as a
+          touch low. A 1px upward nudge lines the visual mid-mark of
+          the lowercase letters with the icon's pixel center. */}
+      <span style={{ display: "inline-block", transform: "translateY(-1px)" }}>{children}</span>
     </span>
   );
 }
@@ -1251,34 +1213,60 @@ function KvRow({ label, value, valueColor }: { label: string; value: string; val
   );
 }
 
-// Position: current value (Inter), pct delta, ALP token chip + share
-// count inline, deposited row at bottom, Withdraw CTA top-right.
+// Position: current value + ALP shares in a rounded dot-grid sub-
+// card (mirrors the Deposit input field's surface), Deposited /
+// Yield pinned to the card floor on plain dark surface. Outer
+// frame matches VaultCard (dark + 0.08 border) so the segments
+// read as one family.
 function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
   const up = USER_PNL >= 0;
   const accent = up ? "rgb(134, 239, 172)" : "rgb(248, 113, 113)";
   return (
-    <Card style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+    <Card style={{
+      height: "100%", display: "flex", flexDirection: "column",
+      background: "#0c0c10",
+      border: "1px solid rgba(255,255,255,0.08)",
+      backdropFilter: "none",
+      WebkitBackdropFilter: "none",
+    }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
         <CardLabel icon="position">Position</CardLabel>
+        {/* Connect-wallet styling on the dark card surface, with the
+            dot-grid overlay matching the hero sub-card below. No
+            arrow — text reads as the full affordance. Muted at rest,
+            lifts on hover. */}
         <button
           type="button"
           onClick={onWithdraw}
-          className="bg-white/[0.12] transition-colors duration-200 ease-out hover:bg-white/[0.20]"
+          className="transition-colors duration-200 ease-out"
           style={{
-            display: "inline-flex", alignItems: "center", gap: 6,
-            border: "1px solid rgba(255,255,255,0.14)",
+            display: "inline-flex", alignItems: "center",
+            border: "1px solid rgba(255,255,255,0.10)",
+            backgroundColor: "rgba(255,255,255,0.06)",
+            backgroundImage: "radial-gradient(circle, rgba(255,255,255,0.10) 0.7px, transparent 1.1px)",
+            backgroundSize: "9px 9px",
             padding: "7px 12px", borderRadius: 8,
-            color: "#fff",
+            color: "rgba(255,255,255,0.55)",
             fontFamily: "var(--sans-stack)", fontSize: 12, fontWeight: 600,
             lineHeight: 1, letterSpacing: "-0.005em",
             cursor: "pointer",
+            transition: "color 200ms ease, background-color 200ms ease",
+          }}
+          onMouseEnter={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.92)";
+            (e.currentTarget as HTMLButtonElement).style.backgroundColor = "rgba(255,255,255,0.10)";
+          }}
+          onMouseLeave={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.55)";
+            (e.currentTarget as HTMLButtonElement).style.backgroundColor = "rgba(255,255,255,0.06)";
           }}
         >
           Withdraw
-          <StrokeIcon kind="arrow" size={11} />
         </button>
       </div>
 
+      {/* $ value + ALP chip, sitting directly on the dark Card
+          surface — no wrapping container chrome. */}
       <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
         <span style={{
           color: "#fff", fontFamily: "var(--sans-stack)",
@@ -1287,7 +1275,6 @@ function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
         }}>
           {fmtUsd2(USER_VALUE)}
         </span>
-        {/* Grey AlpChip + share count, no surrounding chip wrapper. */}
         <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
           <AlpChip size={20} />
           <span style={{
@@ -1300,7 +1287,7 @@ function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
         </span>
       </div>
 
-      {/* Pin details to the card floor; Performance is the taller
+      {/* KvRows pinned to the card floor; Performance is the taller
           sibling so this just absorbs the height difference. */}
       <div style={{ marginTop: "auto", paddingTop: 14, display: "flex", flexDirection: "column", gap: 6 }}>
         <KvRow label="Deposited" value={fmtUsd2(USER_DEPOSIT_AMT)} />
@@ -1341,7 +1328,21 @@ function UserAprCard() {
   const dateLabel = dateForIdx(hoverIdx === null ? data.length - 1 : hoverIdx);
 
   return (
-    <Card style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+    // Same dark family as the sibling cards, but tinted up to the
+    // shade that an rgba(255,255,255,0.03) sub-card creates on top
+    // of #0c0c10 (= rgb(19,19,23) ≈ #131317). Keeps Performance one
+    // step lighter than its neighbours, like a "lifted" tile, while
+    // the dot-grid wash tiles edge-to-edge over the whole surface
+    // without touching any of the card's internal structure.
+    <Card style={{
+      height: "100%", display: "flex", flexDirection: "column",
+      backgroundColor: "#131317",
+      backgroundImage: "radial-gradient(circle, rgba(255,255,255,0.10) 0.7px, transparent 1.1px)",
+      backgroundSize: "9px 9px",
+      border: "1px solid rgba(255,255,255,0.08)",
+      backdropFilter: "none",
+      WebkitBackdropFilter: "none",
+    }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
         <CardLabel icon="sparkles">Performance</CardLabel>
         <span style={{
@@ -1391,41 +1392,38 @@ function UserAprCard() {
   );
 }
 
-// Full-page modal triggered by the Position card's Withdraw button.
-// Backdrop darkens + blurs the entire /app shell so the modal reads
-// as a dedicated transactional context.
+// Withdraw modal — overlays the main panel only (rendered as an
+// absolute child of the panel <section>). backdrop-filter blurs
+// just the panel content underneath, leaving the sidebar/tabs/nav
+// unaffected. Structure mirrors the Deposit (VaultCard) segment 1:1
+// — same outer dark frame, same sub-card with dot-grid input area
+// + divider + summary row, same vault-details sub-card, same grey
+// CTA — only the chip (ALP), the labels, and the math (shares →
+// USDC) flip to withdraw semantics.
 function WithdrawModal({ onClose }: { onClose: () => void }) {
   const [amount, setAmount] = useState("");
   const num = Number.parseFloat(amount.replace(/,/g, "")) || 0;
   const usdcOut = num * SHARE_PRICE;
   const valid = num > 0 && num <= USER_SHARES;
 
+  const inputRef = useRef<HTMLInputElement>(null);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
-    document.body.style.overflow = "hidden";
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      document.body.style.overflow = "";
-    };
+    return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  if (typeof document === "undefined") return null;
-
-  const setPct = (pct: number) => {
-    const v = (USER_SHARES * pct) / 100;
-    setAmount(v.toFixed(2));
-  };
-
-  return createPortal(
+  return (
     <div
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
       style={{
-        position: "fixed", inset: 0, zIndex: 1000,
-        background: "rgba(0,0,0,0.55)",
+        position: "absolute", inset: 0, zIndex: 10,
+        background: "rgba(0,0,0,0.40)",
         backdropFilter: "blur(12px) saturate(120%)",
         WebkitBackdropFilter: "blur(12px) saturate(120%)",
         display: "flex", alignItems: "center", justifyContent: "center",
+        padding: 20,
         animation: "withdraw-fade 160ms ease-out",
       }}
     >
@@ -1434,146 +1432,222 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
         aria-modal="true"
         aria-label="Withdraw"
         style={{
-          width: "min(440px, calc(100vw - 32px))",
+          width: "min(440px, 100%)",
+          maxHeight: "100%",
+          overflowY: "auto",
           background: "#0c0c10",
           border: "1px solid rgba(255,255,255,0.08)",
-          borderRadius: 16,
-          padding: 24,
+          borderRadius: 20,
+          padding: 20,
           color: "#fff",
-          boxShadow: "0 24px 64px rgba(0,0,0,0.6)",
           fontFamily: "var(--sans-stack)",
+          display: "flex", flexDirection: "column",
+          boxShadow: "0 24px 64px rgba(0,0,0,0.6)",
           animation: "withdraw-pop 180ms ease-out",
         }}
       >
-        {/* Header */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <span style={{ fontSize: 16, fontWeight: 500 }}>Withdraw</span>
+        {/* Header — CardLabel on the left (mirrors VaultCard's
+            "Deposit" label) + a quiet close button on the right. */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+          <CardLabel icon="vault">Withdraw</CardLabel>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close"
             className="transition-colors duration-200 ease-out"
             style={{
-              width: 28, height: 28, borderRadius: 8,
+              width: 22, height: 22, borderRadius: 6,
               background: "transparent", border: "none",
-              color: "rgba(255,255,255,0.60)",
+              color: "rgba(255,255,255,0.55)",
               display: "inline-flex", alignItems: "center", justifyContent: "center",
-              cursor: "pointer",
+              cursor: "pointer", padding: 0,
             }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.92)"; }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.55)"; }}
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
               <path d="M6 6l12 12M18 6l-12 12" />
             </svg>
           </button>
         </div>
+        <div style={{ marginTop: 12 }}>
+          <H3>We&rsquo;re sad to see you go.</H3>
+        </div>
 
-        {/* Position summary strip */}
+        {/* Sub-card 1 — withdraw amount + grid bg, mirroring the
+            Deposit input field 1:1. ALP chip replaces USDC, balance
+            is in shares, and the bottom row is "You receive" (USDC
+            equivalent) instead of "Deposit APY". */}
         <div style={{
           marginTop: 18,
-          padding: "12px 14px",
-          background: "rgba(255,255,255,0.03)",
           border: "1px solid rgba(255,255,255,0.06)",
-          borderRadius: 10,
-          display: "flex", alignItems: "center", justifyContent: "space-between",
-          fontSize: 12,
+          borderRadius: 12,
+          overflow: "hidden",
+          background: "rgba(255,255,255,0.03)",
         }}>
-          <span style={{ color: "rgba(255,255,255,0.55)" }}>Your position</span>
-          <span style={{ color: "rgba(255,255,255,0.92)", fontVariantNumeric: "tabular-nums" }}>
-            {USER_SHARES.toLocaleString("en-US", { maximumFractionDigits: 2 })} ALP · {fmtUsd2(USER_VALUE)}
-          </span>
-        </div>
-
-        {/* Amount input */}
-        <div style={{ marginTop: 18 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", color: "rgba(255,255,255,0.55)", fontSize: 11.5, marginBottom: 8 }}>
-            <span>Amount</span>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontVariantNumeric: "tabular-nums" }}>
-              Balance: {USER_SHARES.toLocaleString("en-US", { maximumFractionDigits: 2 })}
-              <button type="button" onClick={() => setPct(100)} style={{
-                border: "1px solid rgba(255,255,255,0.12)", background: "transparent",
-                padding: "2px 8px", borderRadius: 6, height: 20,
-                color: "rgba(255,255,255,0.92)",
-                fontFamily: "var(--sans-stack)", fontSize: 10.5, fontWeight: 600, letterSpacing: "0.04em",
-                lineHeight: 1, cursor: "pointer",
-              }}>MAX</button>
-            </span>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 12px 12px 16px", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 12 }}>
-            <input
-              inputMode="decimal" placeholder="0.00" value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              style={{
-                flex: 1, minWidth: 0,
-                background: "transparent", border: "none", outline: "none",
-                color: "#fff", fontFamily: "var(--sans-stack)",
-                fontSize: 24, fontWeight: 500, letterSpacing: "-0.01em", lineHeight: 1.1, fontVariantNumeric: "tabular-nums",
-              }}
-            />
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "5px 10px 5px 6px", background: "rgba(255,255,255,0.06)", borderRadius: 999 }}>
-              <AlpChip size={18} />
-              <span style={{ fontSize: 13, fontWeight: 500, lineHeight: 1 }}>ALP</span>
-            </span>
-          </div>
-          {/* Quick pct chips */}
-          <div style={{ marginTop: 10, display: "flex", gap: 6 }}>
-            {[25, 50, 75, 100].map((p) => (
-              <button
-                key={p}
-                type="button"
-                onClick={() => setPct(p)}
-                className="bg-white/[0.04] transition-colors duration-200 ease-out hover:bg-white/[0.10]"
+          <div
+            onClick={() => inputRef.current?.focus()}
+            style={{
+              padding: 14,
+              backgroundColor: "rgba(255,255,255,0.03)",
+              backgroundImage: "radial-gradient(circle, rgba(255,255,255,0.10) 0.7px, transparent 1.1px)",
+              backgroundSize: "9px 9px",
+              display: "flex", flexDirection: "column", gap: 10,
+              cursor: "text",
+            }}
+          >
+            <div style={{ color: "rgba(255,255,255,0.55)", fontFamily: "var(--sans-stack)", fontSize: 11, fontWeight: 500, lineHeight: 1 }}>
+              Withdraw
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <input
+                ref={inputRef}
+                inputMode="decimal"
+                placeholder="0"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
                 style={{
-                  flex: 1,
-                  border: "1px solid rgba(255,255,255,0.08)",
-                  padding: "5px 0", borderRadius: 7,
-                  color: "rgba(255,255,255,0.78)",
-                  fontFamily: "var(--sans-stack)", fontSize: 11, fontWeight: 500,
+                  flex: 1, minWidth: 0,
+                  background: "transparent", border: "none", outline: "none",
+                  color: "#fff", fontFamily: "var(--sans-stack)",
+                  fontSize: 28, fontWeight: 500, letterSpacing: "-0.015em", lineHeight: 1.05,
+                  fontVariantNumeric: "tabular-nums",
+                }}
+              />
+              {/* ALP chip — mirrors VaultCard's USDC chip exactly:
+                  same opaque #1a1c20 bg, 0.10 border, padding,
+                  radius, font sizing. */}
+              <span style={{
+                display: "inline-flex", alignItems: "center", gap: 7,
+                padding: "4px 11px 4px 4px",
+                border: "1px solid rgba(255,255,255,0.10)",
+                background: "#1a1c20",
+                borderRadius: 8,
+                color: "#fff",
+                fontFamily: "var(--sans-stack)",
+                fontSize: 12.5, fontWeight: 600, letterSpacing: "-0.005em",
+              }}>
+                <AlpChip size={22} />
+                <span style={{ display: "inline-block", position: "relative", top: 1, lineHeight: 1 }}>
+                  ALP
+                </span>
+              </span>
+            </div>
+            <div style={{
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+              color: "rgba(255,255,255,0.55)",
+              fontFamily: "var(--sans-stack)", fontSize: 12, fontWeight: 400, lineHeight: 1,
+            }}>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <SwapVerticalIcon size={12} />
+                <span style={{ fontVariantNumeric: "tabular-nums" }}>
+                  ${usdcOut.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setAmount(USER_SHARES.toFixed(2))}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "#fff"; }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.55)"; }}
+                style={{
+                  background: "transparent", border: "none", padding: 0,
+                  color: "rgba(255,255,255,0.55)",
+                  fontFamily: "var(--sans-stack)", fontSize: 12, fontWeight: 400,
+                  fontVariantNumeric: "tabular-nums", lineHeight: 1,
                   cursor: "pointer",
+                  transition: "color 200ms ease",
                 }}
               >
-                {p === 100 ? "Max" : `${p}%`}
+                Balance: {USER_SHARES.toLocaleString("en-US", { maximumFractionDigits: 2 })}
               </button>
-            ))}
+            </div>
+          </div>
+          <div aria-hidden style={{ height: 1, background: "rgba(255,255,255,0.05)" }} />
+          <div style={{
+            padding: "10px 14px",
+            display: "flex", justifyContent: "space-between", alignItems: "center",
+            fontFamily: "var(--sans-stack)", fontSize: 12,
+          }}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "rgba(255,255,255,0.55)" }}>
+              You receive
+              <InfoTip label="ALP shares are redeemed for their pro-rata slice of the vault, paid out in USDC at the current share price.">
+                <InfoIcon size={12} />
+              </InfoTip>
+            </span>
+            <span style={{ color: "#fff", fontWeight: 600, fontVariantNumeric: "tabular-nums", letterSpacing: "-0.005em" }}>
+              ${usdcOut.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </span>
           </div>
         </div>
 
-        {/* You receive */}
+        {/* Sub-card 2 — vault details. Mirrors VaultCard's second
+            sub-card minus the Exposure row (Withdraw doesn't need
+            to surface the vault's basket composition; the Share
+            price + delay + TVL are the relevant context here). */}
         <div style={{
-          marginTop: 14,
-          padding: "12px 14px",
+          marginTop: 10,
+          padding: "10px 14px",
           background: "rgba(255,255,255,0.03)",
           border: "1px solid rgba(255,255,255,0.06)",
-          borderRadius: 10,
-          display: "flex", alignItems: "center", justifyContent: "space-between",
-          fontSize: 12,
+          borderRadius: 12,
+          display: "flex", flexDirection: "column", gap: 8,
+          fontFamily: "var(--sans-stack)", fontSize: 12,
         }}>
-          <span style={{ color: "rgba(255,255,255,0.55)" }}>You receive</span>
-          <span style={{ fontWeight: 500, fontSize: 14, fontVariantNumeric: "tabular-nums" }}>
-            {fmtUsd2(usdcOut)}
-          </span>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "rgba(255,255,255,0.55)" }}>
+              Share price
+              <InfoTip label="Value of one ALP share. Grows as fees accrue into the vault.">
+                <InfoIcon size={12} />
+              </InfoTip>
+            </span>
+            <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)", fontVariantNumeric: "tabular-nums" }}>$1.0427</span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "rgba(255,255,255,0.55)" }}>
+              Withdraw delay
+              <InfoTip label="Withdrawals settle in one block while the idle reserve covers them; larger asks queue against the next rebalance.">
+                <InfoIcon size={12} />
+              </InfoTip>
+            </span>
+            <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)" }}>Instant up to reserve</span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "rgba(255,255,255,0.55)" }}>
+              Vault TVL
+              <InfoTip label="Total value across all active positions plus the idle reserve.">
+                <InfoIcon size={12} />
+              </InfoTip>
+            </span>
+            <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)", fontVariantNumeric: "tabular-nums" }}>$3.26M</span>
+          </div>
         </div>
 
-        {/* CTA */}
+        {/* CTA — copy of VaultCard's Connect-wallet button (grey
+            translucent + 0.10 border + 0.78 white text). When the
+            input is invalid the text dims and the click is blocked;
+            shape/colors stay so the button doesn't reflow. */}
         <button
           type="button"
           disabled={!valid}
-          className={valid ? "bg-white transition-colors duration-200 ease-out hover:bg-white/90" : ""}
+          className="transition-colors duration-200 ease-out"
           style={{
-            marginTop: 18, width: "100%", height: 48,
-            borderRadius: 12, border: "none",
-            background: valid ? "#fff" : "rgba(255,255,255,0.06)",
-            color: valid ? "#0c0c10" : "rgba(255,255,255,0.30)",
+            marginTop: 12, width: "100%",
+            display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
+            padding: "14px 16px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.10)",
+            background: "rgba(255,255,255,0.06)",
+            color: valid ? "rgba(255,255,255,0.92)" : "rgba(255,255,255,0.40)",
             fontFamily: "var(--sans-stack)",
-            fontSize: 14, fontWeight: 600, letterSpacing: "-0.005em",
+            fontSize: 13, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1,
             cursor: valid ? "pointer" : "default",
-            transition: "background 200ms ease",
           }}
+          onMouseEnter={(e) => { if (valid) (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.10)"; }}
+          onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.06)"; }}
         >
           {valid ? `Withdraw ${fmtUsd2(usdcOut)}` : "Enter an amount"}
+          <StrokeIcon kind="arrow" size={14} />
         </button>
       </div>
-    </div>,
-    document.body
+    </div>
   );
 }
 
@@ -1594,7 +1668,16 @@ const USER_ACTIVITY: UserActivityRow[] = [
 
 function UserActivityCard() {
   return (
-    <Card style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+    // Dark frame matching VaultCard / Position. Each item gets its
+    // own dot-grid surface (matching the Deposit input field); the
+    // Card bg behind them stays plain dark.
+    <Card style={{
+      height: "100%", display: "flex", flexDirection: "column",
+      background: "#0c0c10",
+      border: "1px solid rgba(255,255,255,0.08)",
+      backdropFilter: "none",
+      WebkitBackdropFilter: "none",
+    }}>
       <CardLabel icon="stack">Activity</CardLabel>
       <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 4 }}>
         {USER_ACTIVITY.length === 0 ? (
@@ -1626,8 +1709,13 @@ function UserActivityCard() {
                 borderRadius: 10,
                 textDecoration: "none",
                 color: "rgba(255,255,255,0.85)",
-                background: "rgba(255,255,255,0.03)",
-                border: "1px solid rgba(255,255,255,0.05)",
+                // Dot-grid surface on each item — matches the Deposit
+                // input sub-card. Border keeps the row's frame
+                // legible against the dark Card background.
+                backgroundColor: "rgba(255,255,255,0.03)",
+                backgroundImage: "radial-gradient(circle, rgba(255,255,255,0.10) 0.7px, transparent 1.1px)",
+                backgroundSize: "9px 9px",
+                border: "1px solid rgba(255,255,255,0.06)",
               }}
             >
               <TokenChip entry={a.token} size={18} radius={5} />
@@ -2692,16 +2780,14 @@ function AgentChatPanel() {
           <div style={{ color: "#fff", fontFamily: "var(--sans-stack)", fontSize: 13, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1 }}>
             Sherpa
           </div>
-          {/* Histogram wrapped in a rectangle that mirrors the avatar
-              chrome on the left (same 32px height + radius), but with
-              a slightly muter bg so the avatar still reads as the
-              header's primary element. */}
+          {/* Histogram floats free in the header — no chrome around
+              it, so the bars sit directly on the panel background.
+              Keeps the same 32px height + horizontal padding for
+              vertical alignment with the avatar on the left. */}
           <div style={{
             marginLeft: "auto",
             height: 32,
             padding: "0 10px",
-            borderRadius: 8,
-            background: "rgba(255,255,255,0.035)",
             display: "inline-flex", alignItems: "center",
             flexShrink: 0,
           }}>
@@ -2793,6 +2879,126 @@ function AgentChatPanel() {
         </div>
       </form>
     </div>
+  );
+}
+
+/* ---------- Sidebar tab switcher ---------- */
+
+// Pill that sits above the right sidebar, inline with the floating
+// nav above the main panel. Two tabs swap the sidebar content
+// between Sherpa (agent chat) and the vault stats dashboard.
+//
+// Positioned in viewport space (matches the sidebar below it).
+// Height + every interior dimension scale with --shell-scale so
+// the pill stays visually identical to the nav (which scales
+// because it lives inside the canvas) at every viewport. Bottom
+// edge sits 14*scale px above the panel — the same offset the nav
+// uses on the other side — so the two chrome strips share both a
+// baseline AND a height at every scale.
+function SidebarTabs({
+  tab, onChange, exiting, agentUnread,
+}: {
+  tab: SidebarTab;
+  onChange: (t: SidebarTab) => void;
+  exiting: boolean;
+  agentUnread: number;
+}) {
+  const animClass = exiting ? "app-sidebar-tab-exit" : "app-sidebar-tab-enter";
+  return (
+    <div className={animClass} style={{
+      position: "fixed",
+      left: "var(--sidebar-left)",
+      width: "var(--sidebar-w)",
+      top: `calc(var(--panel-top) - 14px * var(--shell-scale) - ${NAV_DESIGN_HEIGHT}px * var(--shell-scale))`,
+      height: `calc(${NAV_DESIGN_HEIGHT}px * var(--shell-scale))`,
+      // zIndex: 1 keeps the tabs behind the canvas (z=2) so the
+      // slide-in animation reads as "unrolling from behind the panel".
+      zIndex: 1,
+    }}>
+      <div style={{
+        position: "relative",
+        height: "100%",
+        borderRadius: "calc(20px * var(--shell-scale))",
+        overflow: "hidden",
+        border: "1px solid rgba(255,255,255,0.08)",
+        background: "#0c0c10",
+        display: "flex",
+        alignItems: "stretch",
+        // Inset matches the FloatingNav's vertical padding (8px) so
+        // the active button bg has the same breathing room from the
+        // pill border that the Connect-wallet button has from the
+        // nav border. Tab-button gap stays small for tight pairing.
+        padding: "calc(8px * var(--shell-scale))",
+        gap: "calc(4px * var(--shell-scale))",
+        isolation: "isolate",
+      }}>
+        <SidebarTabButton active={tab === "stats"} onClick={() => onChange("stats")}>Stats</SidebarTabButton>
+        <SidebarTabButton
+          active={tab === "agent"}
+          onClick={() => onChange("agent")}
+          badge={agentUnread > 0 ? <UnreadBadge count={agentUnread} /> : undefined}
+        >
+          Agent
+        </SidebarTabButton>
+      </div>
+    </div>
+  );
+}
+
+function SidebarTabButton({
+  active, onClick, badge, children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  badge?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="transition-colors duration-200 ease-out"
+      style={{
+        flex: 1,
+        background: active ? "rgba(255,255,255,0.10)" : "transparent",
+        color: active ? "#fff" : "rgba(255,255,255,0.55)",
+        border: "none",
+        borderRadius: "calc(14px * var(--shell-scale))",
+        fontFamily: "var(--sans-stack)",
+        fontSize: "calc(12px * var(--shell-scale))",
+        fontWeight: 600,
+        letterSpacing: "-0.005em",
+        lineHeight: 1,
+        cursor: "pointer",
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: "calc(7px * var(--shell-scale))",
+      }}
+    >
+      <span>{children}</span>
+      {badge}
+    </button>
+  );
+}
+
+// Unread-message indicator on the Agent tab. A small red dot —
+// no count, no chrome. Sits inline in the SidebarTabButton flex
+// row (alignItems:center) so it center-aligns with the "Agent"
+// text glyph cap-height naturally, no transform tweaks.
+function UnreadBadge({ count }: { count: number }) {
+  return (
+    <span
+      aria-label={`${count} unread`}
+      style={{
+        width: "calc(5px * var(--shell-scale))",
+        height: "calc(5px * var(--shell-scale))",
+        borderRadius: 999,
+        background: "#ef4444",
+        display: "inline-block",
+        flexShrink: 0,
+      }}
+    />
   );
 }
 
@@ -2918,47 +3124,81 @@ function FooterStrip({
 /* ---------- Page ---------- */
 
 export default function AppPage() {
-  const layout = useFullLayout();
-  const scale = useShellScale();
   const router = useRouter();
   const [withdrawOpen, setWithdrawOpen] = useState(false);
   const [showHowItWorks, setShowHowItWorks] = useState(false);
   const [exiting, setExiting] = useState(false);
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>("stats");
+  // Mock unread count for the Agent tab. Real backend: bump on
+  // incoming WireMessage, but always after we know the user isn't
+  // already on the Agent tab. Cleared the moment the user opens the
+  // Agent panel so the badge feels reactive instead of sticky.
+  const [agentUnread, setAgentUnread] = useState(3);
+  useEffect(() => {
+    if (sidebarTab === "agent" && agentUnread !== 0) setAgentUnread(0);
+  }, [sidebarTab, agentUnread]);
 
-  // When the user clicks the alps logo in the floating nav, kick all
-  // exit animations off in parallel (sidebars roll back behind the
-  // panel, nav drops, bento + footer fade) and fire the route swap
-  // so it lands ~the same time the animations finish.
+  // When the user clicks the alps logo in the floating nav, kick the
+  // exit animation off (canvas/sidebar/tab pull back first, then the
+  // nav drops 420ms later — mirror of the entry stagger) and delay
+  // router.push so the staggered choreography actually plays out
+  // instead of getting cut by a fast cached route swap. 760ms gives
+  // the first beat room to settle before the route changes; the nav
+  // drop continues into the landing's lockup-enter, blending the two.
   const handleBack = () => {
     if (exiting) return;
     setExiting(true);
-    router.push("/");
+    window.setTimeout(() => router.push("/"), 760);
   };
 
   const enterClass = exiting ? "app-bento-exit" : "app-bento-enter";
-  const leftSidebarClass = exiting ? "app-sidebar-left-exit" : "app-sidebar-left-enter";
   const rightSidebarClass = exiting ? "app-sidebar-right-exit" : "app-sidebar-right-enter";
   const footerClass = exiting ? "app-footer-exit" : "app-footer-enter";
+  const canvasClass = exiting ? "app-canvas-exit" : "app-canvas-enter";
 
   return (
     <main
-      className="fixed inset-0 overflow-hidden flex items-center justify-center"
+      className="fixed inset-0 overflow-hidden"
       style={{
         background: "transparent",
         color: "#fff",
         isolation: "isolate",
-      }}
+        // Override the global --panel-left/right (which centers the
+        // panel on landing) so /app centers the panel + sidebar
+        // combo instead. The override only propagates to descendants
+        // of this <main>, so PersistentBackdrop (sibling in
+        // layout.tsx) keeps the centered panel position on landing.
+        ["--panel-left" as string]: "calc((100vw - var(--combo-w)) / 2)",
+        ["--panel-right" as string]: "calc(var(--panel-left) + var(--panel-w))",
+        ["--sidebar-left" as string]: "calc(var(--panel-right) + var(--sidebar-gap))",
+      } as React.CSSProperties}
     >
-      {/* Fixed-pixel canvas, scaled by the outer flex centerer.
-          Mirrors components/shell.tsx so /app and the landing page
-          resolve their layout against the same stable design space. */}
-      <div style={{
-        width: REF_W,
-        height: REF_H,
-        position: "relative",
-        transform: `scale(${scale})`,
-        transformOrigin: "center center",
+      {/* Scaled canvas == the main panel rect itself, sized to match
+          the landing page's panel exactly. Nav above and footer
+          below ride this same transform; sidebars deliberately do
+          NOT (they live in viewport space, see below). z-index keeps
+          this canvas (with the opaque main panel inside) layered
+          above the sidebars so the sidebar enter/exit animations
+          read as "unrolling from behind the panel".
+
+          Position-wise the canvas is anchored at the combo-centered
+          --panel-left/--panel-top (top-left transform origin so the
+          scaled box lands exactly on those vars). On entry the canvas
+          slides leftward from landing's centered position to its
+          combo-centered resting spot — the same easing/duration as
+          the sidebar emerging from behind it, so the two reads as
+          one motion: the panel makes room while the sidebar fills
+          it. */}
+      <div className={canvasClass} style={{
+        width: PANEL_W,
+        height: PANEL_H,
+        position: "fixed",
+        left: "var(--panel-left)",
+        top: "var(--panel-top)",
+        transform: "scale(var(--shell-scale))",
+        transformOrigin: "top left",
         flexShrink: 0,
+        zIndex: 2,
       }}>
       <style>{`
         .panel-scroll { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.10) transparent; }
@@ -2968,51 +3208,97 @@ export default function AppPage() {
         .panel-scroll::-webkit-scrollbar-track { background: transparent; }
 
         /* Nav slides up from BEHIND the main panel (covered by the
-           panel's higher z-index) to its resting spot 14px above. */
+           panel's higher z-index) to its resting spot 14px above.
+           Entry is the FIRST beat (no delay); exit is the SECOND
+           beat (420ms delay) so the choreography mirrors. Total
+           per-direction duration: 1180ms (420 delay + 760 anim). */
         @keyframes app-nav-enter {
           from { transform: translateY(34px); opacity: 1; }
           to   { transform: translateY(-100%); opacity: 1; }
         }
         .app-nav-enter { animation: app-nav-enter 760ms cubic-bezier(0.16, 1, 0.3, 1) both; }
 
-        /* Exit reverses the entry — nav slides back down behind the panel.
-           router.push fires in parallel so the animation runs while /app
-           stays mounted, then gets cut cleanly by the route swap. */
         @keyframes app-nav-exit {
           from { transform: translateY(-100%); opacity: 1; }
           to   { transform: translateY(34px); opacity: 1; }
         }
-        .app-nav-exit { animation: app-nav-exit 760ms cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+        /* 'both' (not 'forwards') so the keyframe's "from" state
+           holds through the 420ms delay — without it, the moment
+           the class swaps from app-nav-enter the nav reverts to its
+           base translateY(0) position (partially behind the panel)
+           for the duration of the delay, then snaps back up to the
+           keyframe's "from" translateY(-100%) when the animation
+           actually starts. That was the disappear-reappear flicker. */
+        .app-nav-exit { animation: app-nav-exit 760ms cubic-bezier(0.16, 1, 0.3, 1) 420ms both; }
 
-        /* Sidebars unroll out from behind the main panel on entry,
-           same easing as the nav. They start translated INTO the
-           main-panel area and slide outward to their resting spot;
-           lower z-index keeps them hidden behind the panel during
-           the transit. */
-        @keyframes app-sidebar-left-enter {
-          from { transform: translateX(calc(100% + 14px)); }
-          to   { transform: translateX(0); }
-        }
-        .app-sidebar-left-enter { animation: app-sidebar-left-enter 760ms cubic-bezier(0.16, 1, 0.3, 1) both; }
-
+        /* Right sidebar — slides out from behind the main panel on
+           entry (translated INTO the main-panel area initially, then
+           rightward to resting). Entry has the SECOND-beat 420ms
+           delay so it pairs with the canvas slide; exit fires in the
+           FIRST beat with no delay, so the symmetric reverse plays:
+           sidebar/canvas first, nav second. The sidebar's resting
+           position is exactly the panel's vertical extent, so the
+           panel (z=2 inside canvas) hides it during the delay even
+           without an opacity fade — pure z-stacking handles it. */
         @keyframes app-sidebar-right-enter {
           from { transform: translateX(calc(-100% - 14px)); }
           to   { transform: translateX(0); }
         }
-        .app-sidebar-right-enter { animation: app-sidebar-right-enter 760ms cubic-bezier(0.16, 1, 0.3, 1) both; }
-
-        /* Reverse on back-nav. */
-        @keyframes app-sidebar-left-exit {
-          from { transform: translateX(0); }
-          to   { transform: translateX(calc(100% + 14px)); }
-        }
-        .app-sidebar-left-exit { animation: app-sidebar-left-exit 760ms cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+        .app-sidebar-right-enter { animation: app-sidebar-right-enter 760ms cubic-bezier(0.16, 1, 0.3, 1) 420ms both; }
 
         @keyframes app-sidebar-right-exit {
           from { transform: translateX(0); }
           to   { transform: translateX(calc(-100% - 14px)); }
         }
         .app-sidebar-right-exit { animation: app-sidebar-right-exit 760ms cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+
+        /* Sidebar TAB pill — same horizontal slide as the sidebar
+           below it, but the tab sits ABOVE the panel (at the nav's
+           y) so z-stacking can't hide it the way it hides the
+           sidebar. We add an opacity fade to the keyframes: tab is
+           invisible during the nav-only first beat, then fades in as
+           it slides out from behind the panel. Without this, the tab
+           would flash at its resting spot during the delay (the user
+           caught this on entry; same fix prevents it from lingering
+           after the panel slides back on exit). */
+        @keyframes app-sidebar-tab-enter {
+          from { transform: translateX(calc(-100% - 14px)); opacity: 0; }
+          to   { transform: translateX(0); opacity: 1; }
+        }
+        .app-sidebar-tab-enter { animation: app-sidebar-tab-enter 760ms cubic-bezier(0.16, 1, 0.3, 1) 420ms both; }
+
+        @keyframes app-sidebar-tab-exit {
+          from { transform: translateX(0); opacity: 1; }
+          to   { transform: translateX(calc(-100% - 14px)); opacity: 0; }
+        }
+        .app-sidebar-tab-exit { animation: app-sidebar-tab-exit 760ms cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+
+        /* Canvas slide. The canvas's resting position is combo-centered
+           (panel left of viewport center to make room for the sidebar);
+           landing leaves the panel screen-centered. On entry we start
+           the canvas at +canvas-shift (= landing's centered position)
+           and glide it back to 0 (= combo-centered) in lockstep with
+           the sidebar emerging from behind it. The composite read is:
+           panel makes room, sidebar fills it, as a single motion.
+           Same 420ms entry delay as the sidebar so the two paired
+           movements fire as one beat after the nav has settled. On
+           exit no delay — canvas + sidebar move together first,
+           then the nav drops, mirroring the entry sequence in
+           reverse. Scale is repeated in both keyframes since
+           transform is one property — interpolating translate alone
+           requires the scale component to be present at both
+           endpoints. */
+        @keyframes app-canvas-enter {
+          from { transform: translateX(var(--canvas-shift)) scale(var(--shell-scale)); }
+          to   { transform: translateX(0) scale(var(--shell-scale)); }
+        }
+        .app-canvas-enter { animation: app-canvas-enter 760ms cubic-bezier(0.16, 1, 0.3, 1) 420ms both; }
+
+        @keyframes app-canvas-exit {
+          from { transform: translateX(0) scale(var(--shell-scale)); }
+          to   { transform: translateX(var(--canvas-shift)) scale(var(--shell-scale)); }
+        }
+        .app-canvas-exit { animation: app-canvas-exit 760ms cubic-bezier(0.16, 1, 0.3, 1) forwards; }
 
         /* Snappy staggered fade for bento items. Pure opacity (no
            transform) so the wrapper doesn't create a stacking
@@ -3109,14 +3395,13 @@ export default function AppPage() {
         }
       `}</style>
 
-      {layout && <FloatingNav layout={layout.main} exiting={exiting} onBack={handleBack} />}
+      <FloatingNav layout={MAIN_PANEL} exiting={exiting} onBack={handleBack} />
 
-      {/* Main panel at the LMC rect. */}
-      {layout && (
-        <section style={{
+      {/* Main panel — fills the canvas exactly. */}
+      <section style={{
           position: "absolute",
-          left: layout.main.left, top: layout.main.top, width: layout.main.width, height: layout.main.height,
-          borderRadius: 20 * layout.main.scale,
+          left: 0, top: 0, width: PANEL_W, height: PANEL_H,
+          borderRadius: 20,
           overflow: "hidden",
           display: "flex", flexDirection: "column",
           isolation: "isolate",
@@ -3166,8 +3451,18 @@ export default function AppPage() {
                       opacity on the Card or any ancestor leaves a
                       compositor layer that prevents backdrop-filter
                       from sampling the panel landscape. Static is
-                      the price for the blur to stay live. */}
-                  <div style={{ gridColumn: "1", gridRow: "4", display: "flex", flexDirection: "column" }}>
+                      the price for the blur to stay live.
+                      Exit, however, uses a binary visibility flip
+                      (no transition) so the segment disappears with
+                      the rest of the bento — no slow fade required,
+                      and no compositor layer because there's no
+                      animation, so the blur stays intact while
+                      visible. */}
+                  <div style={{
+                    gridColumn: "1", gridRow: "4",
+                    display: "flex", flexDirection: "column",
+                    visibility: exiting ? "hidden" : "visible",
+                  }}>
                     <Card style={{
                       display: "flex", alignItems: "center", height: "100%",
                       backdropFilter: "blur(24px)",
@@ -3180,71 +3475,54 @@ export default function AppPage() {
               )}
             </div>
           </div>
+
+          {/* Withdraw modal lives INSIDE the panel section so its
+              backdrop-filter only blurs the panel's own contents —
+              the sidebar/tabs/nav (siblings outside the section)
+              stay sharp. The section already has overflow:hidden,
+              so the modal is naturally clipped to the panel rect. */}
+          {withdrawOpen && <WithdrawModal onClose={() => setWithdrawOpen(false)} />}
         </section>
-      )}
 
-
-      {/* Vault dashboard sidebar — mirrors Sherpa's chrome on the
-          left margin. Only renders when there's enough room. */}
-      {layout && layout.left && (
-        <section style={{
-          position: "absolute",
-          left: layout.left.left,
-          top: layout.left.top,
-          width: layout.left.width,
-          height: layout.left.height,
-          borderRadius: 20 * layout.left.scale,
-          overflow: "hidden",
-          display: "flex", flexDirection: "column",
-          isolation: "isolate",
-          zIndex: 1,
-          background: "#0c0c10",
-          border: "1px solid rgba(255,255,255,0.08)",
-        }} className={leftSidebarClass}>
-          <DashboardPanel />
-        </section>
-      )}
-
-      {/* Agent chat sidebar — solid shadcn/midnight palette, no
-          landscape inside. Only renders when there's enough room. */}
-      {layout && layout.right && (
-        <section style={{
-          position: "absolute",
-          left: layout.right.left,
-          top: layout.right.top,
-          width: layout.right.width,
-          height: layout.right.height,
-          borderRadius: 20 * layout.right.scale,
-          overflow: "hidden",
-          display: "flex", flexDirection: "column",
-          isolation: "isolate",
-          zIndex: 1,
-          background: "#0c0c10",
-          border: "1px solid rgba(255,255,255,0.08)",
-        }} className={rightSidebarClass}>
-          <AgentChatPanel />
-        </section>
-      )}
-
-      {/* Bottom strip — sits in the gap between the main panel's
-          bottom edge and the canvas inset. Left/right text mirrors
-          the landing's footer pattern. */}
-      {layout && (
-        <div className={footerClass}>
-          <FooterStrip
-            left={layout.main.left}
-            width={layout.main.width}
-            top={layout.main.top + layout.main.height + 12}
-            showHowItWorks={showHowItWorks}
-            onToggleHowItWorks={() => setShowHowItWorks((v) => !v)}
-          />
-        </div>
-      )}
+      {/* Bottom strip — sits 12 design-px below the panel, inside the
+          scaled canvas so it tracks the panel's width and scale. */}
+      <div className={footerClass}>
+        <FooterStrip
+          left={0}
+          width={PANEL_W}
+          top={PANEL_H + 12}
+          showHowItWorks={showHowItWorks}
+          onToggleHowItWorks={() => setShowHowItWorks((v) => !v)}
+        />
+      </div>
 
       </div>
-      {/* Modal is portalled to <body>, so it stays outside the
-          scaled canvas and renders in viewport space. */}
-      {withdrawOpen && <WithdrawModal onClose={() => setWithdrawOpen(false)} />}
+
+      {/* Right sidebar + its tab switcher above. Both live in
+          viewport space (NOT scaled by --shell-scale) but anchor to
+          --sidebar-left / --sidebar-w, so they sit one fixed gap
+          right of the (combo-centered) panel and hold a stable
+          design width. zIndex: 1 keeps them behind the canvas (z=2),
+          which is what the slide-in animation expects — they
+          "unroll from behind the panel". */}
+      <SidebarTabs tab={sidebarTab} onChange={setSidebarTab} exiting={exiting} agentUnread={agentUnread} />
+
+      <section style={{
+        position: "fixed",
+        left: "var(--sidebar-left)",
+        width: "var(--sidebar-w)",
+        top: "var(--panel-top)",
+        height: "var(--panel-h)",
+        borderRadius: 20,
+        overflow: "hidden",
+        display: "flex", flexDirection: "column",
+        isolation: "isolate",
+        zIndex: 1,
+        background: "#0c0c10",
+        border: "1px solid rgba(255,255,255,0.08)",
+      }} className={rightSidebarClass}>
+        {sidebarTab === "agent" ? <AgentChatPanel /> : <DashboardPanel />}
+      </section>
     </main>
   );
 }
