@@ -124,6 +124,108 @@ contract PoolRegistryTest is Test {
         registry.addPool(p);
     }
 
+    function test_addPool_withAllowlistedHook_succeeds() public {
+        address hook = makeAddr("alphixHook");
+        vm.prank(owner);
+        registry.setHookAllowed(hook, true);
+
+        PoolRegistry.Pool memory p = _samplePool();
+        p.hooks = hook;
+        vm.prank(guardian);
+        bytes32 key = registry.addPool(p);
+        assertEq(registry.getPool(key).hooks, hook);
+    }
+
+    function test_addPool_withRevokedHook_reverts() public {
+        address hook = makeAddr("alphixHook");
+        vm.startPrank(owner);
+        registry.setHookAllowed(hook, true);
+        registry.setHookAllowed(hook, false);
+        vm.stopPrank();
+
+        PoolRegistry.Pool memory p = _samplePool();
+        p.hooks = hook;
+        vm.prank(guardian);
+        vm.expectRevert(PoolRegistry.HookedPoolsNotAllowed.selector);
+        registry.addPool(p);
+    }
+
+    function test_setHookAllowed_byNonOwner_reverts() public {
+        address hook = makeAddr("alphixHook");
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        registry.setHookAllowed(hook, true);
+    }
+
+    function test_setHookAllowed_zeroAddress_reverts() public {
+        vm.prank(owner);
+        vm.expectRevert(PoolRegistry.InvalidConfig.selector);
+        registry.setHookAllowed(address(0), true);
+    }
+
+    function test_isHookAllowed_zeroAddressAlwaysAllowed() public view {
+        assertTrue(registry.isHookAllowed(address(0)));
+    }
+
+    function test_isHookAllowed_unsetReturnsFalse() public {
+        address hook = makeAddr("randomHook");
+        assertFalse(registry.isHookAllowed(hook));
+    }
+
+    function test_v3WethUsdc_and_v4NativeEthUsdc_coexist() public {
+        // V4 native-ETH/USDC (token0 = address(0)) and V3 WETH/USDC must be
+        // independent registry entries even though they target conceptually
+        // the same asset pair. Distinct adapters and a distinct token0 mean
+        // distinct pool keys; both should register without conflict.
+        address weth = makeAddr("weth");
+        address usdc = makeAddr("usdc");
+        address v3Adapter = makeAddr("v3Adapter");
+        address v4Adapter = makeAddr("v4Adapter");
+        address v4Hook = makeAddr("v4Hook");
+        // Sort tokens for the V3 entry; token0=0 ordering is automatic for V4.
+        (address t0, address t1) = uint160(weth) < uint160(usdc) ? (weth, usdc) : (usdc, weth);
+        (address vUsdc) = uint160(weth) < uint160(usdc) ? usdc : weth;
+
+        vm.prank(owner);
+        registry.setHookAllowed(v4Hook, true);
+
+        // V3 WETH/USDC 0.05%
+        PoolRegistry.Pool memory v3Pool = PoolRegistry.Pool({
+            adapter: v3Adapter,
+            token0: t0,
+            token1: t1,
+            fee: 500,
+            tickSpacing: 10,
+            hooks: address(0),
+            maxAllocationBps: 5_000,
+            enabled: true
+        });
+        // V4 native-ETH/USDC, dynamic-fee hook
+        PoolRegistry.Pool memory v4Pool = PoolRegistry.Pool({
+            adapter: v4Adapter,
+            token0: address(0),
+            token1: vUsdc,
+            fee: 0x800000,
+            tickSpacing: 60,
+            hooks: v4Hook,
+            maxAllocationBps: 3_000,
+            enabled: true
+        });
+
+        vm.startPrank(guardian);
+        bytes32 v3Key = registry.addPool(v3Pool);
+        bytes32 v4Key = registry.addPool(v4Pool);
+        vm.stopPrank();
+
+        // Distinct keys, both queryable, total count = 2.
+        assertTrue(v3Key != v4Key, "keys must differ");
+        assertEq(registry.poolCount(), 2);
+        assertEq(registry.getPool(v3Key).adapter, v3Adapter);
+        assertEq(registry.getPool(v4Key).adapter, v4Adapter);
+        assertEq(registry.getPool(v4Key).token0, address(0));
+        assertEq(registry.getPool(v4Key).fee, 0x800000);
+    }
+
     function test_addPool_duplicate_reverts() public {
         PoolRegistry.Pool memory p = _samplePool();
         vm.startPrank(guardian);

@@ -1,0 +1,44 @@
+[
+  {
+    "label": "USDC/cbBTC 0.05% (V3)",
+    "kind": "v3",
+    "lpKey": "0xe0690ead755084e8536dedc0811254b4321f91ec2c6d405cf246982f0bdc8e37",
+    "urKey": "0xac13abaee5669929fc2ff9779d5491c59f2d81b7d33ec655889d4ef471626e02",
+    "token0": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "token1": "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
+    "decimals0": 6,
+    "decimals1": 8,
+    "fee": 500,
+    "tickSpacing": 10,
+    "hooks": "0x0000000000000000000000000000000000000000",
+    "profile": "mid"
+  },
+  {
+    "label": "USDC/USDT 0.01% (V3)",
+    "kind": "v3",
+    "lpKey": "0x7430e858fc4007d0addb6df6cd415cb3269ea45be94c4075195d3e8f24d8ee16",
+    "urKey": "0x9d7013f9629edc889b07291a8007649bea38729b8ebd2e38ff98a35f4fa87736",
+    "token0": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "token1": "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2",
+    "decimals0": 6,
+    "decimals1": 6,
+    "fee": 100,
+    "tickSpacing": 1,
+    "hooks": "0x0000000000000000000000000000000000000000",
+    "profile": "stable"
+  },
+  {
+    "label": "ETH/USDC dynamic-fee (V4 hooked)",
+    "kind": "v4",
+    "lpKey": "0x7727df19cb5072f4d1b7a7bfa7890281c1e70a102cd9e47000b89a186c7c1df2",
+    "urKey": "0xadc91d817dcb0105d5089c6aa97193589667a0cf348a2d5d4f3292ab9cd09685",
+    "token0": "0x0000000000000000000000000000000000000000",
+    "token1": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "decimals0": 18,
+    "decimals1": 6,
+    "fee": 8388608,
+    "tickSpacing": 60,
+    "hooks": "0x7cBbfF9C4fcd74B221C535F4fB4B1Db04F1B9044",
+    "profile": "mid"
+  }
+]

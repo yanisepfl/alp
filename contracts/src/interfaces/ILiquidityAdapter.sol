@@ -26,7 +26,7 @@ interface ILiquidityAdapter {
         uint256 amount0Min,
         uint256 amount1Min,
         bytes calldata extra
-    ) external returns (uint256 positionId, uint128 liquidity, uint256 amount0Used, uint256 amount1Used);
+    ) external payable returns (uint256 positionId, uint128 liquidity, uint256 amount0Used, uint256 amount1Used);
 
     /// @notice Remove `liquidity` from `positionId` and forward the released
     /// tokens (and any owed fees) to `msg.sender`.
@@ -57,7 +57,7 @@ interface ILiquidityAdapter {
         uint256 amountIn,
         uint256 amountOutMin,
         bytes calldata extra
-    ) external returns (uint256 amountOut);
+    ) external payable returns (uint256 amountOut);
 
     /// @notice Decompose an open position into the underlying token amounts at
     /// the pool's current spot price. Returns 0,0 for burned or unknown
@@ -91,6 +91,18 @@ interface ILiquidityAdapter {
     /// @notice Returns the pool's current spot price as a Q64.96 sqrt(token1/token0).
     /// Used by the vault to value non-base tokens in base-asset units.
     function getSpotSqrtPriceX96(PoolRegistry.Pool calldata pool) external view returns (uint160 sqrtPriceX96);
+
+    /// @notice Returns the time-weighted average sqrtPrice over the last
+    /// `secondsAgo` seconds (Q64.96), or 0 if the underlying pool does not
+    /// expose an oracle. The vault uses this as a manipulation-resistant
+    /// reference for slippage floors on its auto-unwind swap. Adapters whose
+    /// pool layer has no built-in oracle (V4 without an oracle hook) MUST
+    /// return 0; the vault falls back to a tighter spot-derived floor in that
+    /// case.
+    function getTwapSqrtPriceX96(PoolRegistry.Pool calldata pool, uint32 secondsAgo)
+        external
+        view
+        returns (uint160 sqrtPriceX96);
 
     /// @notice Returns the current liquidity of a position. Returns 0 for
     /// burned or unknown positions so callers can iterate a list without

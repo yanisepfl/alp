@@ -1,0 +1,22 @@
+name = "alp-agent"
+main = "src/index.ts"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[kv_namespaces]]
+binding = "ACTIVITY_LOG"
+id = "5d8d1d27dec64ba5a8b6ce904ace5611"
+
+# Vars set via `wrangler secret put`:
+#   AGENT_PRIVATE_KEY        agent hot wallet private key (0x-prefixed)
+#   HMAC_SECRET              shared secret with KeeperHub for webhook auth
+#   KEEPERHUB_API_KEY        KH-side bearer the workflow includes when calling /trigger
+#   BASE_RPC_URL             Base mainnet RPC URL
+#   VAULT_ADDRESS            deployed ALPVault address
+#   REGISTRY_ADDRESS         deployed PoolRegistry address
+#   V3_ADAPTER_ADDRESS       deployed UniV3Adapter address
+#   V4_ADAPTER_ADDRESS       deployed UniV4Adapter address
+#   UR_ADAPTER_ADDRESS       deployed UniversalRouterAdapter address
+# Optional: set KEEPERHUB_DIRECT_EXEC=true to route rebalance txs via KH's
+# Turnkey execution wallet. Requires that wallet to (a) hold the vault's
+# `agent` role and (b) have a small ETH balance for gas on Base mainnet.
