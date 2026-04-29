@@ -111,12 +111,22 @@ contract PoolRegistry is Ownable2Step {
         if (p.adapter == address(0) || p.token1 == address(0)) revert InvalidConfig();
         if (p.token0 >= p.token1) revert InvalidConfig();
         if (p.maxAllocationBps == 0 || p.maxAllocationBps > 10_000) revert InvalidConfig();
-        // tickSpacing must be strictly positive. V4 pools require the live
-        // PoolManager-tracked spacing; V3 pools should pass the convention
-        // for their fee tier (1 / 10 / 60 / 200) — informational only at
-        // the V3 adapter layer but kept consistent so any future tooling
-        // can derive the right step without consulting the adapter.
+        // tickSpacing must be strictly positive AND, for V3-style pools
+        // (hooks == 0 with one of the canonical V3 fee tiers), exactly the
+        // canonical spacing — otherwise the registry could hold two distinct
+        // keys that route to the same underlying V3 pool, silently bypassing
+        // the per-pool position cap and confusing off-chain reconciliation.
+        // V4 pools (hooks != 0 OR non-V3 fee tier like the dynamic-fee flag)
+        // pass through with whatever spacing the V4 PoolKey uses.
         if (p.tickSpacing <= 0) revert InvalidConfig();
+        if (p.hooks == address(0)) {
+            int24 canonical;
+            if (p.fee == 100) canonical = 1;
+            else if (p.fee == 500) canonical = 10;
+            else if (p.fee == 3000) canonical = 60;
+            else if (p.fee == 10_000) canonical = 200;
+            if (canonical != 0 && p.tickSpacing != canonical) revert InvalidConfig();
+        }
         // Hook contracts are blocked at the registry layer unless the owner
         // has explicitly allowlisted that specific hook address. The vault
         // also re-checks at every routed call (defence in depth) — both

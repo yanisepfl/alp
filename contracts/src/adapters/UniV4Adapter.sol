@@ -466,13 +466,15 @@ contract UniV4Adapter is ILiquidityAdapter {
         positionManager.modifyLiquidities{value: _ethValueFor(key)}(abi.encode(actions, params), deadline);
     }
 
-    /// @dev Forward the adapter's current native-ETH balance with the V4 call
-    /// when one of the pool's currencies is native. The vault always sends
-    /// the exact amount as msg.value beforehand, so address(this).balance
-    /// equals what the V4 SETTLE expects. Returns 0 for ERC20-only pools.
+    /// @dev Forward EXACTLY the native-ETH amount the vault just sent as
+    /// msg.value, NOT `address(this).balance`. Using the live balance would
+    /// auto-forward any pre-existing dust (selfdestruct/coinbase tip/prior
+    /// partial-failure leftover) into the V4 mint, breaking the "vault sends
+    /// the exact amount" invariant. We pass msg.value through explicitly so
+    /// donations stay in the adapter and can be reconciled separately.
     function _ethValueFor(PoolKey memory key) internal view returns (uint256) {
         if (Currency.unwrap(key.currency0) == address(0) || Currency.unwrap(key.currency1) == address(0)) {
-            return address(this).balance;
+            return msg.value;
         }
         return 0;
     }

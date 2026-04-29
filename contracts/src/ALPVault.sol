@@ -732,7 +732,11 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         address owner,
         address[] calldata expectedTokens,
         uint256[] calldata minAmounts
-    ) external nonReentrant whenNotPaused {
+    ) external nonReentrant {
+        // Intentionally NOT `whenNotPaused`: redeemInKind is the documented
+        // escape hatch for situations where the agent / pools / oracle path
+        // is broken — gating it on pause defeats its purpose. Same-block
+        // lockout below still applies.
         if (expectedTokens.length != minAmounts.length) revert InKindArrayMismatch();
         if (_lastMintBlock[owner] == block.number || _lastMintBlock[msg.sender] == block.number) {
             revert SameBlockMintAndRedeem();
@@ -808,22 +812,20 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
             }
         }
 
-        // Phase 2: settle. Burn shares first, decrement bookTAV
-        // proportionally, then transfer the user's slice of every relevant
-        // token. Slice math (per token):
-        //   user_amount = (now_balance - idleBefore) + ratio * idleBefore
-        // i.e. ALL of the peeled inflow (sized to user share) plus ratio of
-        // the pre-peel idle. Same formula on base and non-base rails so the
-        // user is never under-paid the slice they just earned.
+        // Phase 2: settle. Burn the full `shares` from caller, but only
+        // distribute proportional to `effectiveShares = shares * (1 - fee)`
+        // — the fee fraction stays as donated idle in the vault, accruing
+        // to remaining holders. Mirrors the deposit/redeem fee discipline
+        // so an attacker can't dodge the entry/exit fee by routing through
+        // the in-kind path.
+        uint256 effectiveShares = shares - Math.mulDiv(shares, entryExitFeeBps, BPS_DENOM, Math.Rounding.Floor);
         _burn(owner, shares);
-        // mulDiv with Floor rounding and shares <= supply means the slice
-        // can never exceed bookTAV, so the ternary safety branch is dead.
-        bookTAV -= Math.mulDiv(bookTAV, shares, supply, Math.Rounding.Floor);
+        bookTAV -= Math.mulDiv(bookTAV, effectiveShares, supply, Math.Rounding.Floor);
 
         emit RedeemedInKind(owner, receiver, shares);
 
         // Distribute the base asset.
-        _settleInKind(base, baseIdleBefore, shares, supply, receiver);
+        _settleInKind(base, baseIdleBefore, effectiveShares, supply, receiver);
         // Distribute every non-base token whose valuation slot belongs to
         // an active, non-orphaned pool. Same snapshot-aware delta+ratio
         // formula as the base rail, so non-base redeemers aren't
@@ -833,7 +835,7 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
             if (_orphanedPool[key]) continue;
             address nb = nonBaseTokens[i];
             if (_valuationPoolByToken[nb] != key) continue;
-            _settleInKind(nb, nonBaseIdleBefore[i], shares, supply, receiver);
+            _settleInKind(nb, nonBaseIdleBefore[i], effectiveShares, supply, receiver);
         }
 
         // Verify caller-supplied per-token minimums against the actual
@@ -1051,7 +1053,8 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
                         if (pool.token0 == base) bookTAV += a0;
                         else if (pool.token1 == base) bookTAV += a1;
                     } catch {
-                        // intentionally swallowed — see comment above
+                        // intentionally swallowed; off-chain monitoring infers
+                        // failure from absence of the FeesCollected event.
                     }
                     unchecked {
                         ++j;
