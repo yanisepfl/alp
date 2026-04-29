@@ -45,12 +45,15 @@ Set per-pool in the config, not on-chain — easy to retune.
 
 | Route | Auth | Description |
 |-------|------|-------------|
-| `POST /trigger` | HMAC | Normal scheduled tick (KeeperHub fires this every 30 min). |
-| `POST /force-rebalance` | HMAC | Demo button: ignore hysteresis and rebalance now. Body `{}` rebalances every position; body `{"positionKey": "..."}` rebalances just one. |
+| `POST /trigger` | HMAC \| Bearer | Normal scheduled tick (KeeperHub fires this every 30 min). |
+| `POST /force-rebalance` | HMAC \| Bearer | Demo button: ignore hysteresis and rebalance now. Body `{}` rebalances every position; body `{"positionKey": "..."}` rebalances just one. |
 | `GET /agent/dryrun` | none | Read-only: returns the plan the agent would execute against current chain state. Spends no gas. Use this to verify the agent is reading state correctly. |
+| `GET /agent/health` | none | Liveness + public config snapshot. Used by KeeperHub uptime probes. |
 | `GET /agent/activity?limit=N` | none | Recent decisions + tx hashes. Frontend feed. |
 
-`HMAC` requires `x-signature: <hex HMAC-SHA256(body, HMAC_SECRET)>`.
+Auth options on the write endpoints — either is sufficient on its own:
+- `x-signature: <hex HMAC-SHA256(body, HMAC_SECRET)>` (CLI / scripted callers)
+- `Authorization: Bearer <KEEPERHUB_API_KEY>` (KeeperHub workflow webhook nodes that can't compute HMAC dynamically)
 
 ## Local run
 
@@ -79,4 +82,4 @@ pnpm wrangler secret put UR_ADAPTER_ADDRESS
 pnpm deploy
 ```
 
-Then point KeeperHub at `https://<your-worker>.workers.dev/trigger` with HMAC-SHA256 signing (header `x-signature`).
+Then point KeeperHub at `https://<your-worker>.workers.dev/trigger` — see [KEEPERHUB.md](./KEEPERHUB.md) for the workflow recipe.

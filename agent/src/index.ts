@@ -8,6 +8,10 @@ interface Env {
   ACTIVITY_LOG: KVNamespace;
   AGENT_PRIVATE_KEY: string;
   HMAC_SECRET: string;
+  /** Optional: shared bearer token for KeeperHub-style webhook callers that
+   *  can't compute HMAC over the request body. Either HMAC or this token
+   *  is sufficient on its own. */
+  KEEPERHUB_API_KEY?: string;
   BASE_RPC_URL: string;
   VAULT_ADDRESS: string;
   REGISTRY_ADDRESS: string;
@@ -37,6 +41,21 @@ export default {
       // spending gas.
       return runAndRespond(env, { dryRun: true });
     }
+    if (url.pathname === "/agent/health" && req.method === "GET") {
+      // Liveness + config snapshot for KeeperHub uptime monitoring. No
+      // secrets — only the public side of the agent's identity. Works as a
+      // KeeperHub workflow's "Check before acting" precondition step.
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          vault: env.VAULT_ADDRESS,
+          registry: env.REGISTRY_ADDRESS,
+          chain: "base",
+          ts: Date.now(),
+        }),
+        { headers: { "content-type": "application/json", "access-control-allow-origin": "*" } },
+      );
+    }
     if (url.pathname === "/trigger" && req.method === "POST") {
       return handleAuthedRun(req, env, () => ({}));
     }
@@ -55,11 +74,9 @@ async function handleAuthedRun(
   env: Env,
   optionsFromBody: (body: { positionKey?: string }) => RunOptions,
 ): Promise<Response> {
-  const sig = req.headers.get("x-signature");
   const body = await req.text();
-  if (!sig || !(await verifyHmac(env.HMAC_SECRET, body, sig))) {
-    return new Response("unauthorised", { status: 401 });
-  }
+  const authed = await isAuthorized(req, env, body);
+  if (!authed) return new Response("unauthorised", { status: 401 });
   let parsed: { positionKey?: string } = {};
   if (body.length > 0) {
     try {
@@ -104,6 +121,17 @@ async function loadHysteresis(kv: KVNamespace): Promise<Map<string, PositionHyst
 
 async function saveHysteresis(kv: KVNamespace, state: Map<string, PositionHysteresis>): Promise<void> {
   await kv.put(HYSTERESIS_KEY, JSON.stringify(Array.from(state.values())));
+}
+
+/** Two-track auth so KeeperHub-style webhook callers can use a static
+ *  bearer token while the legacy CLI / admin-script callers can keep their
+ *  HMAC-over-body flow. Either alone is sufficient. */
+async function isAuthorized(req: Request, env: Env, body: string): Promise<boolean> {
+  const sig = req.headers.get("x-signature");
+  if (sig && (await verifyHmac(env.HMAC_SECRET, body, sig))) return true;
+  const auth = req.headers.get("authorization");
+  if (auth && env.KEEPERHUB_API_KEY && auth === `Bearer ${env.KEEPERHUB_API_KEY}`) return true;
+  return false;
 }
 
 async function verifyHmac(secret: string, body: string, signature: string): Promise<boolean> {
