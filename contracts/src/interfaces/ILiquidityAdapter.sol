@@ -92,6 +92,18 @@ interface ILiquidityAdapter {
     /// Used by the vault to value non-base tokens in base-asset units.
     function getSpotSqrtPriceX96(PoolRegistry.Pool calldata pool) external view returns (uint160 sqrtPriceX96);
 
+    /// @notice Returns the time-weighted average sqrtPrice over the last
+    /// `secondsAgo` seconds (Q64.96), or 0 if the underlying pool does not
+    /// expose an oracle. The vault uses this as a manipulation-resistant
+    /// reference for slippage floors on its auto-unwind swap. Adapters whose
+    /// pool layer has no built-in oracle (V4 without an oracle hook) MUST
+    /// return 0; the vault falls back to a tighter spot-derived floor in that
+    /// case.
+    function getTwapSqrtPriceX96(PoolRegistry.Pool calldata pool, uint32 secondsAgo)
+        external
+        view
+        returns (uint160 sqrtPriceX96);
+
     /// @notice Returns the current liquidity of a position. Returns 0 for
     /// burned or unknown positions so callers can iterate a list without
     /// reverting.

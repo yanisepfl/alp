@@ -349,6 +349,18 @@ contract UniV4Adapter is ILiquidityAdapter {
         sqrtPriceX96 = _poolSqrtPrice(pool);
     }
 
+    /// @notice V4 PoolManager has no built-in oracle (oracles must be hooks).
+    /// Returns spot for now; the vault's slippage floor will only bound
+    /// per-call damage on V4 pools, not prevent sandwich extraction. Tracked
+    /// as a known limitation; mitigated operationally by per-pool maxAlloc.
+    function getTwapSqrtPriceX96(PoolRegistry.Pool calldata pool, uint32)
+        external
+        view
+        returns (uint160 sqrtPriceX96)
+    {
+        sqrtPriceX96 = _poolSqrtPrice(pool);
+    }
+
     function nftManager() external view returns (address) {
         return address(positionManager);
     }

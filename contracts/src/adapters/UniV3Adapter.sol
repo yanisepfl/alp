@@ -296,6 +296,31 @@ contract UniV3Adapter is ILiquidityAdapter {
         sqrtPriceX96 = _poolSqrtPrice(pool);
     }
 
+    /// @notice TWAP-derived sqrtPriceX96 over the last `secondsAgo` seconds via
+    /// the V3 pool's cumulative-tick oracle. Returns 0 if the pool's
+    /// observation cardinality is too small to satisfy the lookback (caller
+    /// then falls back to spot). Manipulation cost: an attacker has to hold
+    /// price away from fair across the full window, not just the current block.
+    function getTwapSqrtPriceX96(PoolRegistry.Pool calldata pool, uint32 secondsAgo)
+        external
+        view
+        returns (uint160 sqrtPriceX96)
+    {
+        if (secondsAgo == 0) return _poolSqrtPrice(pool);
+        address poolAddr = factory.getPool(pool.token0, pool.token1, pool.fee);
+        if (poolAddr == address(0)) return 0;
+        uint32[] memory ago = new uint32[](2);
+        ago[0] = secondsAgo;
+        ago[1] = 0;
+        try IUniswapV3Pool(poolAddr).observe(ago) returns (int56[] memory ticks, uint160[] memory) {
+            int56 tickDelta = ticks[1] - ticks[0];
+            int24 avgTick = int24(tickDelta / int56(uint56(secondsAgo)));
+            sqrtPriceX96 = TickMath.getSqrtPriceAtTick(avgTick);
+        } catch {
+            return 0;
+        }
+    }
+
     function nftManager() external view returns (address) {
         return address(npm);
     }

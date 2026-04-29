@@ -58,12 +58,14 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     uint256 public constant MAX_POSITIONS_PER_POOL = 4;
 
     /// @notice Max acceptable slippage on the auto-unwind non-base→base
-    /// swap, in basis points. The unwind path is triggered by a user's
-    /// withdraw shortfall; if the swap moves more than this against the
-    /// vault, the swap silently fails-soft and the user's withdraw
-    /// reverts with `InsufficientLiquidityAfterUnwind` rather than the
-    /// vault eating an arbitrary loss.
-    uint256 public constant UNWIND_SLIPPAGE_BPS = 200; // 2%
+    /// swap, in basis points. The floor anchors on `getTwapSqrtPriceX96`
+    /// from the adapter (NOT spot) so a sandwich moving spot in the same
+    /// block can't shift the reference. V3 returns a real TWAP; V4 returns
+    /// the same value as spot (no built-in oracle), in which case the floor
+    /// only bounds per-call damage rather than eliminating sandwich risk —
+    /// documented limitation.
+    uint256 internal constant UNWIND_SLIPPAGE_BPS = 100; // 1%
+    uint32 internal constant UNWIND_TWAP_SECONDS = 300;
 
     PoolRegistry public immutable registry;
 
@@ -159,7 +161,6 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     error CannotSweepProtectedToken(address token);
     error SlippageMinRequired();
     error SwapNotionalCapExceeded(uint256 amountIn, uint256 cap);
-    error InsufficientLiquidityAfterUnwind(uint256 needed, uint256 available);
     error SameBlockMintAndRedeem();
     error InvalidFeeBps(uint256 bps);
     error EthTransferFailed();
@@ -711,6 +712,15 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     /// `minAmounts`: every entry in `expectedTokens` must be paid at
     /// least the matching `minAmounts` value or the call reverts.
     /// @dev Standard same-block-mint-and-redeem lockout still applies.
+    /// @dev SECURITY: each `minAmounts[i]` MUST be derived off-chain from a
+    /// TWAP-priced position decomposition, NOT from the pool's current spot.
+    /// Otherwise an attacker can flash-loan-manipulate spot to push positions
+    /// to one-sided composition before the peel and you'll receive the
+    /// inflated single-token slice (passing the slippage check because your
+    /// minimum was also computed at the manipulated spot). The vault cannot
+    /// enforce this on-chain because it cannot prove which off-chain price
+    /// the caller used; the dual-rail defense covers `redeem` but in-kind
+    /// peeling reads live position composition.
     function redeemInKind(
         uint256 shares,
         address receiver,
@@ -998,11 +1008,9 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
         // exhausts itself. Reverts only if the vault genuinely doesn't hold
         // enough underlying value.
         uint256 idle = IERC20(asset()).balanceOf(address(this));
-        if (idle < assets) {
-            _unwindForWithdraw(assets - idle);
-            idle = IERC20(asset()).balanceOf(address(this));
-            if (idle < assets) revert InsufficientLiquidityAfterUnwind(assets, idle);
-        }
+        if (idle < assets) _unwindForWithdraw(assets - idle);
+        // No explicit idle-vs-assets check here: super._withdraw will revert
+        // with the ERC20 transfer failure if the unwind didn't free enough.
         // Decrement bookTAV by the actual NET assets paid out (which is what
         // crossed the boundary), not by `bookTAV * shares / supply`. With a
         // non-zero entry/exit fee the share burn corresponds to gross =
@@ -1123,15 +1131,20 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
                 } catch {}
             }
 
-            // Swap any non-base proceeds in this pool back to base. Slippage
-            // floor derived from this pool's spot ± UNWIND_SLIPPAGE_BPS so a
-            // third-party MEV bot can't sandwich the auto-unwind swap and
-            // siphon value from remaining holders. Skipped silently on
-            // revert (dust below router minimum, slippage trip, etc.).
+            // Swap any non-base proceeds back to base. The slippage floor
+            // anchors on a TWAP-derived sqrtPrice (not spot) so a third-party
+            // sandwich moving spot in the same block can't move the floor's
+            // reference point — the manipulator would have to hold price away
+            // from fair across the full UNWIND_TWAP_SECONDS window. Adapters
+            // without an oracle (V4 today) return 0; we then fall back to a
+            // tighter SPOT_FLOOR_BPS derived from spot, which only bounds the
+            // damage rather than eliminating it (documented limitation).
             address nonBase = baseIsToken0 ? pool.token1 : pool.token0;
             uint256 nonBaseBal = _balanceOf(nonBase, address(this));
             if (nonBaseBal > 0) {
-                uint256 expected = _convertToBase(nonBaseBal, sqrtPriceX96, !baseIsToken0);
+                uint160 ref = adapter_.getTwapSqrtPriceX96(pool, UNWIND_TWAP_SECONDS);
+                if (ref == 0) ref = sqrtPriceX96;
+                uint256 expected = _convertToBase(nonBaseBal, ref, !baseIsToken0);
                 uint256 minOut = expected == 0 ? 1 : (expected * (BPS_DENOM - UNWIND_SLIPPAGE_BPS)) / BPS_DENOM;
                 if (minOut == 0) minOut = 1;
                 uint256 ethValue = 0;

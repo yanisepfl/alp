@@ -14,4 +14,13 @@ interface IUniswapV3Pool {
             uint8 feeProtocol,
             bool unlocked
         );
+
+    /// @notice Read cumulative tick observations at the requested seconds-ago
+    /// offsets. Used to derive a TWAP that is manipulation-resistant within a
+    /// single block (a flash-loan sandwich can move spot but cannot retroactively
+    /// rewrite the cumulative observations from prior blocks).
+    function observe(uint32[] calldata secondsAgos)
+        external
+        view
+        returns (int56[] memory tickCumulatives, uint160[] memory secondsPerLiquidityCumulativeX128);
 }

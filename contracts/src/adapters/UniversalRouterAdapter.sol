@@ -136,6 +136,16 @@ contract UniversalRouterAdapter is ILiquidityAdapter {
     /// vault by `_sweep` at the end of `swapExactIn`.
     receive() external payable {}
 
+    /// @notice Permissionless escape hatch for dust donations. The dirty-balance
+    /// check in `swapExactIn` would otherwise turn any 1-wei donation (ERC20
+    /// transfer or `selfdestruct` ETH) into a permanent DoS for that token.
+    /// Anyone can call this to flush stuck balance to the vault — funds always
+    /// go to `vault`, so the function is safe to leave open and removes the
+    /// donor's economic motivation entirely.
+    function sweep(address token) external {
+        _sweep(token, vault);
+    }
+
     // -------- ILiquidityAdapter (liquidity path is unsupported) --------
 
     function addLiquidity(PoolRegistry.Pool calldata, uint256, uint256, uint256, uint256, bytes calldata)
@@ -167,6 +177,14 @@ contract UniversalRouterAdapter is ILiquidityAdapter {
     /// units when enforcing the per-tx notional cap.
     function getSpotSqrtPriceX96(PoolRegistry.Pool calldata pool) external view returns (uint160 sqrtPriceX96) {
         sqrtPriceX96 = _poolSqrtPrice(pool);
+    }
+
+    /// @notice URAdapter is swap-only and the vault's auto-unwind never goes
+    /// through it (unwind drains positions registered via V3/V4 adapters).
+    /// Returns 0 so the interface contract holds without dragging in V3
+    /// observe wiring here.
+    function getTwapSqrtPriceX96(PoolRegistry.Pool calldata, uint32) external pure returns (uint160) {
+        return 0;
     }
 
     /// @notice URAdapter never holds positions; always returns zero so the
