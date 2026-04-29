@@ -2827,12 +2827,57 @@ function sendErrorCopy(code: "disconnected" | "rate_limited" | "not_subscribed" 
   }
 }
 
+// Sherpa daily-cap mirror of the backend. Persisted to localStorage
+// so refresh-within-day preserves the counter; date rollover clears
+// it. Server is the truth on rate_limited; local state is best-effort
+// optics.
+const SHERPA_DAILY_CAP = 5;
+const SHERPA_COOLDOWN_MS = 20_000;
+const SHERPA_USAGE_KEY = "alp:sherpa-usage";
+
+type SherpaUsage = { date: string; count: number };
+
+function todayKey(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function loadSherpaUsage(): SherpaUsage {
+  if (typeof window === "undefined") return { date: todayKey(), count: 0 };
+  try {
+    const raw = window.localStorage.getItem(SHERPA_USAGE_KEY);
+    if (!raw) return { date: todayKey(), count: 0 };
+    const parsed = JSON.parse(raw) as SherpaUsage;
+    if (parsed.date !== todayKey()) return { date: todayKey(), count: 0 };
+    return parsed;
+  } catch {
+    return { date: todayKey(), count: 0 };
+  }
+}
+
+function saveSherpaUsage(u: SherpaUsage): void {
+  if (typeof window === "undefined") return;
+  try { window.localStorage.setItem(SHERPA_USAGE_KEY, JSON.stringify(u)); } catch { /* ignore */ }
+}
+
+function ClockIcon({ size = 11 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden style={{ display: "block", flexShrink: 0 }}>
+      <circle cx="12" cy="12" r="10" />
+      <polyline points="12 6 12 12 16 14" />
+    </svg>
+  );
+}
+
 function AgentChatPanel() {
   const { messages: wire, error: agentError } = useAgentStream();
   const send = useSendUserMessage();
+  const { isConnected } = useAccount();
   const messages = useMemo(() => wire.map(toAgentMessage), [wire]);
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
+  const [usage, setUsage] = useState<SherpaUsage>(() => loadSherpaUsage());
+  const [cooldownEndsAt, setCooldownEndsAt] = useState<number | null>(null);
+  const [now, setNow] = useState<number>(() => Date.now());
   const scrollRef = useRef<HTMLDivElement>(null);
   const didInitialScroll = useRef(false);
   const seenWireCount = useRef(0);
@@ -2863,38 +2908,101 @@ function AgentChatPanel() {
     }
   }, [wire]);
 
-  // Safety timeout: if no reply lands within 20s the indicator
-  // would otherwise spin forever (no agent connected, agent
-  // crashed, etc.). Clear silently — the absence of a reply is
-  // already evident in the empty feed; a toast would be noise.
+  // Safety timeout: sonnet calls return in ~5-10s typically, but the
+  // subprocess has a 25s server-side cap. 30s here keeps the spinner
+  // honest. Cleared by the reply-arrival effect above when a reply
+  // actually lands.
   useEffect(() => {
     if (!thinking) return;
-    const timer = window.setTimeout(() => setThinking(false), 20_000);
+    const timer = window.setTimeout(() => setThinking(false), 30_000);
     return () => window.clearTimeout(timer);
   }, [thinking]);
 
-  // Pick up server-side errors as they arrive (rate_limited /
-  // not_subscribed / auth_required). Toast and reset thinking —
-  // same recoverable-error doctrine the transport applies: the
-  // connection stays open, the user can retry.
+  // Tick `now` every 250ms while in cooldown so the countdown UI
+  // re-renders. Clears the cooldown when the deadline passes.
+  useEffect(() => {
+    if (!cooldownEndsAt) return;
+    const tick = window.setInterval(() => {
+      const t = Date.now();
+      setNow(t);
+      if (t >= cooldownEndsAt) setCooldownEndsAt(null);
+    }, 250);
+    return () => window.clearInterval(tick);
+  }, [cooldownEndsAt]);
+
+  // Date rollover: clear the daily counter at midnight UTC so the
+  // user gets a fresh 5 messages without a refresh.
+  useEffect(() => {
+    const i = window.setInterval(() => {
+      const today = todayKey();
+      setUsage((prev) => {
+        if (prev.date === today) return prev;
+        const fresh = { date: today, count: 0 };
+        saveSherpaUsage(fresh);
+        return fresh;
+      });
+    }, 60_000);
+    return () => window.clearInterval(i);
+  }, []);
+
+  // Pick up server-side errors. `rate_limited` is the new sherpa
+  // limit (cooldown or daily cap) — surface it as a toast AND, if the
+  // message indicates "daily", bump local usage to the cap so the UI
+  // converges with the server's view. `not_subscribed`/`auth_required`
+  // remain plain toasts.
   useEffect(() => {
     if (!agentError) return;
     const code = agentError.code;
-    if (code === "rate_limited" || code === "not_subscribed" || code === "auth_required") {
+    if (code === "rate_limited") {
+      toast("error", agentError.message ?? "Rate limited");
+      setThinking(false);
+      if (/daily/i.test(agentError.message ?? "")) {
+        const capped = { date: todayKey(), count: SHERPA_DAILY_CAP };
+        setUsage(capped);
+        saveSherpaUsage(capped);
+        setCooldownEndsAt(null);
+      }
+    } else if (code === "not_subscribed" || code === "auth_required") {
       toast("error", sendErrorCopy(code));
       setThinking(false);
     }
   }, [agentError]);
 
+  const cooldownRemainingS = cooldownEndsAt ? Math.max(0, Math.ceil((cooldownEndsAt - now) / 1000)) : 0;
+  const inCooldown = cooldownRemainingS > 0;
+  const messagesLeft = SHERPA_DAILY_CAP - usage.count;
+  const dailyExhausted = messagesLeft <= 0;
+  const sendBlocked = thinking || inCooldown || dailyExhausted || !isConnected;
+
   const handleSend = (e: React.FormEvent) => {
     e.preventDefault();
     const text = input.trim();
     if (!text || thinking) return;
+    if (!isConnected) {
+      toast("error", "Connect your wallet to chat with Sherpa");
+      return;
+    }
+    if (dailyExhausted) {
+      toast("error", "No more messages today");
+      return;
+    }
+    if (inCooldown) {
+      toast("error", `Sherpa is still thinking. Wait ${cooldownRemainingS}s.`);
+      return;
+    }
     const result = send(text);
     if (!result.ok) {
       toast("error", sendErrorCopy(result.reason));
       return;
     }
+    // Optimistic local accounting: bump count + start cooldown. If the
+    // server rejects (rate_limited daily), the effect above syncs us
+    // back up to the cap.
+    const next: SherpaUsage = { date: todayKey(), count: usage.count + 1 };
+    setUsage(next);
+    saveSherpaUsage(next);
+    setCooldownEndsAt(Date.now() + SHERPA_COOLDOWN_MS);
+    setNow(Date.now());
     setInput("");
     setThinking(true);
   };
@@ -3016,13 +3124,19 @@ function AgentChatPanel() {
           background: "rgba(255,255,255,0.04)",
           border: "1px solid rgba(255,255,255,0.10)",
           borderRadius: 999,
+          opacity: sendBlocked && !inCooldown ? 0.7 : 1,
+          transition: "opacity 200ms ease",
         }}>
           <input
             type="text"
-            placeholder="How can I help you?"
+            placeholder={
+              !isConnected   ? "Connect wallet to chat"
+              : dailyExhausted ? "Daily limit reached"
+              : "How can I help you?"
+            }
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            disabled={thinking}
+            disabled={sendBlocked}
             style={{
               flex: 1, minWidth: 0,
               height: 28,
@@ -3035,14 +3149,14 @@ function AgentChatPanel() {
           />
           <button
             type="submit"
-            disabled={thinking || !input.trim()}
+            disabled={sendBlocked || !input.trim()}
             aria-label="Send"
             style={{
               flexShrink: 0,
               width: 26, height: 26, borderRadius: "50%",
-              background: input.trim() && !thinking ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.06)",
+              background: input.trim() && !sendBlocked ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.06)",
               border: "none",
-              color: input.trim() && !thinking ? "#fff" : "rgba(255,255,255,0.35)",
+              color: input.trim() && !sendBlocked ? "#fff" : "rgba(255,255,255,0.35)",
               display: "inline-flex", alignItems: "center", justifyContent: "center",
               transition: "background 200ms ease, color 200ms ease",
             }}
@@ -3050,6 +3164,30 @@ function AgentChatPanel() {
             <StrokeIcon kind="arrow" size={12} />
           </button>
         </div>
+        {/* Status row — cooldown countdown OR remaining-messages
+            counter OR daily-exhausted notice. Priority: daily cap >
+            cooldown > counter (>= 3 sent). Hidden when disconnected
+            (the placeholder copy already covers it) or fresh state. */}
+        {isConnected && (dailyExhausted || inCooldown || messagesLeft <= 3) && (
+          <div style={{
+            marginTop: 8, paddingLeft: 14,
+            display: "inline-flex", alignItems: "center", gap: 6,
+            color: dailyExhausted
+              ? "rgba(248,113,113,0.92)"
+              : inCooldown
+              ? "rgba(255,255,255,0.55)"
+              : "rgba(248,113,113,0.85)",
+            fontFamily: "var(--sans-stack)",
+            fontSize: 11, fontWeight: 500,
+            lineHeight: 1.3,
+          }}>
+            {dailyExhausted
+              ? "No more messages today!"
+              : inCooldown
+              ? <><ClockIcon size={11} />{`Cooldown ${cooldownRemainingS}s`}</>
+              : `${messagesLeft} more message${messagesLeft === 1 ? "" : "s"} left`}
+          </div>
+        )}
       </form>
     </div>
   );

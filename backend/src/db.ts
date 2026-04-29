@@ -104,6 +104,14 @@ db.exec(`
     issued_at_ms INTEGER NOT NULL,
     consumed INTEGER NOT NULL          -- 0 or 1
   );
+
+  CREATE TABLE IF NOT EXISTS sherpa_usage (
+    wallet TEXT NOT NULL,              -- lowercased
+    day TEXT NOT NULL,                 -- UTC YYYY-MM-DD
+    count INTEGER NOT NULL,            -- messages sent on `day` so far
+    last_msg_ms INTEGER NOT NULL,      -- epoch ms of most recent send
+    PRIMARY KEY (wallet, day)
+  );
 `);
 
 // ----------------------------------------------------------- prepared stmts
@@ -195,6 +203,15 @@ const stmtAgentRingLoadAll   = db.query<
   { seq: number; id: string; recipient: string | null; msg_json: string },
   []
 >("SELECT seq, id, recipient, msg_json FROM agent_ring ORDER BY seq ASC");
+
+// sherpa_usage — daily counter + cooldown tracking per wallet
+const stmtSherpaUsageGet     = db.query<{ count: number; last_msg_ms: number }, [string, string]>(
+  "SELECT count, last_msg_ms FROM sherpa_usage WHERE wallet = ? AND day = ?",
+);
+const stmtSherpaUsageUpsert  = db.query<unknown, [string, string, number, number]>(
+  "INSERT INTO sherpa_usage(wallet, day, count, last_msg_ms) VALUES (?, ?, ?, ?) " +
+  "ON CONFLICT(wallet, day) DO UPDATE SET count = excluded.count, last_msg_ms = excluded.last_msg_ms",
+);
 
 // auth_nonces
 const stmtAuthNonceInsert    = db.query<unknown, [string, number]>(
@@ -402,6 +419,17 @@ export function loadAllAgentRing(): AgentRingRow[] {
     recipient: r.recipient,
     msgJson: r.msg_json,
   }));
+}
+
+// sherpa_usage
+export type SherpaUsageRow = { count: number; lastMsgMs: number };
+export function readSherpaUsage(wallet: string, day: string): SherpaUsageRow | null {
+  const row = stmtSherpaUsageGet.get(wallet, day);
+  if (!row) return null;
+  return { count: row.count, lastMsgMs: row.last_msg_ms };
+}
+export function writeSherpaUsage(wallet: string, day: string, count: number, lastMsgMs: number): void {
+  stmtSherpaUsageUpsert.run(wallet, day, count, lastMsgMs);
 }
 
 // auth_nonces

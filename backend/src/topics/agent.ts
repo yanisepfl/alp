@@ -20,12 +20,13 @@
 // we replay all visible entries — replaying more is the safer fallback
 // than dropping events.
 
-import type { ActionCategory, StreamFrame, TokenSymbol, WireChip, WireMessage, WireSource } from "../types";
+import type { ActionCategory, ErrorCode, StreamFrame, TokenSymbol, WireChip, WireMessage, WireSource } from "../types";
 import { ulid } from "../ulid";
 import { primingHistory, liveSignalText, cannedReply } from "../mocks/agent-script";
 import { subscribeAgentActions, getPoolOrientation, type AgentActionEvent } from "../indexer";
 import { tokenDecimals, tokenSymbolForAddress, USDC_BASE_ADDRESS } from "../chain";
-import { appendAgentRingEntry, deleteAgentRingEntry, loadAllAgentRing } from "../db";
+import { appendAgentRingEntry, deleteAgentRingEntry, loadAllAgentRing, readSherpaUsage, writeSherpaUsage } from "../db";
+import { respondToMessage } from "../agent/sherpa";
 
 type Deliver = (f: StreamFrame) => void;
 
@@ -181,7 +182,25 @@ export function agentRingSize(): number {
   return ring.length;
 }
 
-// Echo the user's message + schedule a canned reply ~800ms later.
+// Sherpa rate limits, per wallet:
+//   - 20s cooldown between messages (anti-spam, also gives the LLM time to
+//     respond before the next request piles up)
+//   - 5 messages per UTC day (cost cap on the claude subprocess)
+//
+// Checked AFTER the user-msg echo so the chat history reads coherently
+// (user sees their own message immediately, then either a reply or a
+// rate_limited error frame). Limit state lives in sqlite (see B6) so
+// the count survives reboot.
+const SHERPA_COOLDOWN_MS = 20_000;
+const SHERPA_DAILY_CAP   = 5;
+
+function todayUtc(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+// Echo the user's message + invoke Sherpa for a real reply. Falls back
+// to the canned-reply bot if the claude subprocess fails (missing
+// binary, transient subprocess error, sub-25s timeout).
 export function handleUserMessage(cid: string, wallet: string, text: string, clientId: string): void {
   const userMsg: WireMessage = {
     id: clientId,
@@ -191,16 +210,76 @@ export function handleUserMessage(cid: string, wallet: string, text: string, cli
   };
   deliverPrivate(cid, userMsg, wallet);
 
-  setTimeout(() => {
-    const reply: WireMessage = {
-      id: ulid(),
-      ts: new Date().toISOString(),
-      kind: "reply",
-      text: cannedReply(text),
-      replyTo: clientId,
-    };
-    deliverPrivate(cid, reply, wallet);
-  }, 800);
+  // Per-wallet rate limit. Hits emit an `error` frame on the same cid;
+  // FE routes rate_limited to the agent-topic listener (Phase 7a) and
+  // surfaces inline. The connection stays open per the recoverable-error
+  // doctrine.
+  const walletKey = wallet.toLowerCase();
+  const day = todayUtc();
+  const usage = readSherpaUsage(walletKey, day);
+  const now = Date.now();
+  if (usage) {
+    if (usage.count >= SHERPA_DAILY_CAP) {
+      sendErrorToCid(cid, "rate_limited", "Daily Sherpa limit reached (5/day). Try again tomorrow.");
+      return;
+    }
+    const sinceLastMs = now - usage.lastMsgMs;
+    if (sinceLastMs < SHERPA_COOLDOWN_MS) {
+      const waitS = Math.ceil((SHERPA_COOLDOWN_MS - sinceLastMs) / 1000);
+      sendErrorToCid(cid, "rate_limited", `Sherpa is still thinking. Wait ${waitS}s.`);
+      return;
+    }
+  }
+  // Increment now (optimistic): if the LLM call later fails, we still
+  // counted this attempt — the user clicked send, that's a use. Avoids
+  // the double-spend window where two parallel sends both pass the
+  // pre-check.
+  const nextCount = (usage?.count ?? 0) + 1;
+  writeSherpaUsage(walletKey, day, nextCount, now);
+
+  // Pull the last few action events out of the ring as context for Sherpa
+  // so it can reference recent rebalances. Vault-global only (recipient
+  // null) and most-recent-N.
+  const recentActions = ring
+    .filter((e) => e.recipient === null && e.msg.kind === "action")
+    .slice(-8)
+    .map((e) => {
+      const m = e.msg as Extract<WireMessage, { kind: "action" }>;
+      return `${m.ts} ${m.title}: ${m.text}`;
+    });
+
+  // Async LLM call. Reply id is a fresh ULID; replyTo points at the
+  // user's clientId so the FE can render the reply-thread relationship.
+  void respondToMessage(walletKey, text, recentActions)
+    .then((replyText) => {
+      const reply: WireMessage = {
+        id: ulid(),
+        ts: new Date().toISOString(),
+        kind: "reply",
+        text: replyText,
+        replyTo: clientId,
+      };
+      deliverPrivate(cid, reply, wallet);
+    })
+    .catch((err) => {
+      console.warn(`[sherpa] subprocess failed: ${err instanceof Error ? err.message : String(err)}`);
+      // Fallback to the canned-reply bot so the user still gets *something*.
+      // Doesn't refund the daily counter — that's the simpler accounting.
+      const reply: WireMessage = {
+        id: ulid(),
+        ts: new Date().toISOString(),
+        kind: "reply",
+        text: cannedReply(text),
+        replyTo: clientId,
+      };
+      deliverPrivate(cid, reply, wallet);
+    });
+}
+
+function sendErrorToCid(cid: string, code: ErrorCode, message: string): void {
+  const sub = subs.get(cid);
+  if (!sub) return;
+  sub.deliver({ v: 1, type: "error", code, message });
 }
 
 // B5 — chain-action bridge. Subscribes to the indexer's agent-action
