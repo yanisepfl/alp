@@ -103,18 +103,39 @@ async function handleAuthedRun(
 }
 
 async function runAndRespond(env: Env, options: RunOptions): Promise<Response> {
-  const config = loadConfig(env as unknown as Record<string, string | undefined>);
-  const store = new KvActivityStore(env.ACTIVITY_LOG);
-  const result = await runTick({
-    config,
-    store,
-    loadHysteresis: async () => loadHysteresis(env.ACTIVITY_LOG),
-    saveHysteresis: async (s) => saveHysteresis(env.ACTIVITY_LOG, s),
-    options,
-  });
-  return new Response(JSON.stringify(result), {
-    headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
-  });
+  // Always return 200 with a structured body. If the runtime throws (bad
+  // RPC, placeholder vault address, malformed config) we surface the error
+  // in `errors[]` instead of letting the exception escape the worker.
+  // Cloudflare's default behaviour for an uncaught throw is a 1101 HTML
+  // page, which breaks downstream workflow consumers like KeeperHub that
+  // expect a JSON shape.
+  const baseHeaders = {
+    "content-type": "application/json",
+    "access-control-allow-origin": "*",
+  };
+  try {
+    const config = loadConfig(env as unknown as Record<string, string | undefined>);
+    const store = new KvActivityStore(env.ACTIVITY_LOG);
+    const result = await runTick({
+      config,
+      store,
+      loadHysteresis: async () => loadHysteresis(env.ACTIVITY_LOG),
+      saveHysteresis: async (s) => saveHysteresis(env.ACTIVITY_LOG, s),
+      options,
+    });
+    return new Response(JSON.stringify(result), { headers: baseHeaders });
+  } catch (e) {
+    const msg = (e as Error)?.message ?? String(e);
+    return new Response(
+      JSON.stringify({
+        observedPositions: 0,
+        rebalances: 0,
+        errors: [msg],
+        plans: [],
+      }),
+      { headers: baseHeaders },
+    );
+  }
 }
 
 async function handleActivity(env: Env, url: URL): Promise<Response> {
