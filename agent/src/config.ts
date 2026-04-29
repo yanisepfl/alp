@@ -122,9 +122,10 @@ export function loadConfig(env: Record<string, string | undefined>): AgentConfig
     tradingApiKey: env.TRADING_API_KEY,
     keeperHubApiKey: env.KEEPERHUB_API_KEY,
     keeperHubDirectExec: env.KEEPERHUB_DIRECT_EXEC === "true",
-    // Pool list defaults empty; the local entrypoint can override via a JSON
-    // file (see `agent/pools.local.json` for the format expected).
-    pools: [],
+    // Pools either come from the POOLS_JSON env var (raw JSON string of the
+    // same array shape as agent/pools.local.json) or default to empty (the
+    // local entrypoint then overrides via a JSON file path).
+    pools: env.POOLS_JSON ? parsePoolsJson(env.POOLS_JSON) : [],
   };
 }
 
