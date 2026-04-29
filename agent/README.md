@@ -87,38 +87,64 @@ pnpm run deploy:worker
 
 ## KeeperHub integration
 
-Two depth tiers. The basic tier ships out of the box; the deep tier (KH-Turnkey signing every rebalance tx) is one env-var flip away.
+Three depth tiers. Pick whichever matches the time you have.
 
-### Basic — schedule + Telegram notifications (5 min)
+### Tier 1 — Workflow built in the UI (10 min)
 
-The repo ships [`keeperhub-workflow.json`](./keeperhub-workflow.json) and an idempotent deploy script. After `wrangler deploy` of the worker:
+KH's REST `/api/workflows/create` accepts `(name, nodes, edges)` shape but the per-node action `type` + `config` schema isn't documented in REST (only via MCP `list_action_schemas`). Auto-deploying nodes verbatim creates empty shells. So the production path is: build once in the UI, snapshot via `pnpm deploy:keeperhub download`, commit the result, PATCH for future edits.
 
-1. Get a KeeperHub org API key: app.keeperhub.com → Settings → API Keys → New key (`kh_…`).
-2. Drop env vars in `agent/.env.local` (gitignored):
-   ```
-   KEEPERHUB_API_KEY=kh_...
-   ALP_WORKER_URL=alp-agent.username.workers.dev
-   ALP_API_KEY=long_random_string
-   TELEGRAM_BOT_TOKEN=...
-   TELEGRAM_CHAT_ID=...
-   ```
-3. `pnpm wrangler secret put KEEPERHUB_API_KEY` and paste the **same** `ALP_API_KEY` (the worker uses it to verify KH-originated requests).
-4. `pnpm deploy:keeperhub` — POSTs `/api/workflows/create` + PATCHes nodes/edges + activates. Idempotent (re-run to update).
+**Build steps in [app.keeperhub.com](https://app.keeperhub.com) → Workflows → New workflow:**
 
-Workflow logic: every 5 min `POST /trigger` → if `rebalances > 0` → Telegram with the per-pool reason + new range to your private chat. Failure branch alerts the same chat if the worker errors.
+1. **Trigger node**: pick `Schedule`, set cron `*/5 * * * *`.
+2. **Add HTTP Request node** named `tick`:
+   - Method `POST`
+   - URL `https://${ALP_WORKER_URL}/trigger`
+   - Headers: `Authorization: Bearer ${ALP_API_KEY}`, `Content-Type: application/json`
+   - Body `{}`
+3. **Add Condition node** named `did_rebalance`:
+   - Expression `$.tick.body.rebalances > 0`
+4. **Add Telegram node** named `notify_success` (downstream of Condition's `true` branch):
+   - Bot token `${TG_BOT_TOKEN}`, chat id `${TG_CHAT_ID}`, parse mode Markdown
+   - Text: `*ALP rebalanced ${$.tick.body.rebalances} position(s)* — ${$.tick.body.plans[*].pool}`
+5. **(Optional) Add Telegram node** named `notify_failure` on the HTTP node's `failure` edge with text `⚠️ ALP tick failed`.
+6. Define the four workflow secrets in **Settings → Secrets**: `ALP_WORKER_URL`, `ALP_API_KEY`, `TG_BOT_TOKEN`, `TG_CHAT_ID`.
+7. Click **Go Live**.
 
-### Deep — KH Turnkey signs every rebalance tx (Best Integration tier)
+**Then snapshot it:**
+```bash
+cd agent
+set -a && source .env.local && set +a
+pnpm deploy:keeperhub download           # writes keeperhub-workflow.live.json
+git add agent/keeperhub-workflow.live.json && git commit -m "snapshot KH workflow"
+```
 
-When `KEEPERHUB_DIRECT_EXEC=true` is set, the worker routes all three rebalance writes (`executeRemoveLiquidity` → `executeSwap` → `executeAddLiquidity`) through KH's Direct Execution API. KH's Turnkey-backed wallet appears as `msg.sender` on-chain — the worker no longer needs `AGENT_PRIVATE_KEY` at runtime.
+`pnpm deploy:keeperhub status` lists existing workflows. `pnpm deploy:keeperhub patch` PATCHes the live workflow from `keeperhub-workflow.live.json` for future edits. `pnpm deploy:keeperhub clean` deletes any duplicates.
 
-Setup:
-1. Get the Turnkey wallet address: app.keeperhub.com → Settings → Wallets / Org Wallet (open question — see local notes if not visible).
-2. Grant it the vault's `agent` role: `vault.setAgent(turnkeyAddress)` (owner-only).
-3. Set worker env: `pnpm wrangler secret put KEEPERHUB_DIRECT_EXEC --value true` and `pnpm wrangler secret put KEEPERHUB_API_KEY --value kh_...`.
+### Tier 2 — KH Turnkey signs every rebalance tx (Best Integration depth)
 
-The activity log + Telegram messages now show the Turnkey wallet's tx hashes. Demo proof: take a screenshot of `vault.agent()` returning the Turnkey address before the rebalance + Basescan trace of the tx with Turnkey EOA as From.
+With `KEEPERHUB_DIRECT_EXEC=true`, the worker routes all rebalance writes (`executeRemoveLiquidity` → `executeSwap` → `executeAddLiquidity`) through KH's Direct Execution API. KH's Turnkey-backed wallet appears as `msg.sender` on Basescan — the worker no longer needs `AGENT_PRIVATE_KEY` at runtime.
 
-### Telegram secrets — exactly how to obtain
+**Setup:**
+1. Get the Turnkey wallet address: `curl https://app.keeperhub.com/api/integrations -H "Authorization: Bearer kh_..."` returns `{walletAddress: "0x..."}`. Confirmed `type: "web3"` (no USDC-only allowlist; can call arbitrary contracts).
+2. Send the wallet ~0.005 ETH on Base for gas: `cast send <walletAddress> --value 0.005ether ...`
+3. Grant it the vault's `agent` role: `vault.setAgent(walletAddress)` (owner-only).
+4. Set worker env: `pnpm wrangler secret put KEEPERHUB_DIRECT_EXEC` and paste `true`.
+5. Re-deploy: `pnpm run deploy:worker`.
 
-- `TELEGRAM_BOT_TOKEN`: DM @BotFather → `/newbot` → follow prompts → copy the token (looks like `7912345678:AAFmM…`).
-- `TELEGRAM_CHAT_ID`: DM your new bot once, then `curl https://api.telegram.org/bot<TOKEN>/getUpdates` and read `"chat":{"id":<NUMBER>}` — that's your private chat ID.
+Demo proof: vault.agent() returns the Turnkey address; Basescan tx trace shows the Turnkey EOA as `From`.
+
+### Tier 3 — Operate ALP via KeeperHub MCP (deepest)
+
+KH hosts an MCP server at `https://app.keeperhub.com/mcp`. Connecting any MCP client (Claude Code, Cursor, custom) lets you manage the workflow via natural language tool calls (`list_workflows`, `execute_workflow`, `get_execution_logs`, `list_action_schemas`, etc.).
+
+```bash
+claude mcp add --transport http keeperhub https://app.keeperhub.com/mcp \
+  --header "Authorization: Bearer kh_..."
+```
+
+Then in Claude: "list my keeperhub workflows", "trigger ALP Rebalance Loop", "show me the last 5 executions". This satisfies the prize's "MCP server" qualifying-integration call-out without writing any code.
+
+### Telegram secrets
+
+- `TELEGRAM_BOT_TOKEN`: DM @BotFather → `/newbot` → follow prompts → copy the token.
+- `TELEGRAM_CHAT_ID`: DM your bot once, then `curl https://api.telegram.org/bot<TOKEN>/getUpdates` → read `"chat":{"id":<NUMBER>}`.

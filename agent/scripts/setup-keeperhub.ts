@@ -1,78 +1,129 @@
-/** One-shot script to deploy the ALP rebalance workflow to KeeperHub.
+/** KeeperHub workflow utilities.
  *
- *  Replaces the missing `kh workflow apply` command (KeeperHub doesn't ship
- *  one — workflow definitions live in the dashboard, MCP, or REST). We
- *  POST /api/workflows/create with our committed workflow JSON, then PATCH
- *  the result to merge nodes/edges, then `go-live`. Idempotent: if a
- *  workflow with the same name already exists, we PATCH instead of create.
+ *  Usage modes:
  *
- *  Usage:
- *    KEEPERHUB_API_KEY=kh_... \
- *    ALP_WORKER_URL=alp.example.workers.dev \
- *    ALP_API_KEY=long_random \
- *    TELEGRAM_BOT_TOKEN=... \
- *    TELEGRAM_CHAT_ID=... \
- *    pnpm tsx scripts/setup-keeperhub.ts
+ *    pnpm deploy:keeperhub              # default: list + status check
+ *    pnpm deploy:keeperhub download     # GET workflow JSON, save to keeperhub-workflow.live.json
+ *    pnpm deploy:keeperhub patch        # PATCH workflow with current keeperhub-workflow.live.json
+ *    pnpm deploy:keeperhub clean        # delete every workflow named "ALP Rebalance Loop"
+ *
+ *  Why no full create+activate path: KH's REST `/api/workflows/create`
+ *  accepts our (name, nodes, edges) shape but the per-node action `type`
+ *  + `config` schema isn't documented or exposed via REST — only via the
+ *  hosted MCP server's `list_action_schemas` tool. So workflows authored
+ *  outside the UI come back as empty shells.
+ *
+ *  Recommended flow:
+ *    1. Build the workflow ONCE in app.keeperhub.com (5-10 min, drag the
+ *       Schedule trigger → HTTP Request → Condition → Telegram nodes).
+ *    2. Run `pnpm deploy:keeperhub download` to fetch the canonical JSON.
+ *    3. Commit `keeperhub-workflow.live.json` as the source of truth for
+ *       any future PATCHes.
+ *    4. Use `pnpm deploy:keeperhub patch` to push edits from the file.
+ *
+ *  See agent/README.md for the manual UI build steps + the optional MCP
+ *  integration path that satisfies the "depth" criterion of the
+ *  Best Integration prize without needing this script at all.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { KeeperHubClient } from "../src/keeperhub.js";
 
 const WORKFLOW_NAME = "ALP Rebalance Loop";
+const LIVE_PATH = resolve(import.meta.dirname, "..", "keeperhub-workflow.live.json");
 
 async function main(): Promise<void> {
   const apiKey = required("KEEPERHUB_API_KEY");
-  const workerUrl = required("ALP_WORKER_URL");
-  const inboundApiKey = required("ALP_API_KEY");
-  const tgBotToken = required("TELEGRAM_BOT_TOKEN");
-  const tgChatId = required("TELEGRAM_CHAT_ID");
-
-  const tmpl = JSON.parse(
-    readFileSync(resolve(import.meta.dirname, "..", "keeperhub-workflow.json"), "utf8"),
-  ) as { name: string; description?: string; trigger: unknown; nodes: unknown[]; secrets?: unknown };
-
-  // Inline secret substitutions ${ALP_WORKER_URL} → actual values. Keeps the
-  // committed workflow JSON env-agnostic so it can be reviewed without
-  // redaction.
-  const definition = JSON.parse(
-    JSON.stringify({ trigger: tmpl.trigger, nodes: tmpl.nodes }, null, 2)
-      .replaceAll("${ALP_WORKER_URL}", workerUrl)
-      .replaceAll("${ALP_API_KEY}", inboundApiKey)
-      .replaceAll("${TG_BOT_TOKEN}", tgBotToken)
-      .replaceAll("${TG_CHAT_ID}", tgChatId),
-  ) as { trigger: unknown; nodes: unknown[] };
-
   const kh = new KeeperHubClient({ apiKey });
+  const cmd = (process.argv[2] ?? "status").toLowerCase();
 
-  // Idempotent upsert: list, find by name, create or patch.
-  const existing = await kh.listWorkflows();
-  const found = existing.find((w) => w.name === WORKFLOW_NAME);
+  switch (cmd) {
+    case "status":
+      await status(kh);
+      return;
+    case "download":
+      await download(kh);
+      return;
+    case "patch":
+      await patch(kh);
+      return;
+    case "clean":
+      await clean(kh);
+      return;
+    default:
+      console.error(`unknown subcommand: ${cmd}`);
+      console.error(`usage: pnpm deploy:keeperhub [status|download|patch|clean]`);
+      process.exit(1);
+  }
+}
 
-  let id: string;
-  if (found) {
-    console.log(`[kh] reusing existing workflow ${found.id} (status: ${found.status})`);
-    id = found.id;
+async function status(kh: KeeperHubClient): Promise<void> {
+  const all = await kh.listWorkflows();
+  const ours = all.filter((w) => w.name === WORKFLOW_NAME);
+  console.log(`KeeperHub workflows: ${all.length} total, ${ours.length} matching "${WORKFLOW_NAME}"`);
+  for (const w of ours) {
+    console.log(`  ${w.id}  enabled=${w.enabled ?? "?"}  https://app.keeperhub.com/workflows/${w.id}`);
+  }
+  if (ours.length === 0) {
+    console.log(`\n  no live workflow yet — build one in the UI:`);
+    console.log(`  https://app.keeperhub.com/workflows/new`);
+    console.log(`  see agent/README.md → KeeperHub integration for the recipe.`);
+  } else if (ours.length > 1) {
+    console.log(`\n  multiple workflows match — run 'pnpm deploy:keeperhub clean' to dedupe.`);
   } else {
-    const created = await kh.createWorkflow(WORKFLOW_NAME, tmpl.description);
-    console.log(`[kh] created workflow ${created.id}`);
-    id = created.id;
+    console.log(`\n  next: 'pnpm deploy:keeperhub download' to snapshot the live workflow.`);
   }
+}
 
-  await kh.updateWorkflow(id, definition);
-  console.log(`[kh] patched workflow ${id} with nodes/edges`);
-
-  // Activate so the schedule trigger starts firing.
-  try {
-    await kh.goLive(id);
-    console.log(`[kh] workflow ${id} is now LIVE`);
-  } catch (e) {
-    console.warn(`[kh] go-live failed (already live?): ${(e as Error).message}`);
+async function download(kh: KeeperHubClient): Promise<void> {
+  const all = await kh.listWorkflows();
+  const ours = all.filter((w) => w.name === WORKFLOW_NAME);
+  if (ours.length === 0) {
+    console.error(`no workflow named "${WORKFLOW_NAME}" found in KH. Build it first in the UI.`);
+    process.exit(1);
   }
+  if (ours.length > 1) {
+    console.error(`${ours.length} workflows match — run 'clean' first.`);
+    process.exit(1);
+  }
+  const json = await kh.getWorkflow(ours[0].id);
+  writeFileSync(LIVE_PATH, JSON.stringify(json, null, 2) + "\n");
+  console.log(`wrote ${LIVE_PATH}`);
+  console.log(`commit it so future PATCHes have a versioned source of truth.`);
+}
 
-  console.log(`\n✅ ALP rebalance loop deployed.`);
-  console.log(`   Dashboard: https://app.keeperhub.com/workflows/${id}`);
-  console.log(`   Trigger:   schedule (cron */5 * * * *) → POST ${workerUrl}/trigger`);
-  console.log(`   Notify:    Telegram chat ${tgChatId} on rebalances > 0`);
+async function patch(kh: KeeperHubClient): Promise<void> {
+  if (!existsSync(LIVE_PATH)) {
+    console.error(`${LIVE_PATH} doesn't exist. Run 'pnpm deploy:keeperhub download' first.`);
+    process.exit(1);
+  }
+  const all = await kh.listWorkflows();
+  const ours = all.filter((w) => w.name === WORKFLOW_NAME);
+  if (ours.length !== 1) {
+    console.error(`need exactly 1 "${WORKFLOW_NAME}" workflow, found ${ours.length}.`);
+    process.exit(1);
+  }
+  const definition = JSON.parse(readFileSync(LIVE_PATH, "utf8"));
+  await kh.updateWorkflow(ours[0].id, definition);
+  console.log(`patched workflow ${ours[0].id} from ${LIVE_PATH}`);
+}
+
+async function clean(kh: KeeperHubClient): Promise<void> {
+  const all = await kh.listWorkflows();
+  const dups = all.filter((w) => w.name === WORKFLOW_NAME);
+  if (dups.length === 0) {
+    console.log(`nothing to clean.`);
+    return;
+  }
+  console.log(`deleting ${dups.length} workflow(s) named "${WORKFLOW_NAME}":`);
+  for (const w of dups) {
+    try {
+      await kh.deleteWorkflow(w.id);
+      console.log(`  deleted ${w.id}`);
+    } catch (e) {
+      console.log(`  failed ${w.id}: ${(e as Error).message}`);
+    }
+  }
 }
 
 function required(name: string): string {
@@ -85,6 +136,6 @@ function required(name: string): string {
 }
 
 main().catch((e) => {
-  console.error(`[kh] setup failed: ${e.message ?? e}`);
+  console.error(`[kh] ${e.message ?? e}`);
   process.exit(1);
 });

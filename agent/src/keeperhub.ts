@@ -122,12 +122,20 @@ export class KeeperHubClient {
 
   // ---------- Workflow CRUD (used by scripts/setup-keeperhub.ts) ----------
 
-  /** Create a new workflow shell (no nodes). Returns the workflow id. */
-  async createWorkflow(name: string, description?: string): Promise<{ id: string }> {
+  /** Create a new workflow with full nodes/edges definition in one POST.
+   *  KH's /api/workflows/create rejects (400) if nodes/edges aren't supplied
+   *  alongside name — there's no two-step "create shell then patch" flow. */
+  async createWorkflow(payload: {
+    name: string;
+    description?: string;
+    trigger?: unknown;
+    nodes: unknown[];
+    edges: unknown[];
+  }): Promise<{ id: string }> {
     const res = await fetch(this.url("/api/workflows/create"), {
       method: "POST",
       headers: this.headers(),
-      body: JSON.stringify({ name, description }),
+      body: JSON.stringify(payload),
     });
     if (!res.ok) {
       const text = await res.text();
@@ -160,25 +168,49 @@ export class KeeperHubClient {
     return res.json();
   }
 
-  async listWorkflows(): Promise<Array<{ id: string; name: string; status: string }>> {
+  async listWorkflows(): Promise<Array<{ id: string; name: string; status?: string; enabled?: boolean }>> {
     const res = await fetch(this.url("/api/workflows"), { headers: this.headers() });
     if (!res.ok) {
       const text = await res.text();
       throw new Error(`KH listWorkflows failed (${res.status}): ${text}`);
     }
-    const json = (await res.json()) as { workflows?: Array<{ id: string; name: string; status: string }> };
-    return json.workflows ?? [];
+    const json = await res.json();
+    // KH returns a plain array, NOT { workflows: [...] } — we accept both
+    // shapes for forward-compat against any future schema change.
+    if (Array.isArray(json)) return json as Array<{ id: string; name: string; enabled?: boolean }>;
+    const wrapped = json as { workflows?: Array<{ id: string; name: string; enabled?: boolean }> };
+    return wrapped.workflows ?? [];
   }
 
-  /** Activate a workflow that's currently in draft (`paused`) state. */
-  async goLive(id: string): Promise<void> {
-    const res = await fetch(this.url(`/api/workflows/${id}/go-live`), {
-      method: "POST",
+  /** Hard-delete a workflow by id. Used by setup script to clean up duplicate
+   *  shells created during iteration. */
+  async deleteWorkflow(id: string): Promise<void> {
+    const res = await fetch(this.url(`/api/workflows/${id}`), {
+      method: "DELETE",
       headers: this.headers(),
     });
-    if (!res.ok) {
+    if (!res.ok && res.status !== 404) {
       const text = await res.text();
-      throw new Error(`KH goLive ${id} failed (${res.status}): ${text}`);
+      throw new Error(`KH deleteWorkflow ${id} failed (${res.status}): ${text}`);
     }
+  }
+
+  /** Activate a workflow that's currently in draft (`paused`) state.
+   *  KH's docs disagree on the verb — we try POST first and fall back to
+   *  PATCH/PUT. Returns silently on success, throws on all-failed. */
+  async goLive(id: string): Promise<void> {
+    for (const method of ["POST", "PATCH", "PUT"] as const) {
+      const res = await fetch(this.url(`/api/workflows/${id}/go-live`), {
+        method,
+        headers: this.headers(),
+      });
+      if (res.ok) return;
+      // 405 means wrong verb; try the next one. Other errors should surface.
+      if (res.status !== 405 && res.status !== 404) {
+        const text = await res.text();
+        throw new Error(`KH goLive ${id} failed (${res.status} via ${method}): ${text}`);
+      }
+    }
+    throw new Error(`KH goLive ${id} rejected POST/PATCH/PUT — check dashboard`);
   }
 }
