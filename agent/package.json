@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy:worker": "wrangler deploy",
     "deploy:keeperhub": "tsx scripts/setup-keeperhub.ts",
     "local": "tsx src/local.ts",
     "test": "vitest run",

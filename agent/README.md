@@ -80,8 +80,10 @@ pnpm wrangler secret put VAULT_ADDRESS
 pnpm wrangler secret put REGISTRY_ADDRESS
 pnpm wrangler secret put V3_ADAPTER_ADDRESS
 pnpm wrangler secret put UR_ADAPTER_ADDRESS
-pnpm deploy
+pnpm run deploy:worker
 ```
+
+(`pnpm deploy` without the script name triggers pnpm's monorepo `deploy` builtin, which fails with `ERR_PNPM_CANNOT_DEPLOY` outside a workspace. Always use `pnpm run deploy:worker` to invoke the script in `package.json`.)
 
 ## KeeperHub integration
 
