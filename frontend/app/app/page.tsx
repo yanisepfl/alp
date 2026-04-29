@@ -3,17 +3,58 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { formatUnits, parseUnits } from "viem";
 import {
-  clientId,
-  subscribeAgentStream,
-  type ActionCategory,
-  type StreamHandle,
-  type WireMessage,
-  type WireSource,
-} from "@/lib/agent-stream";
+  useAccount,
+  useReadContract,
+  useWaitForTransactionReceipt,
+  useWriteContract,
+} from "wagmi";
+import { getAppKit } from "@/components/web3-provider";
+import {
+  useAgentStream,
+  useAuthBridge,
+  useSendUserMessage,
+  useUser,
+  useVault,
+} from "@/lib/api";
+import type {
+  ActionCategory,
+  VaultPool,
+  WireMessage,
+} from "@/lib/api";
+import {
+  ALP_DECIMALS,
+  USDC_ADDRESS,
+  USDC_DECIMALS,
+  VAULT_ADDRESS,
+  usdcAbi,
+  vaultAbi,
+} from "@/lib/contracts";
 import { LearnMoreContent, SummaryText } from "@/components/landing-face";
+
+// Sniff wagmi/viem's UserRejectedRequestError — the user clicked
+// reject in their wallet popup. We treat that as silent (no inline
+// error stripe) per Phase 7d "user rejection silent".
+function isUserRejection(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { name?: string; code?: number; cause?: { name?: string; code?: number } };
+  if (e.name === "UserRejectedRequestError") return true;
+  if (e.code === 4001) return true;
+  if (e.cause?.name === "UserRejectedRequestError") return true;
+  if (e.cause?.code === 4001) return true;
+  return false;
+}
+
+// Pretty-print a wallet address as 0x1234…abcd. Connection is not
+// guaranteed when this runs (wagmi state can transition through
+// "connecting"/"reconnecting" with address undefined), so callers
+// should branch on `isConnected` first.
+function shortAddress(addr: string) {
+  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
+}
 
 /* ---------- Panel rect ---------- */
 
@@ -57,41 +98,7 @@ const LANDSCAPE_FILTER = "saturate(0.85) brightness(0.7)";
 // reads as a recessed, greyscaled surface vs the colourful main panel.
 const LANDSCAPE_FILTER_MUTED = "grayscale(0.85) saturate(0.35) contrast(0.85) brightness(0.55)";
 
-/* ---------- Constants & sample data ---------- */
-
-const SHARE_PRICE = 1.0427;
-
-// Demo wallet position. Real backend: read from `/me/position` once a
-// wallet is connected. Stable-token deposit so HODL value == principal,
-// which makes outperformance the same as raw P&L.
-const USER_DEPOSIT_TS = "2026-02-27T10:14:00";
-const USER_DEPOSIT_AMT = 5000;
-const USER_DEPOSIT_TX = "0x82a3…4d91";
-const USER_ENTRY_SHARE_PRICE = 1.0184;
-const USER_DAYS_HELD = 60;
-const USER_SHARES = USER_DEPOSIT_AMT / USER_ENTRY_SHARE_PRICE;
-const USER_VALUE = USER_SHARES * SHARE_PRICE;
-const USER_PNL = USER_VALUE - USER_DEPOSIT_AMT;
-const USER_PNL_PCT = (USER_PNL / USER_DEPOSIT_AMT) * 100;
-const USER_REALIZED_APY = ((USER_VALUE / USER_DEPOSIT_AMT) ** (365 / USER_DAYS_HELD) - 1) * 100;
-
-const SHARE_PRICE_30D = [
-  1.0000, 0.9994, 1.0008, 1.0021, 1.0014, 1.0035, 1.0028, 1.0049, 1.0061, 1.0078,
-  1.0090, 1.0089, 1.0103, 1.0118, 1.0127, 1.0145, 1.0162, 1.0179, 1.0184, 1.0202,
-  1.0218, 1.0228, 1.0218, 1.0234, 1.0252, 1.0268, 1.0290, 1.0312, 1.0349, 1.0427,
-];
-
-const TVL_30D = [
-  3.05, 3.07, 3.08, 3.06, 3.09, 3.11, 3.13, 3.12, 3.15, 3.16,
-  3.18, 3.19, 3.17, 3.20, 3.22, 3.21, 3.24, 3.23, 3.25, 3.27,
-  3.25, 3.26, 3.27, 3.28, 3.26, 3.27, 3.29, 3.28, 3.27, 3.26,
-];
-
-const APR_30D = [
-  11.2, 11.5, 11.8, 12.1, 11.9, 12.3, 12.8, 12.6, 13.0, 13.2,
-  13.5, 13.3, 13.4, 13.7, 13.9, 14.2, 14.0, 13.8, 13.6, 13.9,
-  14.1, 14.3, 14.0, 13.8, 14.0, 14.2, 14.4, 14.1, 14.0, 14.2,
-];
+/* ---------- Static reference (assets, masks, formatters) ---------- */
 
 const MASK_STYLE = {
   backgroundColor: "#fff",
@@ -115,24 +122,8 @@ const TOKENS: Record<string, TokenEntry> = {
 };
 
 const ICONS: Record<string, React.ReactNode> = {
-  position:   (<><circle cx="12" cy="12" r="3" /><path d="M3 12h6M15 12h6" /></>),
-  vault:      (<><path d="M5 9h14v9H5z" /><path d="M9 9V6a3 3 0 0 1 6 0v3" /></>),
-  allocation: (
-    <>
-      <path d="M4 7h16M4 12h16M4 17h16" />
-      <circle cx="8" cy="7" r="0.8" fill="currentColor" />
-      <circle cx="14" cy="12" r="0.8" fill="currentColor" />
-      <circle cx="10" cy="17" r="0.8" fill="currentColor" />
-    </>
-  ),
-  agent:      (<><circle cx="12" cy="12" r="8.5" /><polyline points="12 7 12 12 15.5 14" /></>),
-  arrow:      (<path d="M5 12h14M12 5l7 7-7 7" />),
-  external:   (<><path d="M14 4h6v6" /><path d="M20 4l-9 9" /><path d="M19 13v6H5V5h6" /></>),
-  pools:      (<><path d="M4 7h16M4 12h16M4 17h16" /></>),
-  fees:       (<><circle cx="12" cy="12" r="9" /><path d="M14.5 9.5h-3a1.5 1.5 0 0 0 0 3h2a1.5 1.5 0 0 1 0 3h-3M12 7.5v9" /></>),
-  clock:      (<><circle cx="12" cy="12" r="8.5" /><polyline points="12 7 12 12 15.5 14" /></>),
-  flow:       (<><path d="M4 7h12M16 3l4 4-4 4" /><path d="M20 17H8M8 13l-4 4 4 4" /></>),
-  range:      (<><path d="M3 8h18M3 16h18" /><path d="M7 12h10" /></>),
+  arrow:    (<path d="M5 12h14M12 5l7 7-7 7" />),
+  external: (<><path d="M14 4h6v6" /><path d="M20 4l-9 9" /><path d="M19 13v6H5V5h6" /></>),
 };
 
 // Copy + check icons — user-supplied artwork on a 20×20 viewBox. Both
@@ -408,26 +399,6 @@ function CardLabel({ icon, children }: { icon: keyof typeof ICONS | keyof typeof
   );
 }
 
-function InlinePill({ icon, iconImage, children }: { icon?: keyof typeof ICONS | string; iconImage?: { src: string; alt: string }; children: React.ReactNode }) {
-  return (
-    <span style={{
-      display: "inline-flex", alignItems: "center", gap: 5,
-      padding: "2px 8px 2px 6px", borderRadius: 999,
-      background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.09)",
-      verticalAlign: "-0.12em", margin: "0 0.12em",
-      color: "#fff", fontFamily: "var(--font-radley)", fontSize: 13, fontWeight: 400, lineHeight: 1, whiteSpace: "nowrap",
-    }}>
-      {iconImage && (
-        <span style={{ width: 14, height: 14, display: "inline-flex", flexShrink: 0 }}>
-          <Image src={iconImage.src} alt={iconImage.alt} width={14} height={14} style={{ borderRadius: 999, display: "block" }} />
-        </span>
-      )}
-      {icon && <StrokeIcon kind={icon} size={12} />}
-      {children}
-    </span>
-  );
-}
-
 function H3({ children }: { children: React.ReactNode }) {
   return (
     <h3 style={{ color: "#fff", fontFamily: "var(--font-radley)", fontSize: 22, lineHeight: 1.1, letterSpacing: "-0.005em", margin: 0, fontWeight: 400 }}>
@@ -482,69 +453,56 @@ function Sparkline({ values, lineColor, fillColor, height = 64 }: { values: numb
   );
 }
 
-function DetailRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", color: "rgba(255,255,255,0.55)", fontFamily: "var(--sans-stack)", fontSize: 12, lineHeight: 1.2 }}>
-      <span>{label}</span>
-      <span style={{ color: "rgba(255,255,255,0.92)", fontVariantNumeric: "tabular-nums" }}>{value}</span>
-    </div>
-  );
-}
-
 const fmtNum = (n: number) =>
   n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4 });
 
-/* ---------- Data ---------- */
+/* ---------- Data adapters (wire snapshots → view shapes) ---------- */
 
 type AllocationEntry = TokenEntry & { pct: number };
-const ALLOCATIONS: AllocationEntry[] = [
-  { ...TOKENS.USDC, pct: 38 },
-  { ...TOKENS.ETH,  pct: 24 },
-  { ...TOKENS.BTC,  pct: 18 },
-  { ...TOKENS.USDT, pct: 12 },
-  { ...TOKENS.UNI,  pct:  8 },
-];
 
 type PoolEntry = {
   slug: string;
   pct: number;
   color: string;
+  apr: number;
+  earned30d: number;
   pair?: { left: TokenEntry; right: TokenEntry };
   single?: TokenEntry;
 };
-const POOLS: PoolEntry[] = [
-  { slug: "ETH/USDC",     pct: 24, color: TOKENS.ETH.color,  pair: { left: TOKENS.ETH,  right: TOKENS.USDC } },
-  { slug: "BTC/USDC",     pct: 18, color: TOKENS.BTC.color,  pair: { left: TOKENS.BTC,  right: TOKENS.USDC } },
-  { slug: "USDC/USDT",    pct: 12, color: TOKENS.USDT.color, pair: { left: TOKENS.USDC, right: TOKENS.USDT } },
-  { slug: "UNI/USDC",     pct:  8, color: TOKENS.UNI.color,  pair: { left: TOKENS.UNI,  right: TOKENS.USDC } },
-  { slug: "Idle reserve", pct: 38, color: TOKENS.USDC.color, single: TOKENS.USDC },
-];
 
-const POSITIONS_SORTED: PoolEntry[] = [
-  POOLS.find((p) => p.slug === "Idle reserve")!,
-  ...POOLS
-    .filter((p) => p.slug !== "Idle reserve")
-    .sort((a, b) => b.pct - a.pct),
-];
+function toPoolEntry(p: VaultPool): PoolEntry {
+  if (p.position.kind === "pair") {
+    const left = resolveToken(p.position.left);
+    const right = resolveToken(p.position.right);
+    return {
+      slug: p.label,
+      pct: p.pct,
+      color: left.color,
+      apr: p.apr,
+      earned30d: p.earned30d,
+      pair: { left, right },
+    };
+  }
+  const single = resolveToken(p.position.token);
+  return {
+    slug: p.label,
+    pct: p.pct,
+    color: single.color,
+    apr: p.apr,
+    earned30d: p.earned30d,
+    single,
+  };
+}
 
-// Per-pool APR + 30d fees earned. Same eventual source as POOLS — a
-// vault-state read on the backend; mocked here for the demo.
-const POOL_APR: Record<string, number> = {
-  "ETH/USDC":     18.4,
-  "BTC/USDC":     14.2,
-  "USDC/USDT":     8.6,
-  "UNI/USDC":     22.1,
-  "Idle reserve":  0.0,
-};
-const POOL_EARNED_30D: Record<string, number> = {
-  "ETH/USDC":     1240.50,
-  "BTC/USDC":      890.20,
-  "USDC/USDT":     320.10,
-  "UNI/USDC":      215.80,
-  "Idle reserve":    0.00,
-};
-const BASKET_APR_30D = 14.2;
-const BASKET_EARNED_30D = POOLS.reduce((a, p) => a + (POOL_EARNED_30D[p.slug] ?? 0), 0);
+// Idle reserve floats to the top; remaining positions sort by share desc.
+function sortPositions(pools: PoolEntry[]): PoolEntry[] {
+  const idle = pools.find((p) => p.slug === "Idle reserve");
+  const others = pools.filter((p) => p.slug !== "Idle reserve").sort((a, b) => b.pct - a.pct);
+  return idle ? [idle, ...others] : others;
+}
+
+// Wire ships full 0x-prefixed 66-char hashes; UI shortens for display.
+const shortenTx = (tx: string) => `${tx.slice(0, 6)}…${tx.slice(-4)}`;
 
 // Agent message feed:
 //   signal  — raw incoming data (price/vol move, fee accrual, etc.).
@@ -624,7 +582,7 @@ function nowIso(): string { return formatDisplayIso(new Date()); }
 
 // Falls back to USDC if the backend ever sends an unknown symbol —
 // keeps the chip from rendering undefined and crashing TokenChip.
-const resolveToken = (sym: string): TokenEntry => TOKENS[sym] ?? TOKENS.USDC;
+function resolveToken(sym: string): TokenEntry { return TOKENS[sym] ?? TOKENS.USDC; }
 
 // Wire → view: resolves token symbols, reshapes WireSource → SourceRef,
 // preserves id + replyTo so optimistic reconciliation can work.
@@ -660,80 +618,6 @@ function toAgentMessage(w: WireMessage): AgentMessage {
   }
 }
 
-// Wire-shape demo seed. `ts` is local-time ISO (no Z) so the display
-// stays stable across timezones; prod backend should emit UTC.
-const ACTION_TITLE = "Action submitted";
-
-const INITIAL_WIRE_MESSAGES: WireMessage[] = [
-  { id: "evt_001", ts: "2026-04-28T05:18:00", kind: "signal", text: "USDC/USDT stable-pair fees: $890 accrued." },
-  { id: "evt_002", ts: "2026-04-28T05:24:00", kind: "action", title: ACTION_TITLE, category: "claim_fees", chip: { type: "single", token: "USDT" }, tx: "0xc4e2…77f9",
-    text: "Compounded $890 from USDC/USDT into LP." },
-  { id: "evt_003", ts: "2026-04-28T08:11:00", kind: "signal", text: "ETH/USDC mid drifted to $4,124, +1.4% from band center." },
-  { id: "evt_004", ts: "2026-04-28T08:24:00", kind: "action", title: ACTION_TITLE, category: "edit_position", chip: { type: "single", token: "ETH" }, tx: "0x9f15…c780",
-    thought: "Drift exceeds the rebalance threshold. Recentering before fees decay further.",
-    text: "Rebalanced ETH/USDC at $4,124 mid. New range ±1.0%." },
-  // Standalone signal — TWAP divergence noted, but no action follows.
-  { id: "evt_005", ts: "2026-04-28T09:55:00", kind: "signal", text: "TWAP divergence between USDC and USDT widening to 4 bps." },
-  { id: "evt_006", ts: "2026-04-28T11:20:00", kind: "signal", text: "UNI/USDC price re-entered the inner range." },
-  { id: "evt_007", ts: "2026-04-28T11:25:00", kind: "action", title: ACTION_TITLE, category: "edit_position", chip: { type: "single", token: "UNI" }, tx: "0x2e91…44ab",
-    text: "Closed UNI/USDC outer band to reserve. Price action settled inside the inner range." },
-  { id: "evt_008", ts: "2026-04-28T13:18:00", kind: "signal", text: "UNI 1h volume +43% post-governance vote." },
-  { id: "evt_009", ts: "2026-04-28T13:25:00", kind: "action", title: ACTION_TITLE, category: "swap", chip: { type: "pair", left: "BTC", right: "UNI" }, tx: "0xa7d3…91f2",
-    thought: "Volume regime shift on UNI looks structural, not a wick. Reallocating exposure.",
-    text: "Rotated 5% from BTC/USDC into UNI/USDC." },
-  { id: "evt_010", ts: "2026-04-28T14:01:00", kind: "signal", text: "Accrued fees on BTC/USDC: $1.21k." },
-  { id: "evt_011", ts: "2026-04-28T14:08:00", kind: "action", title: ACTION_TITLE, category: "claim_fees", chip: { type: "single", token: "BTC" }, tx: "0xb1c2…8e4d",
-    text: "Harvested $1.2k in fees from BTC/USDC and compounded back into the position." },
-  { id: "evt_012", ts: "2026-04-28T14:15:00", kind: "signal", text: "ETH/USDC realized vol −22% over the last 4h." },
-  { id: "evt_013", ts: "2026-04-28T14:23:00", kind: "action", title: ACTION_TITLE, category: "edit_position", chip: { type: "single", token: "ETH" }, tx: "0x4f8a…c3b1",
-    thought: "Vol contracting cleanly. A tighter band captures more of the spread without raising rebalance frequency.",
-    text: "Tightened ETH/USDC to ±0.8%. Realized vol dropped 22% in the last 4h, capturing more of the spread in a tighter band." },
-];
-
-// Pre-built dev replies. Sources are WireSource so the stub round-trips
-// through the same adapter the real backend will feed.
-const QUICK_REPLIES: { match: RegExp; text: string; sources?: WireSource[] }[] = [
-  { match: /\b(position|stake|holding|holdings|share|shares|alp)\b/i,
-    text: "You currently hold 0 ALP. Once you deposit, each ALP claims a slice of $3.26M of active liquidity across 5 pools, with 38% sitting in the idle reserve.",
-    sources: [{ kind: "vault", label: "Vault state", tx: "0xa1b2…f9c8" }] },
-  { match: /\b(apr|yield|earning|earnings|return|fee|fees)\b/i,
-    text: "30-day rolling APR is 14.2%, slightly above the 90-day average (13.6%). Driven mostly by ETH/USDC fee capture this week.",
-    sources: [
-      { kind: "vault", label: "30d performance", tx: "0xa1b2…f9c8" },
-      { kind: "uniswap", label: "ETH/USDC pool", url: "https://app.uniswap.org/" },
-    ] },
-  { match: /\b(rebalance|range|tighten|widen)\b/i,
-    text: "Tightened ETH/USDC to ±0.8% two minutes ago after realized vol dropped. Fee yield projected up ~12% over the next 24h.",
-    sources: [
-      { kind: "basescan", label: "Rebalance tx", tx: "0x4f8a…c3b1" },
-      { kind: "uniswap", label: "ETH/USDC pool", url: "https://app.uniswap.org/" },
-    ] },
-  { match: /\b(tvl|vault|value)\b/i,
-    text: "Vault TVL is $3.26M, up 6.9% over 30 days. Four active pools and the idle reserve at 38%.",
-    sources: [{ kind: "vault", label: "Vault state", tx: "0xa1b2…f9c8" }] },
-  { match: /\b(risk|il|impermanent|drawdown)\b/i,
-    text: "Impermanent loss is contained by continuous rebalancing. 30-day net APR (14.2%) sits well above estimated IL drag (~2.4%/y).",
-    sources: [{ kind: "vault", label: "Risk model", tx: "0xa1b2…f9c8" }] },
-  { match: /\b(idle|reserve|cash)\b/i,
-    text: "Idle reserve is at 38% (target band 30 to 45%). It's USDC sitting in the vault, used for instant withdrawals and quick redeployments.",
-    sources: [{ kind: "vault", label: "Vault state", tx: "0xa1b2…f9c8" }] },
-  { match: /\b(pool|pools|pair|pairs)\b/i,
-    text: "Active pools: ETH/USDC (24%), BTC/USDC (18%), USDC/USDT (12%), UNI/USDC (8%). Each is rebalanced independently based on its own vol and fee signals.",
-    sources: [
-      { kind: "vault", label: "Vault allocation", tx: "0xa1b2…f9c8" },
-      { kind: "uniswap", label: "Uniswap pools", url: "https://app.uniswap.org/" },
-    ] },
-  { match: /\b(hi|hello|hey|sup|yo)\b/i,
-    text: "Hey. I manage the active positions across the basket and rebalance them continuously. Try asking about position, APR, rebalances, TVL, risk, or pools." },
-];
-
-function getAgentReply(input: string): { text: string; sources?: WireSource[] } {
-  for (const r of QUICK_REPLIES) {
-    if (r.match.test(input)) return { text: r.text, sources: r.sources };
-  }
-  return { text: "I don't have a pre-built answer for that one. Try asking about position, APR, rebalances, TVL, risk, or pools." };
-}
-
 /* ---------- Backdrop ---------- */
 
 function PanelLandscape({ muted = false }: { muted?: boolean }) {
@@ -754,6 +638,7 @@ function PanelLandscape({ muted = false }: { muted?: boolean }) {
 /* ---------- Floating nav pill — full main-panel width, sits just above it ---------- */
 
 function FloatingNav({ layout, exiting, onBack }: { layout: PanelLayout; exiting: boolean; onBack: () => void }) {
+  const { address, isConnected } = useAccount();
   return (
     <div className={exiting ? "app-nav-exit" : "app-nav-enter"} style={{
       position: "fixed",
@@ -805,49 +690,24 @@ function FloatingNav({ layout, exiting, onBack }: { layout: PanelLayout; exiting
             <span style={{ color: "#fff", fontFamily: "var(--font-radley)", fontSize: 20, lineHeight: 1, fontWeight: 400, letterSpacing: "-0.02em" }}>alps</span>
           </Link>
 
-          <button type="button" className="bg-white/[0.20] transition-colors duration-300 ease-out hover:bg-white/[0.32]" style={{
-            display: "inline-flex", alignItems: "center", gap: 7,
-            padding: "8px 14px", borderRadius: 10 * layout.scale, border: "none",
-            color: "#fff", fontFamily: "var(--sans-stack)",
-            fontSize: 12, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1,
-          }}>
-            Connect wallet
+          <button
+            type="button"
+            onClick={() => getAppKit()?.open(isConnected ? { view: "Account" } : { view: "Connect" })}
+            className="bg-white/[0.20] transition-colors duration-300 ease-out hover:bg-white/[0.32]"
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 7,
+              padding: "8px 14px", borderRadius: 10 * layout.scale, border: "none",
+              color: "#fff", fontFamily: "var(--sans-stack)",
+              fontSize: 12, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1,
+              cursor: "pointer",
+            }}
+          >
+            {isConnected && address ? shortAddress(address) : "Connect wallet"}
             <WalletIcon size={13} />
           </button>
         </div>
       </div>
     </div>
-  );
-}
-
-/* ---------- Hero ---------- */
-
-function HeroTitle() {
-  return (
-    <h1 style={{
-      color: "#fff", fontFamily: "var(--font-radley)",
-      fontSize: 42, lineHeight: 1.08, letterSpacing: "-0.01em",
-      margin: 0, fontWeight: 400,
-      alignSelf: "center",
-    }}>
-      Start earning from onchain volume.
-    </h1>
-  );
-}
-
-// Empty visual segment used in the top-right of the bento until the
-// real content lands (3D bluechip render, marquee, etc.).
-function PlaceholderCard({ label }: { label: string }) {
-  return (
-    <Card style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", minHeight: 0 }}>
-      <span style={{
-        color: "rgba(255,255,255,0.30)",
-        fontFamily: "var(--sans-stack)", fontSize: 11, fontWeight: 500,
-        letterSpacing: "0.10em", textTransform: "uppercase",
-      }}>
-        {label}
-      </span>
-    </Card>
   );
 }
 
@@ -936,14 +796,130 @@ function SwapVerticalIcon({ size = 12 }: { size?: number }) {
 
 function VaultCard() {
   const [amount, setAmount] = useState("");
+  const [txError, setTxError] = useState<string | null>(null);
   const num = Number.parseFloat(amount.replace(/,/g, "")) || 0;
   const usdValue = num; // 1:1 since input is in USDC
   const inputRef = useRef<HTMLInputElement>(null);
+  const { address, isConnected } = useAccount();
+  const { snapshot: vault } = useVault();
 
-  // Five-token row used by the Exposure detail. Leftmost on top,
-  // each subsequent chip steps right with a lower z-index. Hovered
-  // chip lifts + scales + reveals its slug; neighbours stay put.
-  const exposureTokens: TokenEntry[] = [TOKENS.USDC, TOKENS.ETH, TOKENS.BTC, TOKENS.USDT, TOKENS.UNI];
+  const sharePrice = vault?.sharePrice ?? 0;
+  const tvl = vault?.tvl ?? 0;
+  const basketApr = vault?.basketApr ?? 0;
+
+  // Live USDC balance for the connected wallet. wagmi's `useBalance`
+  // dropped the ERC20 `token` shortcut in v2, so we read balanceOf
+  // directly. Disabled when disconnected so we don't fire RPC reads
+  // against an undefined address. The cached `data` survives the
+  // first refetch so the balance row doesn't flicker between "—" and
+  // the real value.
+  const balanceQuery = useReadContract({
+    address: USDC_ADDRESS,
+    abi: usdcAbi,
+    functionName: "balanceOf",
+    args: address ? [address] : undefined,
+    query: { enabled: isConnected && !!address },
+  });
+  const balanceFmt: string = (() => {
+    if (!isConnected) return "0.00";
+    if (typeof balanceQuery.data === "bigint") {
+      return Number(formatUnits(balanceQuery.data, USDC_DECIMALS)).toLocaleString("en-US", {
+        minimumFractionDigits: 2, maximumFractionDigits: 2,
+      });
+    }
+    return balanceQuery.isLoading ? "—" : "0.00";
+  })();
+  const maxUsdcStr = typeof balanceQuery.data === "bigint"
+    ? formatUnits(balanceQuery.data, USDC_DECIMALS)
+    : "0";
+
+  // Parse the input to its on-chain bigint form once. parseUnits
+  // throws on malformed strings; catching keeps the disabled-state
+  // gating clean rather than letting the input crash a render.
+  const parsedAssets: bigint | null = (() => {
+    if (num <= 0) return null;
+    try {
+      return parseUnits(amount.replace(/,/g, "") as `${number}`, USDC_DECIMALS);
+    } catch {
+      return null;
+    }
+  })();
+
+  // Allowance read drives the approve-vs-deposit gating below.
+  // Re-runs after `approve` confirms via the receipt watcher's
+  // refetch wired further down.
+  const allowanceQuery = useReadContract({
+    address: USDC_ADDRESS,
+    abi: usdcAbi,
+    functionName: "allowance",
+    args: address ? [address, VAULT_ADDRESS] : undefined,
+    query: { enabled: isConnected && !!address },
+  });
+  const allowance: bigint = allowanceQuery.data ?? 0n;
+  const needsApprove = parsedAssets !== null && allowance < parsedAssets;
+
+  // Two write hooks — keeps approve and deposit lifecycles
+  // independent so the deposit button can flip cleanly between
+  // "Approve USDC" and "Deposit" as allowance updates.
+  const approveTx = useWriteContract();
+  const depositTx = useWriteContract();
+  const approveReceipt = useWaitForTransactionReceipt({ hash: approveTx.data });
+  const depositReceipt = useWaitForTransactionReceipt({ hash: depositTx.data });
+
+  // After approve confirms → refetch allowance so the button flips
+  // to "Deposit" on its own. After deposit confirms → clear amount;
+  // backend pushes the new user.snapshot via its event listener.
+  useEffect(() => {
+    if (approveReceipt.isSuccess) {
+      void allowanceQuery.refetch();
+      void balanceQuery.refetch();
+    }
+  }, [approveReceipt.isSuccess, allowanceQuery, balanceQuery]);
+  useEffect(() => {
+    if (depositReceipt.isSuccess) {
+      setAmount("");
+      void balanceQuery.refetch();
+      void allowanceQuery.refetch();
+    }
+  }, [depositReceipt.isSuccess, balanceQuery, allowanceQuery]);
+
+  const approving  = approveTx.isPending  || approveReceipt.isLoading;
+  const depositing = depositTx.isPending  || depositReceipt.isLoading;
+  const txInFlight = approving || depositing;
+
+  const handleApprove = async () => {
+    if (!parsedAssets || !address) return;
+    setTxError(null);
+    try {
+      await approveTx.writeContractAsync({
+        address: USDC_ADDRESS,
+        abi: usdcAbi,
+        functionName: "approve",
+        args: [VAULT_ADDRESS, parsedAssets],
+      });
+    } catch (err) {
+      if (!isUserRejection(err)) setTxError("Transaction failed — try again");
+    }
+  };
+  const handleDeposit = async () => {
+    if (!parsedAssets || !address) return;
+    setTxError(null);
+    try {
+      await depositTx.writeContractAsync({
+        address: VAULT_ADDRESS,
+        abi: vaultAbi,
+        functionName: "deposit",
+        args: [parsedAssets, address],
+      });
+    } catch (err) {
+      if (!isUserRejection(err)) setTxError("Transaction failed — try again");
+    }
+  };
+
+  // Exposure chips — leftmost on top, each subsequent chip steps right
+  // with a lower z-index. Hovered chip lifts + scales + reveals its
+  // slug; neighbours stay put. Driven by vault.allocations.
+  const exposureTokens: TokenEntry[] = (vault?.allocations ?? []).map((a) => resolveToken(a.token));
   const TOK_SIZE = 16;
   const TOK_OFFSET = 10;
   const [hoveredTokIdx, setHoveredTokIdx] = useState<number | null>(null);
@@ -1039,7 +1015,7 @@ function VaultCard() {
             {/* Click balance to MAX-fill — keeps the row chrome-free. */}
             <button
               type="button"
-              onClick={() => setAmount("0")}
+              onClick={() => isConnected && setAmount(maxUsdcStr)}
               onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "#fff"; }}
               onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.55)"; }}
               style={{
@@ -1047,11 +1023,11 @@ function VaultCard() {
                 color: "rgba(255,255,255,0.55)",
                 fontFamily: "var(--sans-stack)", fontSize: 12, fontWeight: 400,
                 fontVariantNumeric: "tabular-nums", lineHeight: 1,
-                cursor: "pointer",
+                cursor: isConnected ? "pointer" : "default",
                 transition: "color 200ms ease",
               }}
             >
-              Balance: 0.00
+              Balance: {balanceFmt}
             </button>
           </div>
         </div>
@@ -1068,7 +1044,7 @@ function VaultCard() {
             </InfoTip>
           </span>
           <span style={{ color: "rgb(134, 239, 172)", fontWeight: 600, fontVariantNumeric: "tabular-nums", letterSpacing: "-0.005em" }}>
-            {BASKET_APR_30D.toFixed(2)}%
+            {basketApr.toFixed(2)}%
           </span>
         </div>
       </div>
@@ -1148,7 +1124,7 @@ function VaultCard() {
               <InfoIcon size={12} />
             </InfoTip>
           </span>
-          <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)", fontVariantNumeric: "tabular-nums" }}>$1.0427</span>
+          <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)", fontVariantNumeric: "tabular-nums" }}>${sharePrice.toFixed(4)}</span>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "rgba(255,255,255,0.55)" }}>
@@ -1166,30 +1142,75 @@ function VaultCard() {
               <InfoIcon size={12} />
             </InfoTip>
           </span>
-          <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)", fontVariantNumeric: "tabular-nums" }}>$3.26M</span>
+          <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)", fontVariantNumeric: "tabular-nums" }}>${tvl.toFixed(2)}M</span>
         </div>
       </div>
 
-      {/* Full-width primary CTA — no inline margin so it sits flush
-          with the card's uniform 20px padding (top = sides = bottom). */}
-      <button
-        type="button"
-        className="transition-colors duration-200 ease-out"
-        style={{
-          marginTop: "auto", width: "100%",
-          display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
-          padding: "14px 16px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.10)",
-          background: "rgba(255,255,255,0.06)",
-          color: "rgba(255,255,255,0.78)", fontFamily: "var(--sans-stack)",
-          fontSize: 13, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1,
-          cursor: "pointer",
-        }}
-        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.10)"; }}
-        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.06)"; }}
-      >
-        Connect wallet
-        <WalletIcon size={14} />
-      </button>
+      {/* Full-width primary CTA. Disconnected: triggers the AppKit
+          connect flow. Connected: flips through "Enter an amount"
+          → "Approve USDC" → "Deposit" based on `parsedAssets` and
+          live allowance, with pending labels during in-flight tx. */}
+      {(() => {
+        // Phase 7d gating: when disconnected, the original
+        // connect-wallet behaviour stays exactly as before. When
+        // connected, the button label and onClick depend on the
+        // amount/allowance/tx state.
+        const ctaLabel = !isConnected
+          ? "Connect wallet"
+          : approving
+          ? "Approving…"
+          : depositing
+          ? "Depositing…"
+          : !parsedAssets
+          ? "Enter an amount"
+          : needsApprove
+          ? "Approve USDC"
+          : "Deposit";
+        const ctaDisabled = isConnected && (txInFlight || !parsedAssets);
+        const ctaOnClick = !isConnected
+          ? () => getAppKit()?.open({ view: "Connect" })
+          : !parsedAssets || txInFlight
+          ? undefined
+          : needsApprove
+          ? handleApprove
+          : handleDeposit;
+        return (
+          <>
+            <button
+              type="button"
+              disabled={ctaDisabled}
+              onClick={ctaOnClick}
+              className="transition-colors duration-200 ease-out"
+              style={{
+                marginTop: "auto", width: "100%",
+                display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
+                padding: "14px 16px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.10)",
+                background: "rgba(255,255,255,0.06)",
+                color: "rgba(255,255,255,0.78)", fontFamily: "var(--sans-stack)",
+                fontSize: 13, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1,
+                cursor: ctaDisabled ? "not-allowed" : "pointer",
+                opacity: ctaDisabled ? 0.6 : 1,
+              }}
+              onMouseEnter={(e) => { if (!ctaDisabled) (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.10)"; }}
+              onMouseLeave={(e) => { if (!ctaDisabled) (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.06)"; }}
+            >
+              {ctaLabel}
+              <WalletIcon size={14} />
+            </button>
+            {txError && (
+              <div style={{
+                marginTop: 8,
+                color: "rgba(248,113,113,0.85)",
+                fontFamily: "var(--sans-stack)",
+                fontSize: 11, fontWeight: 500, lineHeight: 1.3,
+                textAlign: "center",
+              }}>
+                {txError}
+              </div>
+            )}
+          </>
+        );
+      })()}
     </Card>
   );
 }
@@ -1218,9 +1239,28 @@ function KvRow({ label, value, valueColor }: { label: string; value: string; val
 // Yield pinned to the card floor on plain dark surface. Outer
 // frame matches VaultCard (dark + 0.08 border) so the segments
 // read as one family.
+// Shares wei → display number. The wire ships shares as a wei string
+// (1e18-scaled). We narrow precision to 1e6 via BigInt math before
+// crossing to Number so we don't lose precision on the trailing wei.
+function sharesToNumber(weiStr: string): number {
+  return Number(BigInt(weiStr) / 10n ** 12n) / 1e6;
+}
+
 function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
-  const up = USER_PNL >= 0;
+  const { snapshot, error } = useUser();
+  const position = snapshot?.position ?? null;
+  const valueUsd = position?.valueUsd ?? 0;
+  const sharesNum = position ? sharesToNumber(position.shares) : 0;
+  const totalDeposited = position?.totalDepositedUsd ?? 0;
+  const pnl = position?.pnlUsd ?? 0;
+  const up = pnl >= 0;
   const accent = up ? "rgb(134, 239, 172)" : "rgb(248, 113, 113)";
+  // auth_required is a recoverable rejection from the user topic
+  // (CONTRACT §3.1 + backend B7 conventions). We render a CTA that
+  // sends users into the same Connect modal the hero deposit input
+  // already opens — Position is the bento row's anchor card so it
+  // carries the CTA on behalf of the row.
+  const authRequired = error?.code === "auth_required";
   return (
     <Card style={{
       height: "100%", display: "flex", flexDirection: "column",
@@ -1234,65 +1274,110 @@ function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
         {/* Connect-wallet styling on the dark card surface, with the
             dot-grid overlay matching the hero sub-card below. No
             arrow — text reads as the full affordance. Muted at rest,
-            lifts on hover. */}
-        <button
-          type="button"
-          onClick={onWithdraw}
-          className="transition-colors duration-200 ease-out"
-          style={{
-            display: "inline-flex", alignItems: "center",
-            border: "1px solid rgba(255,255,255,0.10)",
-            backgroundColor: "rgba(255,255,255,0.06)",
-            backgroundImage: "radial-gradient(circle, rgba(255,255,255,0.10) 0.7px, transparent 1.1px)",
-            backgroundSize: "9px 9px",
-            padding: "7px 12px", borderRadius: 8,
-            color: "rgba(255,255,255,0.55)",
-            fontFamily: "var(--sans-stack)", fontSize: 12, fontWeight: 600,
-            lineHeight: 1, letterSpacing: "-0.005em",
-            cursor: "pointer",
-            transition: "color 200ms ease, background-color 200ms ease",
-          }}
-          onMouseEnter={(e) => {
-            (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.92)";
-            (e.currentTarget as HTMLButtonElement).style.backgroundColor = "rgba(255,255,255,0.10)";
-          }}
-          onMouseLeave={(e) => {
-            (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.55)";
-            (e.currentTarget as HTMLButtonElement).style.backgroundColor = "rgba(255,255,255,0.06)";
-          }}
-        >
-          Withdraw
-        </button>
+            lifts on hover. Hidden in the auth_required state — the
+            card body carries its own CTA. */}
+        {!authRequired && (
+          <button
+            type="button"
+            onClick={onWithdraw}
+            className="transition-colors duration-200 ease-out"
+            style={{
+              display: "inline-flex", alignItems: "center",
+              border: "1px solid rgba(255,255,255,0.10)",
+              backgroundColor: "rgba(255,255,255,0.06)",
+              backgroundImage: "radial-gradient(circle, rgba(255,255,255,0.10) 0.7px, transparent 1.1px)",
+              backgroundSize: "9px 9px",
+              padding: "7px 12px", borderRadius: 8,
+              color: "rgba(255,255,255,0.55)",
+              fontFamily: "var(--sans-stack)", fontSize: 12, fontWeight: 600,
+              lineHeight: 1, letterSpacing: "-0.005em",
+              cursor: "pointer",
+              transition: "color 200ms ease, background-color 200ms ease",
+            }}
+            onMouseEnter={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.92)";
+              (e.currentTarget as HTMLButtonElement).style.backgroundColor = "rgba(255,255,255,0.10)";
+            }}
+            onMouseLeave={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.55)";
+              (e.currentTarget as HTMLButtonElement).style.backgroundColor = "rgba(255,255,255,0.06)";
+            }}
+          >
+            Withdraw
+          </button>
+        )}
       </div>
 
-      {/* $ value + ALP chip, sitting directly on the dark Card
-          surface — no wrapping container chrome. */}
-      <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
-        <span style={{
-          color: "#fff", fontFamily: "var(--sans-stack)",
-          fontSize: 26, fontWeight: 600, lineHeight: 1,
-          letterSpacing: "-0.015em", fontVariantNumeric: "tabular-nums",
+      {authRequired ? (
+        // Stand-in for the dashes/zeros loading shape: a brief CTA
+        // explains why the figures are absent and lets the user
+        // resolve it inline without leaving the card.
+        <div style={{
+          marginTop: "auto", marginBottom: "auto",
+          display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 12,
         }}>
-          {fmtUsd2(USER_VALUE)}
-        </span>
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-          <AlpChip size={20} />
           <span style={{
-            color: "rgba(255,255,255,0.92)",
-            fontFamily: "var(--sans-stack)", fontSize: 12.5, fontWeight: 500,
-            fontVariantNumeric: "tabular-nums", lineHeight: 1,
+            color: "rgba(255,255,255,0.70)",
+            fontFamily: "var(--sans-stack)", fontSize: 13, fontWeight: 500,
+            lineHeight: 1.4, letterSpacing: "-0.005em",
           }}>
-            {USER_SHARES.toLocaleString("en-US", { maximumFractionDigits: 2 })} ALP
+            Connect your wallet to see your position.
           </span>
-        </span>
-      </div>
+          <button
+            type="button"
+            onClick={() => getAppKit()?.open({ view: "Connect" })}
+            className="transition-colors duration-200 ease-out"
+            style={{
+              display: "inline-flex", alignItems: "center",
+              border: "1px solid rgba(255,255,255,0.10)",
+              backgroundColor: "rgba(255,255,255,0.06)",
+              backgroundImage: "radial-gradient(circle, rgba(255,255,255,0.10) 0.7px, transparent 1.1px)",
+              backgroundSize: "9px 9px",
+              padding: "8px 14px", borderRadius: 8,
+              color: "rgba(255,255,255,0.92)",
+              fontFamily: "var(--sans-stack)", fontSize: 12.5, fontWeight: 600,
+              lineHeight: 1, letterSpacing: "-0.005em",
+              cursor: "pointer",
+              transition: "color 200ms ease, background-color 200ms ease",
+            }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.backgroundColor = "rgba(255,255,255,0.10)"; }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.backgroundColor = "rgba(255,255,255,0.06)"; }}
+          >
+            Connect wallet
+          </button>
+        </div>
+      ) : (
+        <>
+          {/* $ value + ALP chip, sitting directly on the dark Card
+              surface — no wrapping container chrome. */}
+          <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+            <span style={{
+              color: "#fff", fontFamily: "var(--sans-stack)",
+              fontSize: 26, fontWeight: 600, lineHeight: 1,
+              letterSpacing: "-0.015em", fontVariantNumeric: "tabular-nums",
+            }}>
+              {fmtUsd2(valueUsd)}
+            </span>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+              <AlpChip size={20} />
+              <span style={{
+                color: "rgba(255,255,255,0.92)",
+                fontFamily: "var(--sans-stack)", fontSize: 12.5, fontWeight: 500,
+                fontVariantNumeric: "tabular-nums", lineHeight: 1,
+              }}>
+                {sharesNum.toLocaleString("en-US", { maximumFractionDigits: 2 })} ALP
+              </span>
+            </span>
+          </div>
 
-      {/* KvRows pinned to the card floor; Performance is the taller
-          sibling so this just absorbs the height difference. */}
-      <div style={{ marginTop: "auto", paddingTop: 14, display: "flex", flexDirection: "column", gap: 6 }}>
-        <KvRow label="Deposited" value={fmtUsd2(USER_DEPOSIT_AMT)} />
-        <KvRow label="Yield" value={fmtUsd2(USER_PNL, true)} valueColor={accent} />
-      </div>
+          {/* KvRows pinned to the card floor; Performance is the taller
+              sibling so this just absorbs the height difference. */}
+          <div style={{ marginTop: "auto", paddingTop: 14, display: "flex", flexDirection: "column", gap: 6 }}>
+            <KvRow label="Deposited" value={fmtUsd2(totalDeposited)} />
+            <KvRow label="Yield" value={fmtUsd2(pnl, true)} valueColor={accent} />
+          </div>
+        </>
+      )}
     </Card>
   );
 }
@@ -1301,12 +1386,19 @@ function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
 // in top-right swaps to the hovered day so the value/header heights
 // stay constant — no layout shift on hover.
 function UserAprCard() {
-  const data = APR_30D;
+  const { snapshot: vault } = useVault();
+  const { snapshot: user, error: userError } = useUser();
+  const data = vault?.apr30d ?? [];
+  const realizedApy = user?.position?.realizedApyPct ?? 0;
+  // auth_required → dashes (no CTA — the Position card next to us
+  // carries the bento row's CTA).
+  const authRequired = userError?.code === "auth_required";
+
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const handleMove = (e: React.MouseEvent<HTMLDivElement>) => {
     const el = containerRef.current;
-    if (!el) return;
+    if (!el || data.length < 2) return;
     const rect = el.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const ratio = Math.max(0, Math.min(1, x / rect.width));
@@ -1314,18 +1406,21 @@ function UserAprCard() {
   };
 
   // Day index → "MMM D". Last index is today; we walk backward by
-  // (data.length - 1 - i) days from today.
+  // (data.length - 1 - i) days from today. Today derives from the
+  // current wall-clock; the date axis rolls forward each day.
   const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-  const today = new Date(USER_DEPOSIT_TS);
-  today.setDate(today.getDate() + USER_DAYS_HELD);
+  const today = new Date();
   const dateForIdx = (i: number) => {
+    if (data.length === 0) return "";
     const d = new Date(today);
     d.setDate(d.getDate() - (data.length - 1 - i));
     return `${months[d.getMonth()]} ${d.getDate()}`;
   };
 
-  const value = hoverIdx === null ? USER_REALIZED_APY : data[hoverIdx];
-  const dateLabel = dateForIdx(hoverIdx === null ? data.length - 1 : hoverIdx);
+  const value = hoverIdx === null
+    ? realizedApy
+    : (data[hoverIdx] ?? realizedApy);
+  const dateLabel = dateForIdx(hoverIdx === null ? Math.max(0, data.length - 1) : hoverIdx);
 
   return (
     // Same dark family as the sibling cards, but tinted up to the
@@ -1355,12 +1450,12 @@ function UserAprCard() {
       </div>
       <div style={{ marginTop: 14 }}>
         <span style={{
-          color: "rgb(134, 239, 172)",
+          color: authRequired ? "rgba(255,255,255,0.45)" : "rgb(134, 239, 172)",
           fontFamily: "var(--sans-stack)",
           fontSize: 26, fontWeight: 600, lineHeight: 1,
           letterSpacing: "-0.015em", fontVariantNumeric: "tabular-nums",
         }}>
-          {value.toFixed(1)}%
+          {authRequired ? "—" : `${value.toFixed(1)}%`}
         </span>
       </div>
       {/* marginTop matches the gap from the value to the KvRows in
@@ -1377,8 +1472,10 @@ function UserAprCard() {
           borderRadius: 10, overflow: "hidden",
         }}
       >
-        <Sparkline values={data} lineColor="rgba(134, 239, 172, 0.85)" fillColor="rgba(134, 239, 172, 0.10)" height={56} />
-        {hoverIdx !== null && (
+        {data.length >= 2 && (
+          <Sparkline values={data} lineColor="rgba(134, 239, 172, 0.85)" fillColor="rgba(134, 239, 172, 0.10)" height={56} />
+        )}
+        {hoverIdx !== null && data.length >= 2 && (
           <div aria-hidden style={{
             position: "absolute",
             left: `${(hoverIdx / (data.length - 1)) * 100}%`,
@@ -1402,9 +1499,55 @@ function UserAprCard() {
 // USDC) flip to withdraw semantics.
 function WithdrawModal({ onClose }: { onClose: () => void }) {
   const [amount, setAmount] = useState("");
+  const [txError, setTxError] = useState<string | null>(null);
   const num = Number.parseFloat(amount.replace(/,/g, "")) || 0;
-  const usdcOut = num * SHARE_PRICE;
-  const valid = num > 0 && num <= USER_SHARES;
+  const { address } = useAccount();
+  const { snapshot: vault } = useVault();
+  const { snapshot: user } = useUser();
+  const sharePrice = vault?.sharePrice ?? 0;
+  const tvl = vault?.tvl ?? 0;
+  const userShares = user?.position ? sharesToNumber(user.position.shares) : 0;
+  const usdcOut = num * sharePrice;
+  const valid = num > 0 && num <= userShares;
+
+  // Parse to wei-precision shares for the redeem call. ALP shares
+  // are 18-decimal per ERC4626 default (backend B3). Catch malformed
+  // input (e.g. "1e9", "1.2.3") so the disabled-state gating stays
+  // honest instead of throwing in the click handler.
+  const parsedShares: bigint | null = (() => {
+    if (!valid) return null;
+    try {
+      return parseUnits(amount.replace(/,/g, "") as `${number}`, ALP_DECIMALS);
+    } catch {
+      return null;
+    }
+  })();
+
+  const redeemTx = useWriteContract();
+  const redeemReceipt = useWaitForTransactionReceipt({ hash: redeemTx.data });
+  const redeeming = redeemTx.isPending || redeemReceipt.isLoading;
+
+  // Backend pushes a fresh user.snapshot once the on-chain Withdraw
+  // event lands; we close the modal and let the position card update
+  // through its existing subscription.
+  useEffect(() => {
+    if (redeemReceipt.isSuccess) onClose();
+  }, [redeemReceipt.isSuccess, onClose]);
+
+  const handleRedeem = async () => {
+    if (!parsedShares || !address) return;
+    setTxError(null);
+    try {
+      await redeemTx.writeContractAsync({
+        address: VAULT_ADDRESS,
+        abi: vaultAbi,
+        functionName: "redeem",
+        args: [parsedShares, address, address],
+      });
+    } catch (err) {
+      if (!isUserRejection(err)) setTxError("Transaction failed — try again");
+    }
+  };
 
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -1546,7 +1689,7 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
               </span>
               <button
                 type="button"
-                onClick={() => setAmount(USER_SHARES.toFixed(2))}
+                onClick={() => setAmount(userShares.toFixed(2))}
                 onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "#fff"; }}
                 onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.55)"; }}
                 style={{
@@ -1558,7 +1701,7 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
                   transition: "color 200ms ease",
                 }}
               >
-                Balance: {USER_SHARES.toLocaleString("en-US", { maximumFractionDigits: 2 })}
+                Balance: {userShares.toLocaleString("en-US", { maximumFractionDigits: 2 })}
               </button>
             </div>
           </div>
@@ -1600,7 +1743,7 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
                 <InfoIcon size={12} />
               </InfoTip>
             </span>
-            <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)", fontVariantNumeric: "tabular-nums" }}>$1.0427</span>
+            <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)", fontVariantNumeric: "tabular-nums" }}>${sharePrice.toFixed(4)}</span>
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "rgba(255,255,255,0.55)" }}>
@@ -1618,7 +1761,7 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
                 <InfoIcon size={12} />
               </InfoTip>
             </span>
-            <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)", fontVariantNumeric: "tabular-nums" }}>$3.26M</span>
+            <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)", fontVariantNumeric: "tabular-nums" }}>${tvl.toFixed(2)}M</span>
           </div>
         </div>
 
@@ -1628,7 +1771,8 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
             shape/colors stay so the button doesn't reflow. */}
         <button
           type="button"
-          disabled={!valid}
+          disabled={!valid || redeeming || !parsedShares || !address}
+          onClick={handleRedeem}
           className="transition-colors duration-200 ease-out"
           style={{
             marginTop: 12, width: "100%",
@@ -1638,35 +1782,44 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
             color: valid ? "rgba(255,255,255,0.92)" : "rgba(255,255,255,0.40)",
             fontFamily: "var(--sans-stack)",
             fontSize: 13, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1,
-            cursor: valid ? "pointer" : "default",
+            cursor: valid && !redeeming ? "pointer" : "default",
           }}
-          onMouseEnter={(e) => { if (valid) (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.10)"; }}
+          onMouseEnter={(e) => { if (valid && !redeeming) (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.10)"; }}
           onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.06)"; }}
         >
-          {valid ? `Withdraw ${fmtUsd2(usdcOut)}` : "Enter an amount"}
+          {redeeming ? "Withdrawing…" : valid ? `Withdraw ${fmtUsd2(usdcOut)}` : "Enter an amount"}
           <StrokeIcon kind="arrow" size={14} />
         </button>
+        {txError && (
+          <div style={{
+            marginTop: 8,
+            color: "rgba(248,113,113,0.85)",
+            fontFamily: "var(--sans-stack)",
+            fontSize: 11, fontWeight: 500, lineHeight: 1.3,
+            textAlign: "center",
+          }}>
+            {txError}
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
-// Full-width log of the user's own deposits/withdrawals. Wire-shape
-// extension once backend lands: filter by connected wallet, surface
-// withdraw events, and group same-day transactions.
-type UserActivityKind = "deposit" | "withdraw";
-type UserActivityRow = {
-  kind: UserActivityKind;
-  amount: number;
-  token: TokenEntry;
-  ts: string;
-  tx: string;
-};
-const USER_ACTIVITY: UserActivityRow[] = [
-  { kind: "deposit", amount: USER_DEPOSIT_AMT, token: TOKENS.USDC, ts: USER_DEPOSIT_TS, tx: USER_DEPOSIT_TX },
-];
-
+// Full-width log of the user's own deposits/withdrawals.
 function UserActivityCard() {
+  // Use useUser directly so the auth_required state can be branched
+  // on the same error surface as Position. useUserActivity is a
+  // derived helper without an error channel.
+  const { snapshot, error } = useUser();
+  const rows = snapshot?.activity ?? [];
+  const authRequired = error?.code === "auth_required";
+  // Empty-state copy already exists for the "no activity yet" case;
+  // the auth_required path swaps the message but reuses the layout
+  // so the card height stays identical.
+  const emptyText = authRequired
+    ? "Connect your wallet to see your activity."
+    : "No activity yet — deposit to get started.";
   return (
     // Dark frame matching VaultCard / Position. Each item gets its
     // own dot-grid surface (matching the Deposit input field); the
@@ -1680,23 +1833,25 @@ function UserActivityCard() {
     }}>
       <CardLabel icon="stack">Activity</CardLabel>
       <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 4 }}>
-        {USER_ACTIVITY.length === 0 ? (
+        {rows.length === 0 || authRequired ? (
           <div style={{
             padding: "16px 14px",
             textAlign: "center",
             color: "rgba(255,255,255,0.45)",
             fontFamily: "var(--sans-stack)", fontSize: 12,
           }}>
-            No activity yet — deposit to get started.
+            {emptyText}
           </div>
-        ) : USER_ACTIVITY.map((a, i) => {
+        ) : rows.map((a) => {
           const d = new Date(a.ts);
           const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
           const dateLabel = `${months[d.getMonth()]} ${d.getDate()}`;
+          const token = resolveToken(a.token);
+          const txDisplay = shortenTx(a.tx);
           return (
             <a
-              key={i}
-              href={`${TX_BASE_URL}${a.tx.replace(/…/g, "")}`}
+              key={a.id}
+              href={`${TX_BASE_URL}${a.tx}`}
               target="_blank"
               rel="noopener noreferrer"
               className="chat-tx-link"
@@ -1718,12 +1873,12 @@ function UserActivityCard() {
                 border: "1px solid rgba(255,255,255,0.06)",
               }}
             >
-              <TokenChip entry={a.token} size={18} radius={5} />
+              <TokenChip entry={token} size={18} radius={5} />
               <span style={{
                 fontFamily: "var(--sans-stack)", fontSize: 12.5, fontWeight: 500,
                 whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
               }}>
-                {a.kind === "deposit" ? "Deposited" : "Withdrew"} {a.amount.toLocaleString("en-US")} {a.token.slug}
+                {a.kind === "deposit" ? "Deposited" : "Withdrew"} {a.amount.toLocaleString("en-US")} {token.slug}
               </span>
               <span style={{
                 color: "rgba(255,255,255,0.45)",
@@ -1733,7 +1888,7 @@ function UserActivityCard() {
                 {dateLabel}
               </span>
               <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "rgba(255,255,255,0.55)", fontFamily: "var(--sans-stack)", fontSize: 11, fontVariantNumeric: "tabular-nums" }}>
-                {a.tx}
+                {txDisplay}
                 <StrokeIcon kind="external" size={10} />
               </span>
             </a>
@@ -2101,7 +2256,7 @@ function MessageView({ m, todayLabel, flash }: { m: AgentMessage; todayLabel: st
             {m.title}
           </span>
           <a
-            href={`${TX_BASE_URL}${m.tx.replace(/…/g, "")}`}
+            href={`${TX_BASE_URL}${m.tx}`}
             target="_blank"
             rel="noopener noreferrer"
             className="chat-tx-link"
@@ -2115,7 +2270,7 @@ function MessageView({ m, todayLabel, flash }: { m: AgentMessage; todayLabel: st
               transition: "color 160ms ease",
             }}
           >
-            {m.tx}
+            {shortenTx(m.tx)}
             <StrokeIcon kind="external" size={10} />
           </a>
         </div>
@@ -2192,7 +2347,7 @@ function MessageView({ m, todayLabel, flash }: { m: AgentMessage; todayLabel: st
           {m.sources.map((s, i) => {
             // basescan tx → explorer URL; everything else uses an
             // explicit href (Uniswap pool page, vault detail, etc.)
-            const href = s.tx ? `${TX_BASE_URL}${s.tx.replace(/…/g, "")}` : (s.href ?? "#");
+            const href = s.tx ? `${TX_BASE_URL}${s.tx}` : (s.href ?? "#");
             return (
               <a
                 key={i}
@@ -2219,10 +2374,7 @@ function MessageView({ m, todayLabel, flash }: { m: AgentMessage; todayLabel: st
   );
 }
 
-const WSS_URL = process.env.NEXT_PUBLIC_SHERPA_WSS_URL;
-const IS_DEV_STUB = !WSS_URL;
-
-/* ---------- Dashboard sidebar (left) ---------- */
+/* ---------- Dashboard panel (right sidebar, Stats tab) ---------- */
 
 const fmtUsd = (n: number) => {
   if (n === 0) return "$0";
@@ -2236,8 +2388,6 @@ const CATEGORY_LABEL: Record<ActionCategory, string> = {
   edit_position: "Edit position",
   claim_fees: "Claim fees",
 };
-
-const ALPS_USERS = 247;
 
 // Hover-interactive mini sparkline. Tooltip is portalled to <body>
 // so it escapes the sidebar's overflow:hidden when it sits near the
@@ -2352,8 +2502,8 @@ function DashGauge({ pct, color, chip }: { pct: number; color: string; chip: Rea
 const EXPOSURE_GRID = "minmax(0, 1fr) 44px 44px 56px";
 
 function ExposureRow({ p, dimmed }: { p: PoolEntry; dimmed: boolean }) {
-  const apr = POOL_APR[p.slug] ?? 0;
-  const earned = POOL_EARNED_30D[p.slug] ?? 0;
+  const apr = p.apr;
+  const earned = p.earned30d;
   const display = p.slug === "Idle reserve" ? "Reserve" : p.slug;
   const muted = "rgba(255,255,255,0.45)";
   return (
@@ -2406,7 +2556,7 @@ function poolContainsToken(p: PoolEntry, slug: string | null): boolean {
 function ActionLogRow({ m }: { m: AgentMessage & { kind: "action" } }) {
   return (
     <a
-      href={`${TX_BASE_URL}${m.tx.replace(/…/g, "")}`}
+      href={`${TX_BASE_URL}${m.tx}`}
       target="_blank"
       rel="noopener noreferrer"
       className="chat-tx-link"
@@ -2483,15 +2633,36 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 }
 
 function DashboardPanel() {
-  const recentActions = INITIAL_WIRE_MESSAGES
-    .filter((m): m is Extract<WireMessage, { kind: "action" }> => m.kind === "action")
-    .slice(-6)
-    .reverse()
-    .map((w) => toAgentMessage(w))
-    .filter((m): m is AgentMessage & { kind: "action" } => m.kind === "action");
+  const { snapshot: vault } = useVault();
+  const { messages: wire } = useAgentStream();
 
-  const tvl = TVL_30D[TVL_30D.length - 1] ?? 3.26;
-  const activePools = POOLS.filter((p) => p.slug !== "Idle reserve").length;
+  const recentActions = useMemo(() =>
+    wire
+      .filter((m): m is Extract<WireMessage, { kind: "action" }> => m.kind === "action")
+      .slice(-6)
+      .reverse()
+      .map((w) => toAgentMessage(w))
+      .filter((m): m is AgentMessage & { kind: "action" } => m.kind === "action"),
+    [wire]);
+
+  const tvl = vault?.tvl ?? 0;
+  const sharePrice = vault?.sharePrice ?? 0;
+  const basketApr = vault?.basketApr ?? 0;
+  const basketEarned30d = vault?.basketEarned30d ?? 0;
+  const users = vault?.users ?? 0;
+  const sharePrice30d = vault?.sharePrice30d ?? [];
+  const tvl30d = vault?.tvl30d ?? [];
+  const apr30d = vault?.apr30d ?? [];
+
+  const allocViews: AllocationEntry[] = useMemo(() =>
+    (vault?.allocations ?? []).map((a) => ({ ...resolveToken(a.token), pct: a.pct })),
+    [vault?.allocations]);
+  const poolViews: PoolEntry[] = useMemo(() =>
+    (vault?.pools ?? []).map(toPoolEntry),
+    [vault?.pools]);
+  const positionsSorted = useMemo(() => sortPositions(poolViews), [poolViews]);
+  const activePools = poolViews.filter((p) => p.slug !== "Idle reserve").length;
+
   const [hoveredToken, setHoveredToken] = useState<string | null>(null);
 
   return (
@@ -2520,7 +2691,7 @@ function DashboardPanel() {
                 ${tvl.toFixed(2)}M
               </div>
             </div>
-            <MiniSparkline data={TVL_30D} width={80} height={24} label="TVL" formatValue={(v) => `$${v.toFixed(2)}M`} />
+            <MiniSparkline data={tvl30d} width={80} height={24} label="TVL" formatValue={(v) => `$${v.toFixed(2)}M`} />
           </div>
           {/* Bottom row: 3 stats inline with equal gaps between them
               via space-between. */}
@@ -2532,9 +2703,9 @@ function DashboardPanel() {
             paddingTop: 10,
             borderTop: "1px solid rgba(255,255,255,0.05)",
           }}>
-            <DashStat value={fmtUsd(BASKET_EARNED_30D)} label="fees earned" />
+            <DashStat value={fmtUsd(basketEarned30d)} label="fees earned" />
             <DashStat value={String(activePools)} label="active pools" />
-            <DashStat value={String(ALPS_USERS)} label="users" />
+            <DashStat value={String(users)} label="users" />
           </div>
         </div>
 
@@ -2551,9 +2722,9 @@ function DashboardPanel() {
             </div>
             <div style={{ marginTop: 5, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
               <span style={{ color: "rgb(134, 239, 172)", fontFamily: "var(--sans-stack)", fontSize: 18, fontWeight: 600, lineHeight: 1, letterSpacing: "-0.01em", fontVariantNumeric: "tabular-nums" }}>
-                {fmtPct(BASKET_APR_30D)}
+                {fmtPct(basketApr)}
               </span>
-              <MiniSparkline data={APR_30D} width={56} height={18} stroke="rgba(134, 239, 172, 0.85)" label="Yield" formatValue={(v) => `${v.toFixed(1)}%`} />
+              <MiniSparkline data={apr30d} width={56} height={18} stroke="rgba(134, 239, 172, 0.85)" label="Yield" formatValue={(v) => `${v.toFixed(1)}%`} />
             </div>
           </div>
           <div style={{
@@ -2567,9 +2738,9 @@ function DashboardPanel() {
             </div>
             <div style={{ marginTop: 5, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
               <span style={{ color: "#fff", fontFamily: "var(--sans-stack)", fontSize: 18, fontWeight: 600, lineHeight: 1, letterSpacing: "-0.01em", fontVariantNumeric: "tabular-nums" }}>
-                {fmtNum(SHARE_PRICE)}
+                {fmtNum(sharePrice)}
               </span>
-              <MiniSparkline data={SHARE_PRICE_30D} width={56} height={18} label="Share price" formatValue={(v) => `$${v.toFixed(4)}`} />
+              <MiniSparkline data={sharePrice30d} width={56} height={18} label="Share price" formatValue={(v) => `$${v.toFixed(4)}`} />
             </div>
           </div>
         </div>
@@ -2585,7 +2756,7 @@ function DashboardPanel() {
             display: "flex", alignItems: "center", gap: 16,
             padding: "4px 6px 12px",
           }}>
-            {ALLOCATIONS.map((a) => (
+            {allocViews.map((a) => (
               <span
                 key={a.slug}
                 onMouseEnter={() => setHoveredToken(a.slug)}
@@ -2616,7 +2787,7 @@ function DashboardPanel() {
             <span style={{ textAlign: "right" }}>Fees</span>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            {POSITIONS_SORTED.map((p) => (
+            {positionsSorted.map((p) => (
               <ExposureRow
                 key={p.slug}
                 p={p}
@@ -2646,24 +2817,41 @@ function DashboardPanel() {
   );
 }
 
+// Translate a transport error code into the inline copy shown under
+// the chat input. Server-side errors flow through useAgentStream's
+// error field; local "disconnected" comes from the send result.
+function sendErrorCopy(code: "disconnected" | "rate_limited" | "not_subscribed" | "auth_required"): string {
+  switch (code) {
+    case "rate_limited":  return "Sending too quickly — retry shortly.";
+    case "disconnected":  return "Reconnecting — try again in a moment.";
+    case "not_subscribed":return "Not connected to the agent yet — try again in a moment.";
+    case "auth_required": return "Connect your wallet to chat with Sherpa.";
+  }
+}
+
 function AgentChatPanel() {
-  // Dev stub: seed synchronously to avoid first-paint flicker.
-  // Real backend: start empty, populate via `onHistory`.
-  const [messages, setMessages] = useState<AgentMessage[]>(() =>
-    IS_DEV_STUB ? INITIAL_WIRE_MESSAGES.map(toAgentMessage) : []
-  );
+  const { messages: wire, error: agentError } = useAgentStream();
+  const send = useSendUserMessage();
+  const messages = useMemo(() => wire.map(toAgentMessage), [wire]);
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
+  // Local error stripe under the composer. Sourced from two paths:
+  // (a) sync send result for "disconnected", (b) reactive
+  // useAgentStream.error for server-side rate_limited /
+  // not_subscribed / auth_required. Cleared on next successful send.
+  const [sendError, setSendError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const didInitialScroll = useRef(false);
-  const streamRef = useRef<StreamHandle | null>(null);
+  const seenWireCount = useRef(0);
 
+  // First content arrival: instant scroll to bottom. Subsequent
+  // updates: smooth scroll via the effect below.
   useLayoutEffect(() => {
     const el = scrollRef.current;
-    if (!el || didInitialScroll.current) return;
+    if (!el || didInitialScroll.current || messages.length === 0) return;
     el.scrollTop = el.scrollHeight;
     didInitialScroll.current = true;
-  }, []);
+  }, [messages.length]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -2671,59 +2859,42 @@ function AgentChatPanel() {
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [messages, thinking]);
 
+  // Clear the thinking indicator when a reply event lands. Tracks
+  // wire-feed length so the priming history doesn't accidentally
+  // unset thinking on first mount.
   useEffect(() => {
-    if (streamRef.current) return; // StrictMode guard
-    streamRef.current = subscribeAgentStream({
-      url: WSS_URL,
-      onHistory: (events) => {
-        setMessages(events.map(toAgentMessage));
-      },
-      onEvent: (e) => {
-        setMessages((prev) => {
-          // Dedupe by id — server echo of an optimistic user msg
-          // arrives with the same id we issued.
-          if (prev.some((m) => m.id === e.id)) return prev;
-          return [...prev, toAgentMessage(e)];
-        });
-        // Any reply landing means the agent's done thinking.
-        if (e.kind === "reply") setThinking(false);
-      },
-    });
-    return () => { streamRef.current?.close(); streamRef.current = null; };
-  }, []);
+    if (wire.length > seenWireCount.current) {
+      const fresh = wire.slice(seenWireCount.current);
+      if (fresh.some((m) => m.kind === "reply")) setThinking(false);
+      seenWireCount.current = wire.length;
+    }
+  }, [wire]);
+
+  // Pick up server-side errors as they arrive (rate_limited /
+  // not_subscribed / auth_required). The composer keeps the typed
+  // text in those cases — same recoverable-error doctrine the
+  // transport applies: the connection stays open, the user can retry.
+  useEffect(() => {
+    if (!agentError) return;
+    const code = agentError.code;
+    if (code === "rate_limited" || code === "not_subscribed" || code === "auth_required") {
+      setSendError(sendErrorCopy(code));
+      setThinking(false);
+    }
+  }, [agentError]);
 
   const handleSend = (e: React.FormEvent) => {
     e.preventDefault();
     const text = input.trim();
     if (!text || thinking) return;
-    const cid = clientId();
-    const wireUser: WireMessage = {
-      id: cid,
-      ts: new Date().toISOString(),
-      kind: "user",
-      text,
-    };
-    setMessages((prev) => [...prev, toAgentMessage(wireUser)]);
-    streamRef.current?.send({ v: 1, type: "user_message", text, clientId: cid });
+    const result = send(text);
+    if (!result.ok) {
+      setSendError(sendErrorCopy(result.reason));
+      return;
+    }
+    setSendError(null);
     setInput("");
     setThinking(true);
-    // Real backend emits the reply via `onEvent`; only the dev stub
-    // synthesizes locally.
-    if (IS_DEV_STUB) {
-      window.setTimeout(() => {
-        const reply = getAgentReply(text);
-        const wireReply: WireMessage = {
-          id: `r_${Date.now().toString(36)}`,
-          ts: new Date().toISOString(),
-          kind: "reply",
-          text: reply.text,
-          sources: reply.sources,
-          replyTo: cid,
-        };
-        setMessages((prev) => [...prev, toAgentMessage(wireReply)]);
-        setThinking(false);
-      }, 1500);
-    }
   };
 
   // Bar-click → scroll to the first signal/action message in that
@@ -2841,14 +3012,15 @@ function AgentChatPanel() {
           display: "flex", alignItems: "center", gap: 8,
           padding: "5px 5px 5px 14px",
           background: "rgba(255,255,255,0.04)",
-          border: "1px solid rgba(255,255,255,0.10)",
+          border: `1px solid ${sendError ? "rgba(248,113,113,0.55)" : "rgba(255,255,255,0.10)"}`,
           borderRadius: 999,
+          transition: "border-color 200ms ease",
         }}>
           <input
             type="text"
             placeholder="How can I help you?"
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => { setInput(e.target.value); if (sendError) setSendError(null); }}
             disabled={thinking}
             style={{
               flex: 1, minWidth: 0,
@@ -2877,6 +3049,17 @@ function AgentChatPanel() {
             <StrokeIcon kind="arrow" size={12} />
           </button>
         </div>
+        {sendError && (
+          <div style={{
+            marginTop: 6, paddingLeft: 14,
+            color: "rgba(248,113,113,0.85)",
+            fontFamily: "var(--sans-stack)",
+            fontSize: 11, fontWeight: 500,
+            lineHeight: 1.3,
+          }}>
+            {sendError}
+          </div>
+        )}
       </form>
     </div>
   );
@@ -3124,6 +3307,11 @@ function FooterStrip({
 /* ---------- Page ---------- */
 
 export default function AppPage() {
+  // Bridges wagmi's connected address into the api client's auth
+  // token (mint via /auth/dev-token today; SIWE in 7c). Dormant in
+  // stub mode. Must run on every /app render so connect/disconnect
+  // events route through it.
+  useAuthBridge();
   const router = useRouter();
   const [withdrawOpen, setWithdrawOpen] = useState(false);
   const [showHowItWorks, setShowHowItWorks] = useState(false);
@@ -3417,16 +3605,11 @@ export default function AppPage() {
                 <LearnMoreContent open={true} inline />
               ) : (
                 // 4-row × 3-col bento, sized to fill the panel:
-                //   row 1: Hero title (col 1)         | Placeholder upper (cols 2-3)
-                //   row 2: Summary card (col 1)       | Placeholder lower (cols 2-3)
-                //   row 3: Vault upper (col 1, span)  | Position (col 2) | Performance (col 3)
-                //   row 4: Vault lower (col 1, span)  | Activity (cols 2-3)
-                // Col 1 is wider so the Summary's prose fits comfortably.
-                // 4-row × 3-col bento (hero title dropped):
-                //   row 1: Vault (col 1, spans rows 1-3)   | Placeholder (cols 2-3)
-                //   row 2: Vault (continues)               | Position | Performance
-                //   row 3: Vault (continues)               | Activity (cols 2-3, spans rows 3-4)
+                //   row 1: Vault (col 1, spans rows 1-3)   | Position    | Performance
+                //   row 2: Vault (continues)               | Activity (cols 2-3, spans rows 2-4)
+                //   row 3: Vault (continues)               | Activity (continues)
                 //   row 4: Summary text (col 1)            | Activity (continues)
+                // Col 1 is wider so the Summary's prose fits comfortably.
                 <div style={{
                   display: "grid",
                   gridTemplateColumns: "1.45fr 1fr 1fr",

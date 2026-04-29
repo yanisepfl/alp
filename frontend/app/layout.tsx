@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 import { Inter, Radley } from "next/font/google";
 import "./globals.css";
 import { PersistentBackdrop } from "@/components/persistent-backdrop";
+import { Web3Provider } from "@/components/web3-provider";
 
 const sans = Inter({
   subsets: ["latin"],
@@ -22,11 +24,12 @@ export const metadata: Metadata = {
   description: "An onchain basket vault.",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  const cookies = (await headers()).get("cookie");
   return (
     <html lang="en" className={`${sans.variable} ${radley.variable}`}>
       <body>
@@ -45,7 +48,7 @@ export default function RootLayout({
         {/* Shared muted-landscape backdrop at the LMC panel rect — keeps
             the bg from reloading on landing → /app navigation. */}
         <PersistentBackdrop />
-        {children}
+        <Web3Provider cookies={cookies}>{children}</Web3Provider>
         <div
           aria-hidden
           className="pointer-events-none fixed inset-0 z-[100]"

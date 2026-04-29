@@ -739,8 +739,6 @@ function StackPreview({
     rowWidth - 2 * SQUARE - 2 * CHEVRON_W - 4 * GAP,
   );
   const titles = PHASE_CONFIGS.map((p) => p.title);
-  // CONTEXT_BULLETS is at module scope (above this component) so the
-  // typing effect's setTimeout closure has a stable reference.
   const ease = "cubic-bezier(0.4, 0, 0.2, 1)";
   const dur = 800;
 
@@ -999,9 +997,9 @@ function StackPreview({
                       ? "rgb(74, 222, 128)"
                       : "rgba(255,255,255,0.62)",
                     letterSpacing: "-0.005em",
-                    // lineHeight 1.3 leaves room for descenders ("g",
-                    // "p", "y") that were previously clipped by the
-                    // overflow:hidden used for the max-width collapse.
+                    // lineHeight 1.3 leaves room for descenders ("g", "p",
+                    // "y") so the max-width collapse + overflow:hidden on
+                    // this span doesn't clip them.
                     lineHeight: 1.3,
                   }}
                 >
@@ -2502,8 +2500,8 @@ function PortfolioPies() {
 }
 
 
-// 3×2 grid (was 4×2) since AERO pairs were dropped. Pair entries render as
-// the overlapping coin pair only; no text label per the user's request.
+// 3×2 grid of overlapping coin pairs — no text labels, the chip pair is
+// the affordance.
 function PairsTooltip() {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(3, auto)", gap: "12px 18px" }}>
@@ -2804,8 +2802,8 @@ function StrategyViz() {
   // so content sits flush with the wrapper edge, matching the inner
   // margin of text in other cards.
   // Wrapper sized so the chart-frame's outer stroke edge sits flush with
-  // the wrapper edges. Slightly smaller than the prior 184×150 so the
-  // sim card doesn't push Strategy out of proportion.
+  // the wrapper edges; sized so the sim card doesn't push Strategy out
+  // of proportion in the row.
   const W = 168;
   const H = 138;
   const SHIFT_X = -16;
