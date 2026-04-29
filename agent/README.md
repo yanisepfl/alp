@@ -82,4 +82,4 @@ pnpm wrangler secret put UR_ADAPTER_ADDRESS
 pnpm deploy
 ```
 
-Then point KeeperHub at `https://<your-worker>.workers.dev/trigger` — see [KEEPERHUB.md](./KEEPERHUB.md) for the workflow recipe.
+Then point KeeperHub at `https://<your-worker>.workers.dev/trigger` (see agent README for workflow setup).
