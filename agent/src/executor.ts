@@ -284,9 +284,21 @@ async function waitForOk(client: PublicClient, hash: `0x${string}`, label: strin
 }
 
 const V3_FACTORY: Address = "0x33128a8fC17869897dcE68Ed026d694621f6FDfD";
+/** WETH on Base. Used as a substitute for `address(0)` (native ETH) when
+ *  resolving a V3 spot pool for valuation — the V3 factory only knows
+ *  ERC20s, so V4 native-ETH pools (`token0 == address(0)`) need the wrap. */
+const WRAPPED_NATIVE: Address = "0x4200000000000000000000000000000000000006";
+/** Canonical V3 fee tier we query for ETH-pair valuation when the LP pool
+ *  lives on V4 (whose `fee` field is the dynamic-fee marker, not a V3
+ *  tier). 0.05% is where the deepest V3 ETH pairs live on Base. */
+const V3_VALUATION_FEE = 500;
 
 /** Value (bal0, bal1) in base-asset units using the pool's V3 spot price.
- *  Used to enforce the per-pool `maxAllocationBps` from the agent side. */
+ *  Used to enforce the per-pool `maxAllocationBps` from the agent side.
+ *  For V4 LP pools (native ETH side, V4 dynamic-fee marker) we substitute
+ *  WETH + the canonical V3 fee tier so the cap check doesn't degenerate to
+ *  `bal0 + bal1` — which would treat 1 ETH-wei as 1 USDC-raw and crash the
+ *  scaled balances to zero on the next step. */
 async function valueInBase(args: {
   publicClient: PublicClient;
   pool: import("./config.js").PoolConfig;
@@ -295,13 +307,21 @@ async function valueInBase(args: {
   baseAsset: Address;
 }): Promise<bigint> {
   const { publicClient, pool, bal0, bal1, baseAsset } = args;
+  const t0 = pool.token0 === "0x0000000000000000000000000000000000000000" ? WRAPPED_NATIVE : pool.token0;
+  const t1 = pool.token1 === "0x0000000000000000000000000000000000000000" ? WRAPPED_NATIVE : pool.token1;
+  const baseForLookup = baseAsset === "0x0000000000000000000000000000000000000000" ? WRAPPED_NATIVE : baseAsset;
+  const fee = pool.kind === "v4" ? V3_VALUATION_FEE : pool.fee;
   const poolAddr = await publicClient.readContract({
     address: V3_FACTORY,
     abi: v3FactoryAbi,
     functionName: "getPool",
-    args: [pool.token0, pool.token1, pool.fee],
+    args: [t0, t1, fee],
   });
-  if (poolAddr === "0x0000000000000000000000000000000000000000") return bal0 + bal1;
+  // Last-resort fallback: if no V3 spot pool exists for this pair, return 0
+  // and let the on-chain cap check (in executeAddLiquidity) make the call.
+  // Returning bal0+bal1 here would over-value the ETH side by ~1e12× for
+  // native-ETH pools and cause the off-chain cap to scale balances to 0.
+  if (poolAddr === "0x0000000000000000000000000000000000000000") return 0n;
   const slot0 = await publicClient.readContract({
     address: poolAddr,
     abi: v3PoolAbi,
@@ -318,8 +338,10 @@ async function valueInBase(args: {
   // Value of bal1 in token1 units = bal1.
   const bal0InToken1 = (bal0 * numerator) / denominator;
   const totalInToken1 = bal0InToken1 + bal1;
-  // Convert total back to base-asset units.
-  if (pool.token1 === baseAsset) {
+  // Convert total back to base-asset units. Compare against the wrapped
+  // base (so native-ETH base treated as WETH for direction determination,
+  // since the V3 spot lookup substituted WETH for both legs).
+  if (t1 === baseForLookup) {
     return totalInToken1;
   }
   // Base = token0. Convert token1 back to token0 via the same price.
