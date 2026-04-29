@@ -12,6 +12,7 @@ import { base } from "viem/chains";
 import { vaultAbi } from "./abi.js";
 import type { AgentConfig } from "./config.js";
 import { executeRebalance } from "./executor.js";
+import { KeeperHubClient } from "./keeperhub.js";
 import { type ActivityStore, planToActivityRow } from "./log.js";
 import { snapshotPositions } from "./monitor.js";
 import {
@@ -22,6 +23,7 @@ import {
   type Plan,
   type PositionHysteresis,
 } from "./planner.js";
+import { KeeperHubSender, type TxSender } from "./sender.js";
 
 export interface TickResult {
   observedPositions: number;
@@ -126,7 +128,11 @@ export async function runTick(args: {
       await store.append(planToActivityRow(plan));
       continue;
     }
-    // Rebalance.
+    // Rebalance. Pick the tx sender once per tick so logs are consistent.
+    let sender: TxSender | undefined;
+    if (config.keeperHubDirectExec && config.keeperHubApiKey) {
+      sender = new KeeperHubSender(new KeeperHubClient({ apiKey: config.keeperHubApiKey, network: "base" }));
+    }
     try {
       const steps = await executeRebalance({
         config,
@@ -135,6 +141,7 @@ export async function runTick(args: {
         account: account.address,
         plan,
         vaultBaseAsset,
+        sender,
       });
       next.set(key, freshHysteresis(plan.position));
       await store.append(planToActivityRow(plan, steps));

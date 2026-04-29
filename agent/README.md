@@ -83,17 +83,40 @@ pnpm wrangler secret put UR_ADAPTER_ADDRESS
 pnpm deploy
 ```
 
-## KeeperHub setup
+## KeeperHub integration
 
-The repo ships [`keeperhub-workflow.json`](./keeperhub-workflow.json) — import into [app.keeperhub.com](https://app.keeperhub.com) (Workflows → Import) and fill the four secrets:
+Two depth tiers. The basic tier ships out of the box; the deep tier (KH-Turnkey signing every rebalance tx) is one env-var flip away.
 
-| Secret | Where it comes from |
-|---|---|
-| `ALP_WORKER_URL` | Your `wrangler deploy` output, e.g. `alp-agent.username.workers.dev` |
-| `ALP_API_KEY` | Long random string. Set the same value as `KEEPERHUB_API_KEY` on the worker (`pnpm wrangler secret put KEEPERHUB_API_KEY`). |
-| `TG_BOT_TOKEN` | DM @BotFather on Telegram → `/newbot` → copy the token string. |
-| `TG_CHAT_ID` | DM your bot once, then `curl https://api.telegram.org/bot<TOKEN>/getUpdates` and look for `"chat":{"id":...}` — that's your private chat ID. |
+### Basic — schedule + Telegram notifications (5 min)
 
-The workflow fires every 5 minutes, calls `POST /trigger`, and pings the Telegram chat **only when at least one position rebalanced** (with the per-position pool name + reason + new range). A failure-branch sends a separate alert if the worker call errors.
+The repo ships [`keeperhub-workflow.json`](./keeperhub-workflow.json) and an idempotent deploy script. After `wrangler deploy` of the worker:
 
-To get a `kh_` org API key (only needed for programmatic workflow management — manual import via UI doesn't need it): in app.keeperhub.com → Settings → API Keys → New key, prefix `kh_`. Paste it as the `Authorization: Bearer <kh_key>` header when calling KeeperHub's REST API or `kh login --api-key <kh_key>` for the CLI.
+1. Get a KeeperHub org API key: app.keeperhub.com → Settings → API Keys → New key (`kh_…`).
+2. Drop env vars in `agent/.env.local` (gitignored):
+   ```
+   KEEPERHUB_API_KEY=kh_...
+   ALP_WORKER_URL=alp-agent.username.workers.dev
+   ALP_API_KEY=long_random_string
+   TELEGRAM_BOT_TOKEN=...
+   TELEGRAM_CHAT_ID=...
+   ```
+3. `pnpm wrangler secret put KEEPERHUB_API_KEY` and paste the **same** `ALP_API_KEY` (the worker uses it to verify KH-originated requests).
+4. `pnpm deploy:keeperhub` — POSTs `/api/workflows/create` + PATCHes nodes/edges + activates. Idempotent (re-run to update).
+
+Workflow logic: every 5 min `POST /trigger` → if `rebalances > 0` → Telegram with the per-pool reason + new range to your private chat. Failure branch alerts the same chat if the worker errors.
+
+### Deep — KH Turnkey signs every rebalance tx (Best Integration tier)
+
+When `KEEPERHUB_DIRECT_EXEC=true` is set, the worker routes all three rebalance writes (`executeRemoveLiquidity` → `executeSwap` → `executeAddLiquidity`) through KH's Direct Execution API. KH's Turnkey-backed wallet appears as `msg.sender` on-chain — the worker no longer needs `AGENT_PRIVATE_KEY` at runtime.
+
+Setup:
+1. Get the Turnkey wallet address: app.keeperhub.com → Settings → Wallets / Org Wallet (open question — see local notes if not visible).
+2. Grant it the vault's `agent` role: `vault.setAgent(turnkeyAddress)` (owner-only).
+3. Set worker env: `pnpm wrangler secret put KEEPERHUB_DIRECT_EXEC --value true` and `pnpm wrangler secret put KEEPERHUB_API_KEY --value kh_...`.
+
+The activity log + Telegram messages now show the Turnkey wallet's tx hashes. Demo proof: take a screenshot of `vault.agent()` returning the Turnkey address before the rebalance + Basescan trace of the tx with Turnkey EOA as From.
+
+### Telegram secrets — exactly how to obtain
+
+- `TELEGRAM_BOT_TOKEN`: DM @BotFather → `/newbot` → follow prompts → copy the token (looks like `7912345678:AAFmM…`).
+- `TELEGRAM_CHAT_ID`: DM your new bot once, then `curl https://api.telegram.org/bot<TOKEN>/getUpdates` and read `"chat":{"id":<NUMBER>}` — that's your private chat ID.

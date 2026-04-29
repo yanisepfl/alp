@@ -59,6 +59,13 @@ export interface AgentConfig {
   tradingApiBase: string;
   /** Optional API key for the Trading API. Public free tier works without one. */
   tradingApiKey?: string;
+  /** KeeperHub org API key (kh_…). When set together with `keeperHubDirectExec`,
+   *  rebalance txs land via KH's Direct Execution API (Turnkey wallet signs). */
+  keeperHubApiKey?: string;
+  /** True iff we should route rebalance writes through KeeperHub instead of
+   *  the local viem signer. Defaults to false; the worker still uses the
+   *  hot key unless this is explicitly enabled. */
+  keeperHubDirectExec: boolean;
   /** Pools the agent monitors. */
   pools: PoolConfig[];
 }
@@ -113,6 +120,8 @@ export function loadConfig(env: Record<string, string | undefined>): AgentConfig
     hysteresisCloserFraction: Number(env.HYSTERESIS_CLOSER_FRACTION ?? 0.5),
     tradingApiBase: env.TRADING_API_BASE ?? "https://trade-api.gateway.uniswap.org",
     tradingApiKey: env.TRADING_API_KEY,
+    keeperHubApiKey: env.KEEPERHUB_API_KEY,
+    keeperHubDirectExec: env.KEEPERHUB_DIRECT_EXEC === "true",
     // Pool list defaults empty; the local entrypoint can override via a JSON
     // file (see `agent/pools.local.json` for the format expected).
     pools: [],

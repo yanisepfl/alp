@@ -33,6 +33,7 @@ contract UniV3Adapter is ILiquidityAdapter {
     error PoolNotFound();
     error NotVault();
     error UnexpectedEth();
+    error DeadlineExpired();
 
     modifier onlyVault() {
         if (msg.sender != vault) revert NotVault();
@@ -184,6 +185,17 @@ contract UniV3Adapter is ILiquidityAdapter {
     ) external payable onlyVault returns (uint256 amountOut) {
         if (msg.value != 0) revert UnexpectedEth();
         if (tokenIn != pool.token0 && tokenIn != pool.token1) revert UnknownToken(tokenIn);
+        // Enforce caller-supplied deadline at the adapter layer. Uniswap's
+        // SwapRouter02 dropped the deadline param entirely, so without this
+        // check a signed `executeSwap` tx could sit in the public mempool
+        // and be replayed by a validator after the price has moved
+        // adversely; the only remaining protection would be the `amountOutMin`
+        // computed at sign time, which goes stale fast on volatile pairs.
+        // We accept the same `abi.encode(uint256 deadline)` payload the
+        // agent already passes through every adapter so the encoding stays
+        // uniform across V3 / V4 / UR.
+        uint256 deadline = abi.decode(extra, (uint256));
+        if (block.timestamp > deadline) revert DeadlineExpired();
         address tokenOut = (tokenIn == pool.token0) ? pool.token1 : pool.token0;
 
         IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
@@ -202,10 +214,6 @@ contract UniV3Adapter is ILiquidityAdapter {
         );
 
         IERC20(tokenIn).forceApprove(address(swapRouter), 0);
-        // The V3 SwapRouter02 does not enforce a deadline, but we accept the
-        // V4-shaped `abi.encode(uint256 deadline)` payload anyway so the
-        // agent can pass identical extra-data through either adapter.
-        extra;
     }
 
     function getPositionAmounts(PoolRegistry.Pool calldata pool, uint256 positionId)

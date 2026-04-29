@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "deploy:keeperhub": "tsx scripts/setup-keeperhub.ts",
     "local": "tsx src/local.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"

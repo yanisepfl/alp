@@ -18,6 +18,7 @@ import {
 import type { PositionSnapshot } from "./monitor.js";
 import type { Plan } from "./planner.js";
 import { buildSingleHopV3Swap, quoteAndBuildMultiHop } from "./quoting.js";
+import type { TxSender } from "./sender.js";
 
 /** Storage slot index of the `pools` mapping inside V4 PoolManager.
  *  Mirrors the constant in `monitor.ts` — kept duplicated rather than
@@ -47,13 +48,22 @@ export async function executeRebalance(args: {
   account: Address;
   plan: Plan;
   vaultBaseAsset: Address;
+  /** Optional override for the tx-landing path. Defaults to viem signing
+   *  with `account` / `walletClient`. When supplied (e.g. KeeperHubSender)
+   *  every write goes through the injected sender — KH Turnkey wallet
+   *  appears as msg.sender for every rebalance tx. */
+  sender?: TxSender;
 }): Promise<ActionStep[]> {
-  const { config, publicClient, walletClient, account, plan, vaultBaseAsset } = args;
+  const { config, publicClient, walletClient, account, plan, vaultBaseAsset, sender } = args;
   if (plan.action.kind !== "rebalance") throw new Error("executeRebalance called on non-rebalance plan");
 
   const lockKey = plan.prior.positionKey;
   if (inflight.has(lockKey)) throw new Error(`position ${lockKey} already has an in-flight rebalance`);
   inflight.add(lockKey);
+
+  // Default to a viem-backed sender if the caller didn't inject one. Lazy
+  // import to avoid pulling sender.ts into bundles that never use it.
+  const tx: TxSender = sender ?? new (await import("./sender.js")).ViemSender(publicClient, walletClient, account);
 
   const steps: ActionStep[] = [];
   try {
@@ -66,16 +76,14 @@ export async function executeRebalance(args: {
       [{ type: "uint256" }, { type: "bool" }],
       [deadline, true],
     );
-    const removeTx = await walletClient.writeContract({
-      account,
-      chain: null,
-      address: config.vaultAddress,
+    const removeTx = await tx.sendCall({
+      to: config.vaultAddress,
       abi: vaultAbi,
       functionName: "executeRemoveLiquidity",
       args: [pool.lpKey, pos.positionId, pos.liquidity, 0n, 0n, removeExtra],
       gas: 2_000_000n,
+      label: "executeRemoveLiquidity",
     });
-    await waitForOk(publicClient, removeTx, "executeRemoveLiquidity");
     steps.push({ kind: "remove", txHash: removeTx, detail: { positionId: pos.positionId.toString() } });
 
     // 2. Swap one-sided into balanced. After remove, the vault holds whichever
@@ -94,6 +102,7 @@ export async function executeRebalance(args: {
       positionSnapshot: pos,
       vaultBaseAsset,
       deadline,
+      sender: tx,
     });
     if (swapStep) steps.push(swapStep);
 
@@ -176,10 +185,8 @@ export async function executeRebalance(args: {
       bal1 = sized.amount1 < bal1 ? sized.amount1 : bal1;
     }
 
-    const addTx = await walletClient.writeContract({
-      account,
-      chain: null,
-      address: config.vaultAddress,
+    const addTx = await tx.sendCall({
+      to: config.vaultAddress,
       abi: vaultAbi,
       functionName: "executeAddLiquidity",
       args: [
@@ -201,8 +208,8 @@ export async function executeRebalance(args: {
       // value too tightly for this call — the post-add cap check iterates
       // every tracked position and can run out at the very last step.
       gas: 3_000_000n,
+      label: "executeAddLiquidity",
     });
-    await waitForOk(publicClient, addTx, "executeAddLiquidity");
     steps.push({
       kind: "add",
       txHash: addTx,
@@ -270,17 +277,6 @@ async function readV4SqrtPriceX96(
   // sqrtPriceX96 is the lower 160 bits of the packed slot.
   const mask160 = (1n << 160n) - 1n;
   return BigInt(raw) & mask160;
-}
-
-/** Await a tx receipt and throw if it reverted. viem's
- *  `waitForTransactionReceipt` returns the receipt regardless of status, so we
- *  have to check explicitly — otherwise a reverted on-chain tx silently
- *  propagates through the activity log as "success". */
-async function waitForOk(client: PublicClient, hash: `0x${string}`, label: string): Promise<void> {
-  const receipt = await client.waitForTransactionReceipt({ hash });
-  if (receipt.status !== "success") {
-    throw new Error(`${label} reverted (tx ${hash})`);
-  }
 }
 
 const V3_FACTORY: Address = "0x33128a8fC17869897dcE68Ed026d694621f6FDfD";
@@ -362,8 +358,11 @@ async function maybeSwapToBalance(args: {
   positionSnapshot: PositionSnapshot;
   vaultBaseAsset: Address;
   deadline: bigint;
+  /** Optional sender override (matches executeRebalance). Defaults to viem. */
+  sender?: TxSender;
 }): Promise<ActionStep | null> {
-  const { config, publicClient, walletClient, account, pool, deadline } = args;
+  const { config, publicClient, walletClient, account, pool, deadline, sender } = args;
+  const tx: TxSender = sender ?? new (await import("./sender.js")).ViemSender(publicClient, walletClient, account);
   const bal0 = await readErc20Balance(publicClient, pool.token0, config.vaultAddress);
   const bal1 = await readErc20Balance(publicClient, pool.token1, config.vaultAddress);
 
@@ -427,16 +426,14 @@ async function maybeSwapToBalance(args: {
     route = "single-hop-fallback";
   }
 
-  const txHash = await walletClient.writeContract({
-    account,
-    chain: null,
-    address: config.vaultAddress,
+  const txHash = await tx.sendCall({
+    to: config.vaultAddress,
     abi: vaultAbi,
     functionName: "executeSwap",
     args: [pool.urKey, tokenIn, amountIn, swap.amountOutMin, swap.extra],
     gas: 2_000_000n,
+    label: "executeSwap",
   });
-  await waitForOk(publicClient, txHash, "executeSwap");
   // Suppress unused-variable lints for parameters reserved for v2 wiring.
   void deadline;
   return {
