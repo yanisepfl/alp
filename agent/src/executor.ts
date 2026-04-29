@@ -1,17 +1,36 @@
 import {
   encodeAbiParameters,
+  keccak256,
   type Address,
   type Hex,
   type PublicClient,
   type WalletClient,
 } from "viem";
 
-import { registryAbi, v3FactoryAbi, v3PoolAbi, vaultAbi } from "./abi.js";
-import type { AgentConfig } from "./config.js";
+import { registryAbi, v3FactoryAbi, v3PoolAbi, v4PoolManagerAbi, vaultAbi } from "./abi.js";
+import type { AgentConfig, PoolConfig } from "./config.js";
 import type { ActionStep } from "./log.js";
+import {
+  getAmountsForLiquidity,
+  getLiquidityForAmounts,
+  getSqrtRatioAtTick,
+} from "./liquidityMath.js";
 import type { PositionSnapshot } from "./monitor.js";
 import type { Plan } from "./planner.js";
 import { buildSingleHopV3Swap, quoteAndBuildMultiHop } from "./quoting.js";
+
+/** Storage slot index of the `pools` mapping inside V4 PoolManager.
+ *  Mirrors the constant in `monitor.ts` — kept duplicated rather than
+ *  exported to keep the modules independent. */
+const V4_POOLS_SLOT = 6n;
+
+/** True iff the pool routes through the V4 adapter. The V4 add path needs
+ *  pre-quoted (amount0, amount1) — the on-chain V4 PositionManager rejects
+ *  any combination that resolves to zero liquidity. V3 mints with whatever
+ *  the limiting side allows and refunds the rest, so it doesn't need this. */
+function isV4(pool: PoolConfig): boolean {
+  return pool.kind === "v4";
+}
 
 /** Locks per position so concurrent invocations don't double-submit. */
 const inflight = new Set<string>();
@@ -120,6 +139,43 @@ export async function executeRebalance(args: {
       }
     }
 
+    // V4-only sizing: the V4 PositionManager's `_quoteLiquidity` returns 0
+    // (and reverts as `InsufficientLiquidityComputed`) whenever the supplied
+    // (amount0, amount1) don't fit the new range's ratio at spot. After the
+    // remove + swap-to-balance step the vault holds rough halves, but the
+    // exact split rarely matches what a tight symmetric V4 range needs, so
+    // we re-quote locally and shrink the desired amounts to the largest pair
+    // that produces a non-zero liquidity. V3 mint handles this on-chain
+    // (limiting side wins, the rest gets refunded) so we leave it untouched.
+    if (isV4(pool)) {
+      const sqrtPriceX96 = await readV4SqrtPriceX96(publicClient, config.v4PoolManagerAddress, pool);
+      const sqrtLower = getSqrtRatioAtTick(plan.action.newTickLower);
+      const sqrtUpper = getSqrtRatioAtTick(plan.action.newTickUpper);
+      const liquidity = getLiquidityForAmounts(sqrtPriceX96, sqrtLower, sqrtUpper, bal0, bal1);
+      // Skip the add when liquidity would be dust — protects against weird
+      // post-swap residuals (e.g. swap rounded to 0) that would just cause
+      // a revert on-chain. Threshold mirrors the contract-side guard.
+      if (liquidity < 1000n) {
+        steps.push({
+          kind: "add",
+          txHash: ("0x" + "00".repeat(32)) as `0x${string}`,
+          detail: {
+            skipped: "true",
+            reason: `computed liquidity ${liquidity.toString()} below safe threshold`,
+            newTickLower: plan.action.newTickLower,
+            newTickUpper: plan.action.newTickUpper,
+          },
+        });
+        return steps;
+      }
+      const sized = getAmountsForLiquidity(sqrtPriceX96, sqrtLower, sqrtUpper, liquidity);
+      // Cap by what we actually hold. The math above guarantees both
+      // `sized.amountX <= balX`, but defensively floor here to absorb any
+      // rounding direction mismatch versus the on-chain quote.
+      bal0 = sized.amount0 < bal0 ? sized.amount0 : bal0;
+      bal1 = sized.amount1 < bal1 ? sized.amount1 : bal1;
+    }
+
     const addTx = await walletClient.writeContract({
       account,
       chain: null,
@@ -180,6 +236,40 @@ async function readErc20Balance(client: PublicClient, token: Address, holder: Ad
     return client.getBalance({ address: holder });
   }
   return client.readContract({ address: token, abi: erc20BalanceAbi, functionName: "balanceOf", args: [holder] });
+}
+
+/** Read the current V4 pool sqrtPriceX96 via PoolManager.extsload.
+ *  Mirrors the layout used in `monitor.ts`: pool slot = keccak(poolId, slot 6),
+ *  slot0 sits at offset 0 packed as { uint160 sqrtPriceX96, int24 tick, ... }. */
+async function readV4SqrtPriceX96(
+  client: PublicClient,
+  poolManagerAddress: Address,
+  pool: PoolConfig,
+): Promise<bigint> {
+  const poolId = keccak256(
+    encodeAbiParameters(
+      [
+        { type: "address" },
+        { type: "address" },
+        { type: "uint24" },
+        { type: "int24" },
+        { type: "address" },
+      ],
+      [pool.token0, pool.token1, pool.fee, pool.tickSpacing, pool.hooks],
+    ),
+  );
+  const slot0Slot = keccak256(
+    encodeAbiParameters([{ type: "bytes32" }, { type: "uint256" }], [poolId, V4_POOLS_SLOT]),
+  );
+  const raw = await client.readContract({
+    address: poolManagerAddress,
+    abi: v4PoolManagerAbi,
+    functionName: "extsload",
+    args: [slot0Slot],
+  });
+  // sqrtPriceX96 is the lower 160 bits of the packed slot.
+  const mask160 = (1n << 160n) - 1n;
+  return BigInt(raw) & mask160;
 }
 
 /** Await a tx receipt and throw if it reverted. viem's
