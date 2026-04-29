@@ -4,6 +4,7 @@ import { Inter, Radley } from "next/font/google";
 import "./globals.css";
 import { PersistentBackdrop } from "@/components/persistent-backdrop";
 import { Web3Provider } from "@/components/web3-provider";
+import { ToastViewport } from "@/lib/toast";
 
 const sans = Inter({
   subsets: ["latin"],
@@ -49,6 +50,7 @@ export default async function RootLayout({
             the bg from reloading on landing → /app navigation. */}
         <PersistentBackdrop />
         <Web3Provider cookies={cookies}>{children}</Web3Provider>
+        <ToastViewport />
         <div
           aria-hidden
           className="pointer-events-none fixed inset-0 z-[100]"

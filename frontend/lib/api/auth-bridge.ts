@@ -21,6 +21,8 @@
 import { useEffect, useRef } from "react";
 import { useAccount, useSignMessage } from "wagmi";
 
+import { toast } from "../toast";
+
 import { AuthError, getAuthSession } from "./auth";
 import { forceApiReconnect, onApiAuthInvalid, setApiAuthToken } from "./hooks";
 
@@ -125,13 +127,20 @@ export function useAuthBridge(): void {
 }
 
 // Single funnel for SIWE failures so the noise level stays consistent.
-// User-cancel is silent (expected user choice); everything else logs
-// at warn so a config issue (wrong_domain) shows up in dev consoles.
+// User-cancel surfaces as an info toast (cancellation is intentional,
+// not a failure); other reasons log at warn so a config issue
+// (wrong_domain) shows up in dev consoles AND give the user an error
+// toast so they don't silently end up stuck in the disconnected state.
 function handleAuthFailure(err: unknown): void {
   if (err instanceof AuthError) {
-    if (err.reason === "user_rejected") return;
+    if (err.reason === "user_rejected") {
+      toast("info", "Sign-in rejected");
+      return;
+    }
     console.warn(`[auth] ${err.reason}: ${err.message}`);
+    toast("error", "Sign-in failed, try again");
     return;
   }
   console.warn("[auth] unexpected error", err);
+  toast("error", "Sign-in failed, try again");
 }

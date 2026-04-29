@@ -6,24 +6,27 @@ const nextConfig: NextConfig = {
   // (porto, tempo, walletConnect, coinbase, metamask, baseAccount)
   // each with their own peer deps that we don't install — AppKit
   // uses its own WalletConnect connector and we don't ship the
-  // others. Mark the unresolvable peers as externals so webpack
-  // stops trying to bundle them; if any of those connectors does
-  // actually run, the dynamic import throws and is caught upstream.
+  // others. Alias them to `false` so webpack replaces the imports
+  // with an empty module; the connectors never run anyway, and this
+  // avoids the chunk-parse error that webpack's default `var` extern
+  // emits for scoped/hyphenated names (`if(typeof @base-org/account
+  // === ...)` is invalid JS).
   webpack: (config, { isServer }) => {
-    config.externals = config.externals || [];
-    config.externals.push(
-      "pino-pretty",
-      "lokijs",
-      "encoding",
-      "porto",
-      "porto/internal",
-      "accounts",
-      "@walletconnect/ethereum-provider",
-      "@coinbase/wallet-sdk",
-      "@metamask/sdk",
-      "@metamask/connect-evm",
-      "@base-org/account",
-    );
+    config.resolve = config.resolve || {};
+    config.resolve.alias = {
+      ...(config.resolve.alias as Record<string, string | false>),
+      "pino-pretty": false,
+      "lokijs": false,
+      "encoding": false,
+      "porto": false,
+      "porto/internal": false,
+      "accounts": false,
+      "@walletconnect/ethereum-provider": false,
+      "@coinbase/wallet-sdk": false,
+      "@metamask/sdk": false,
+      "@metamask/connect-evm": false,
+      "@base-org/account": false,
+    };
     // Next 15.5's minifier ("WebpackError is not a constructor")
     // crashes on AppKit's lit-element scaffold-ui bundles. The error
     // wrapper inside next/dist/build/webpack/plugins/minify-webpack-

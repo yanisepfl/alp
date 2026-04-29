@@ -17,6 +17,7 @@
 // the hook and passes a thin adapter down.
 
 import { SiweMessage } from "siwe";
+import { getAddress } from "viem";
 
 export type AuthSession = {
   token: string;
@@ -100,11 +101,14 @@ async function fetchNonce(base: string): Promise<string> {
 // Build the canonical EIP-4361 message string. Domain/uri come from
 // the live `window.location` so dev (localhost:3000) matches backend
 // defaults out of the box. chainId is hardcoded to 8453 (Base) per
-// CONTRACT §1.
+// CONTRACT §1. The address must be EIP-55 checksum-cased — siwe@3
+// rejects lowercase. The bridge lowercases the address for state
+// comparison, so we re-checksum here via viem rather than thread an
+// extra param through the bridge.
 function buildSiweMessage(address: string, nonce: string): string {
   const msg = new SiweMessage({
     domain: window.location.host,
-    address,
+    address: getAddress(address),
     statement: "Sign in to Alphix ALP.",
     uri: window.location.origin,
     version: "1",

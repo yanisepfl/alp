@@ -33,18 +33,25 @@ import {
   usdcAbi,
   vaultAbi,
 } from "@/lib/contracts";
+import { toast } from "@/lib/toast";
 import { LearnMoreContent, SummaryText } from "@/components/landing-face";
 
 // Sniff wagmi/viem's UserRejectedRequestError — the user clicked
-// reject in their wallet popup. We treat that as silent (no inline
-// error stripe) per Phase 7d "user rejection silent".
+// reject in their wallet popup. We treat that as silent (no toast)
+// per Phase 7d "user rejection silent". Wagmi/viem wraps the
+// underlying provider error 2-3 levels deep depending on the call
+// path (writeContract → executeContract → request), so walk the
+// `cause` chain rather than checking just one level. Plus a regex
+// on the message catches wallet vendors whose error name varies.
 function isUserRejection(err: unknown): boolean {
-  if (!err || typeof err !== "object") return false;
-  const e = err as { name?: string; code?: number; cause?: { name?: string; code?: number } };
-  if (e.name === "UserRejectedRequestError") return true;
-  if (e.code === 4001) return true;
-  if (e.cause?.name === "UserRejectedRequestError") return true;
-  if (e.cause?.code === 4001) return true;
+  let cur: unknown = err;
+  for (let depth = 0; depth < 10 && cur && typeof cur === "object"; depth++) {
+    const e = cur as { name?: string; code?: number; message?: string; cause?: unknown };
+    if (e.name === "UserRejectedRequestError") return true;
+    if (e.code === 4001) return true;
+    if (typeof e.message === "string" && /user (rejected|denied|cancelled)/i.test(e.message)) return true;
+    cur = e.cause;
+  }
   return false;
 }
 
@@ -796,7 +803,6 @@ function SwapVerticalIcon({ size = 12 }: { size?: number }) {
 
 function VaultCard() {
   const [amount, setAmount] = useState("");
-  const [txError, setTxError] = useState<string | null>(null);
   const num = Number.parseFloat(amount.replace(/,/g, "")) || 0;
   const usdValue = num; // 1:1 since input is in USDC
   const inputRef = useRef<HTMLInputElement>(null);
@@ -827,7 +833,7 @@ function VaultCard() {
         minimumFractionDigits: 2, maximumFractionDigits: 2,
       });
     }
-    return balanceQuery.isLoading ? "—" : "0.00";
+    return balanceQuery.isLoading ? "-" : "0.00";
   })();
   const maxUsdcStr = typeof balanceQuery.data === "bigint"
     ? formatUnits(balanceQuery.data, USDC_DECIMALS)
@@ -869,14 +875,17 @@ function VaultCard() {
   // After approve confirms → refetch allowance so the button flips
   // to "Deposit" on its own. After deposit confirms → clear amount;
   // backend pushes the new user.snapshot via its event listener.
+  // Toasts give the user feedback that the tx landed.
   useEffect(() => {
     if (approveReceipt.isSuccess) {
+      toast("success", "USDC approval confirmed");
       void allowanceQuery.refetch();
       void balanceQuery.refetch();
     }
   }, [approveReceipt.isSuccess, allowanceQuery, balanceQuery]);
   useEffect(() => {
     if (depositReceipt.isSuccess) {
+      toast("success", "Deposit confirmed");
       setAmount("");
       void balanceQuery.refetch();
       void allowanceQuery.refetch();
@@ -889,7 +898,6 @@ function VaultCard() {
 
   const handleApprove = async () => {
     if (!parsedAssets || !address) return;
-    setTxError(null);
     try {
       await approveTx.writeContractAsync({
         address: USDC_ADDRESS,
@@ -898,12 +906,12 @@ function VaultCard() {
         args: [VAULT_ADDRESS, parsedAssets],
       });
     } catch (err) {
-      if (!isUserRejection(err)) setTxError("Transaction failed — try again");
+      if (isUserRejection(err)) toast("info", "Approval rejected");
+      else                       toast("error", "Approval failed, try again");
     }
   };
   const handleDeposit = async () => {
     if (!parsedAssets || !address) return;
-    setTxError(null);
     try {
       await depositTx.writeContractAsync({
         address: VAULT_ADDRESS,
@@ -912,7 +920,8 @@ function VaultCard() {
         args: [parsedAssets, address],
       });
     } catch (err) {
-      if (!isUserRejection(err)) setTxError("Transaction failed — try again");
+      if (isUserRejection(err)) toast("info", "Deposit rejected");
+      else                       toast("error", "Deposit failed, try again");
     }
   };
 
@@ -1175,40 +1184,28 @@ function VaultCard() {
           ? handleApprove
           : handleDeposit;
         return (
-          <>
-            <button
-              type="button"
-              disabled={ctaDisabled}
-              onClick={ctaOnClick}
-              className="transition-colors duration-200 ease-out"
-              style={{
-                marginTop: "auto", width: "100%",
-                display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
-                padding: "14px 16px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.10)",
-                background: "rgba(255,255,255,0.06)",
-                color: "rgba(255,255,255,0.78)", fontFamily: "var(--sans-stack)",
-                fontSize: 13, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1,
-                cursor: ctaDisabled ? "not-allowed" : "pointer",
-                opacity: ctaDisabled ? 0.6 : 1,
-              }}
-              onMouseEnter={(e) => { if (!ctaDisabled) (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.10)"; }}
-              onMouseLeave={(e) => { if (!ctaDisabled) (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.06)"; }}
-            >
-              {ctaLabel}
-              <WalletIcon size={14} />
-            </button>
-            {txError && (
-              <div style={{
-                marginTop: 8,
-                color: "rgba(248,113,113,0.85)",
-                fontFamily: "var(--sans-stack)",
-                fontSize: 11, fontWeight: 500, lineHeight: 1.3,
-                textAlign: "center",
-              }}>
-                {txError}
-              </div>
-            )}
-          </>
+          <button
+            type="button"
+            disabled={ctaDisabled}
+            onClick={ctaOnClick}
+            className="transition-colors duration-200 ease-out"
+            style={{
+              marginTop: "auto", width: "100%",
+              display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
+              padding: "14px 16px", borderRadius: 12,
+              border: `1px solid ${ctaDisabled ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.14)"}`,
+              background: ctaDisabled ? "rgba(255,255,255,0.04)" : "rgba(255,255,255,0.10)",
+              color: ctaDisabled ? "rgba(255,255,255,0.40)" : "#fff",
+              fontFamily: "var(--sans-stack)",
+              fontSize: 13, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1,
+              cursor: ctaDisabled ? "not-allowed" : "pointer",
+            }}
+            onMouseEnter={(e) => { if (!ctaDisabled) (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.14)"; }}
+            onMouseLeave={(e) => { if (!ctaDisabled) (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.10)"; }}
+          >
+            {ctaLabel}
+            {!isConnected && <WalletIcon size={14} />}
+          </button>
         );
       })()}
     </Card>
@@ -1247,7 +1244,7 @@ function sharesToNumber(weiStr: string): number {
 }
 
 function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
-  const { snapshot, error } = useUser();
+  const { snapshot } = useUser();
   const position = snapshot?.position ?? null;
   const valueUsd = position?.valueUsd ?? 0;
   const sharesNum = position ? sharesToNumber(position.shares) : 0;
@@ -1255,12 +1252,6 @@ function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
   const pnl = position?.pnlUsd ?? 0;
   const up = pnl >= 0;
   const accent = up ? "rgb(134, 239, 172)" : "rgb(248, 113, 113)";
-  // auth_required is a recoverable rejection from the user topic
-  // (CONTRACT §3.1 + backend B7 conventions). We render a CTA that
-  // sends users into the same Connect modal the hero deposit input
-  // already opens — Position is the bento row's anchor card so it
-  // carries the CTA on behalf of the row.
-  const authRequired = error?.code === "auth_required";
   return (
     <Card style={{
       height: "100%", display: "flex", flexDirection: "column",
@@ -1271,113 +1262,71 @@ function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
     }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
         <CardLabel icon="position">Position</CardLabel>
-        {/* Connect-wallet styling on the dark card surface, with the
-            dot-grid overlay matching the hero sub-card below. No
-            arrow — text reads as the full affordance. Muted at rest,
-            lifts on hover. Hidden in the auth_required state — the
-            card body carries its own CTA. */}
-        {!authRequired && (
-          <button
-            type="button"
-            onClick={onWithdraw}
-            className="transition-colors duration-200 ease-out"
-            style={{
-              display: "inline-flex", alignItems: "center",
-              border: "1px solid rgba(255,255,255,0.10)",
-              backgroundColor: "rgba(255,255,255,0.06)",
-              backgroundImage: "radial-gradient(circle, rgba(255,255,255,0.10) 0.7px, transparent 1.1px)",
-              backgroundSize: "9px 9px",
-              padding: "7px 12px", borderRadius: 8,
-              color: "rgba(255,255,255,0.55)",
-              fontFamily: "var(--sans-stack)", fontSize: 12, fontWeight: 600,
-              lineHeight: 1, letterSpacing: "-0.005em",
-              cursor: "pointer",
-              transition: "color 200ms ease, background-color 200ms ease",
-            }}
-            onMouseEnter={(e) => {
-              (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.92)";
-              (e.currentTarget as HTMLButtonElement).style.backgroundColor = "rgba(255,255,255,0.10)";
-            }}
-            onMouseLeave={(e) => {
-              (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.55)";
-              (e.currentTarget as HTMLButtonElement).style.backgroundColor = "rgba(255,255,255,0.06)";
-            }}
-          >
-            Withdraw
-          </button>
-        )}
+        {/* Withdraw button always visible; backend's user.snapshot
+            populates the value/shares on connect, and the modal
+            itself carries the disconnected-state CTA via its own
+            "Connect wallet" pill. Position card never prompts for
+            connection — the nav and Deposit card already do. */}
+        <button
+          type="button"
+          onClick={onWithdraw}
+          className="transition-colors duration-200 ease-out"
+          style={{
+            display: "inline-flex", alignItems: "center",
+            border: "1px solid rgba(255,255,255,0.10)",
+            backgroundColor: "rgba(255,255,255,0.06)",
+            backgroundImage: "radial-gradient(circle, rgba(255,255,255,0.10) 0.7px, transparent 1.1px)",
+            backgroundSize: "9px 9px",
+            padding: "7px 12px", borderRadius: 8,
+            color: "rgba(255,255,255,0.55)",
+            fontFamily: "var(--sans-stack)", fontSize: 12, fontWeight: 600,
+            lineHeight: 1, letterSpacing: "-0.005em",
+            cursor: "pointer",
+            transition: "color 200ms ease, background-color 200ms ease",
+          }}
+          onMouseEnter={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.92)";
+            (e.currentTarget as HTMLButtonElement).style.backgroundColor = "rgba(255,255,255,0.10)";
+          }}
+          onMouseLeave={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.55)";
+            (e.currentTarget as HTMLButtonElement).style.backgroundColor = "rgba(255,255,255,0.06)";
+          }}
+        >
+          Withdraw
+        </button>
       </div>
 
-      {authRequired ? (
-        // Stand-in for the dashes/zeros loading shape: a brief CTA
-        // explains why the figures are absent and lets the user
-        // resolve it inline without leaving the card.
-        <div style={{
-          marginTop: "auto", marginBottom: "auto",
-          display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 12,
+      {/* $ value + ALP chip, sitting directly on the dark Card
+          surface — no wrapping container chrome. Renders zeros when
+          disconnected; the populated values flow in once the user
+          snapshot lands. */}
+      <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+        <span style={{
+          color: "#fff", fontFamily: "var(--sans-stack)",
+          fontSize: 26, fontWeight: 600, lineHeight: 1,
+          letterSpacing: "-0.015em", fontVariantNumeric: "tabular-nums",
         }}>
+          {fmtUsd2(valueUsd)}
+        </span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+          <AlpChip size={20} />
           <span style={{
-            color: "rgba(255,255,255,0.70)",
-            fontFamily: "var(--sans-stack)", fontSize: 13, fontWeight: 500,
-            lineHeight: 1.4, letterSpacing: "-0.005em",
+            color: "rgba(255,255,255,0.92)",
+            fontFamily: "var(--sans-stack)", fontSize: 12.5, fontWeight: 500,
+            fontVariantNumeric: "tabular-nums", lineHeight: 1,
           }}>
-            Connect your wallet to see your position.
+            {sharesNum.toLocaleString("en-US", { maximumFractionDigits: 2 })} ALP
           </span>
-          <button
-            type="button"
-            onClick={() => getAppKit()?.open({ view: "Connect" })}
-            className="transition-colors duration-200 ease-out"
-            style={{
-              display: "inline-flex", alignItems: "center",
-              border: "1px solid rgba(255,255,255,0.10)",
-              backgroundColor: "rgba(255,255,255,0.06)",
-              backgroundImage: "radial-gradient(circle, rgba(255,255,255,0.10) 0.7px, transparent 1.1px)",
-              backgroundSize: "9px 9px",
-              padding: "8px 14px", borderRadius: 8,
-              color: "rgba(255,255,255,0.92)",
-              fontFamily: "var(--sans-stack)", fontSize: 12.5, fontWeight: 600,
-              lineHeight: 1, letterSpacing: "-0.005em",
-              cursor: "pointer",
-              transition: "color 200ms ease, background-color 200ms ease",
-            }}
-            onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.backgroundColor = "rgba(255,255,255,0.10)"; }}
-            onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.backgroundColor = "rgba(255,255,255,0.06)"; }}
-          >
-            Connect wallet
-          </button>
-        </div>
-      ) : (
-        <>
-          {/* $ value + ALP chip, sitting directly on the dark Card
-              surface — no wrapping container chrome. */}
-          <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
-            <span style={{
-              color: "#fff", fontFamily: "var(--sans-stack)",
-              fontSize: 26, fontWeight: 600, lineHeight: 1,
-              letterSpacing: "-0.015em", fontVariantNumeric: "tabular-nums",
-            }}>
-              {fmtUsd2(valueUsd)}
-            </span>
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-              <AlpChip size={20} />
-              <span style={{
-                color: "rgba(255,255,255,0.92)",
-                fontFamily: "var(--sans-stack)", fontSize: 12.5, fontWeight: 500,
-                fontVariantNumeric: "tabular-nums", lineHeight: 1,
-              }}>
-                {sharesNum.toLocaleString("en-US", { maximumFractionDigits: 2 })} ALP
-              </span>
-            </span>
-          </div>
+        </span>
+      </div>
 
-          {/* KvRows pinned to the card floor; Performance is the taller
-              sibling so this just absorbs the height difference. */}
-          <div style={{ marginTop: "auto", paddingTop: 14, display: "flex", flexDirection: "column", gap: 6 }}>
-            <KvRow label="Deposited" value={fmtUsd2(totalDeposited)} />
-            <KvRow label="Yield" value={fmtUsd2(pnl, true)} valueColor={accent} />
-          </div>
-        </>
-      )}
+      {/* KvRows pinned to the card floor; Performance is the taller
+          sibling so this just absorbs the height difference. */}
+      <div style={{ marginTop: "auto", paddingTop: 14, display: "flex", flexDirection: "column", gap: 6 }}>
+        <KvRow label="Deposited" value={fmtUsd2(totalDeposited)} />
+        <KvRow label="Yield" value={fmtUsd2(pnl, true)} valueColor={accent} />
+      </div>
     </Card>
   );
 }
@@ -1386,13 +1335,16 @@ function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
 // in top-right swaps to the hovered day so the value/header heights
 // stay constant — no layout shift on hover.
 function UserAprCard() {
+  const { isConnected } = useAccount();
   const { snapshot: vault } = useVault();
   const { snapshot: user, error: userError } = useUser();
   const data = vault?.apr30d ?? [];
   const realizedApy = user?.position?.realizedApyPct ?? 0;
   // auth_required → dashes (no CTA — the Position card next to us
-  // carries the bento row's CTA).
-  const authRequired = userError?.code === "auth_required";
+  // carries the bento row's CTA). Only honor it when the wallet
+  // is actually disconnected; transient mid-auth rejections fall
+  // through to the normal numeric layout.
+  const authRequired = !isConnected && userError?.code === "auth_required";
 
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -1455,7 +1407,7 @@ function UserAprCard() {
           fontSize: 26, fontWeight: 600, lineHeight: 1,
           letterSpacing: "-0.015em", fontVariantNumeric: "tabular-nums",
         }}>
-          {authRequired ? "—" : `${value.toFixed(1)}%`}
+          {authRequired ? "-" : `${value.toFixed(1)}%`}
         </span>
       </div>
       {/* marginTop matches the gap from the value to the KvRows in
@@ -1499,9 +1451,8 @@ function UserAprCard() {
 // USDC) flip to withdraw semantics.
 function WithdrawModal({ onClose }: { onClose: () => void }) {
   const [amount, setAmount] = useState("");
-  const [txError, setTxError] = useState<string | null>(null);
   const num = Number.parseFloat(amount.replace(/,/g, "")) || 0;
-  const { address } = useAccount();
+  const { address, isConnected } = useAccount();
   const { snapshot: vault } = useVault();
   const { snapshot: user } = useUser();
   const sharePrice = vault?.sharePrice ?? 0;
@@ -1529,14 +1480,17 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
 
   // Backend pushes a fresh user.snapshot once the on-chain Withdraw
   // event lands; we close the modal and let the position card update
-  // through its existing subscription.
+  // through its existing subscription. Toast confirms the redemption
+  // landed since the modal disappears immediately.
   useEffect(() => {
-    if (redeemReceipt.isSuccess) onClose();
+    if (redeemReceipt.isSuccess) {
+      toast("success", "Withdrawal confirmed");
+      onClose();
+    }
   }, [redeemReceipt.isSuccess, onClose]);
 
   const handleRedeem = async () => {
     if (!parsedShares || !address) return;
-    setTxError(null);
     try {
       await redeemTx.writeContractAsync({
         address: VAULT_ADDRESS,
@@ -1545,7 +1499,8 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
         args: [parsedShares, address, address],
       });
     } catch (err) {
-      if (!isUserRejection(err)) setTxError("Transaction failed — try again");
+      if (isUserRejection(err)) toast("info", "Withdrawal rejected");
+      else                       toast("error", "Withdrawal failed, try again");
     }
   };
 
@@ -1765,42 +1720,50 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
           </div>
         </div>
 
-        {/* CTA — copy of VaultCard's Connect-wallet button (grey
-            translucent + 0.10 border + 0.78 white text). When the
-            input is invalid the text dims and the click is blocked;
-            shape/colors stay so the button doesn't reflow. */}
-        <button
-          type="button"
-          disabled={!valid || redeeming || !parsedShares || !address}
-          onClick={handleRedeem}
-          className="transition-colors duration-200 ease-out"
-          style={{
-            marginTop: 12, width: "100%",
-            display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
-            padding: "14px 16px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.10)",
-            background: "rgba(255,255,255,0.06)",
-            color: valid ? "rgba(255,255,255,0.92)" : "rgba(255,255,255,0.40)",
-            fontFamily: "var(--sans-stack)",
-            fontSize: 13, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1,
-            cursor: valid && !redeeming ? "pointer" : "default",
-          }}
-          onMouseEnter={(e) => { if (valid && !redeeming) (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.10)"; }}
-          onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.06)"; }}
-        >
-          {redeeming ? "Withdrawing…" : valid ? `Withdraw ${fmtUsd2(usdcOut)}` : "Enter an amount"}
-          <StrokeIcon kind="arrow" size={14} />
-        </button>
-        {txError && (
-          <div style={{
-            marginTop: 8,
-            color: "rgba(248,113,113,0.85)",
-            fontFamily: "var(--sans-stack)",
-            fontSize: 11, fontWeight: 500, lineHeight: 1.3,
-            textAlign: "center",
-          }}>
-            {txError}
-          </div>
-        )}
+        {/* CTA — same pill as VaultCard's. When disconnected the
+            label flips to "Connect wallet" + WalletIcon and clicking
+            opens AppKit, identical to the Deposit CTA's
+            disconnected state. Connected: cycles "Enter an amount"
+            → "Withdraw $X.XX" → "Withdrawing…". */}
+        {(() => {
+          const ctaLabel = !isConnected
+            ? "Connect wallet"
+            : redeeming
+            ? "Withdrawing…"
+            : valid
+            ? `Withdraw ${fmtUsd2(usdcOut)}`
+            : "Enter an amount";
+          const ctaDisabled = isConnected && (redeeming || !valid || !parsedShares || !address);
+          const ctaOnClick = !isConnected
+            ? () => getAppKit()?.open({ view: "Connect" })
+            : ctaDisabled
+            ? undefined
+            : handleRedeem;
+          return (
+            <button
+              type="button"
+              disabled={ctaDisabled}
+              onClick={ctaOnClick}
+              className="transition-colors duration-200 ease-out"
+              style={{
+                marginTop: 12, width: "100%",
+                display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
+                padding: "14px 16px", borderRadius: 12,
+                border: `1px solid ${ctaDisabled ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.14)"}`,
+                background: ctaDisabled ? "rgba(255,255,255,0.04)" : "rgba(255,255,255,0.10)",
+                color: ctaDisabled ? "rgba(255,255,255,0.40)" : "#fff",
+                fontFamily: "var(--sans-stack)",
+                fontSize: 13, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1,
+                cursor: ctaDisabled ? "not-allowed" : "pointer",
+              }}
+              onMouseEnter={(e) => { if (!ctaDisabled) (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.14)"; }}
+              onMouseLeave={(e) => { if (!ctaDisabled) (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.10)"; }}
+            >
+              {ctaLabel}
+              {!isConnected && <WalletIcon size={14} />}
+            </button>
+          );
+        })()}
       </div>
     </div>
   );
@@ -1810,16 +1773,14 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
 function UserActivityCard() {
   // Use useUser directly so the auth_required state can be branched
   // on the same error surface as Position. useUserActivity is a
-  // derived helper without an error channel.
+  // derived helper without an error channel. auth_required only
+  // reads when the wallet is genuinely disconnected — transient
+  // mid-auth rejections drop through to the empty-skeleton layout.
+  const { isConnected } = useAccount();
   const { snapshot, error } = useUser();
   const rows = snapshot?.activity ?? [];
-  const authRequired = error?.code === "auth_required";
-  // Empty-state copy already exists for the "no activity yet" case;
-  // the auth_required path swaps the message but reuses the layout
-  // so the card height stays identical.
-  const emptyText = authRequired
-    ? "Connect your wallet to see your activity."
-    : "No activity yet — deposit to get started.";
+  const authRequired = !isConnected && error?.code === "auth_required";
+  const empty = rows.length === 0 || authRequired;
   return (
     // Dark frame matching VaultCard / Position. Each item gets its
     // own dot-grid surface (matching the Deposit input field); the
@@ -1831,17 +1792,54 @@ function UserActivityCard() {
       backdropFilter: "none",
       WebkitBackdropFilter: "none",
     }}>
-      <CardLabel icon="stack">Activity</CardLabel>
-      <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 4 }}>
-        {rows.length === 0 || authRequired ? (
-          <div style={{
-            padding: "16px 14px",
-            textAlign: "center",
+      {/* Header: CardLabel left, "No activity yet" muted right when
+          empty. The right-side label replaces the previous centered
+          "Connect your wallet to see your activity" message — moves
+          out of the body so the body can carry skeleton rows that
+          mirror the populated layout. */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <CardLabel icon="stack">Activity</CardLabel>
+        {empty && (
+          <span style={{
             color: "rgba(255,255,255,0.45)",
-            fontFamily: "var(--sans-stack)", fontSize: 12,
+            fontFamily: "var(--sans-stack)",
+            fontSize: 11, fontWeight: 500,
+            letterSpacing: "-0.005em",
           }}>
-            {emptyText}
-          </div>
+            No activity yet
+          </span>
+        )}
+      </div>
+      <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 4 }}>
+        {empty ? (
+          // Skeleton placeholder rows — same shape as a populated
+          // activity row (token chip + label + date + tx) but
+          // rendered as muted bars. Three rows, fading out, so the
+          // card body has visual weight without lying about content.
+          [0.40, 0.25, 0.15].map((opacity, i) => (
+            <div
+              key={i}
+              aria-hidden
+              style={{
+                display: "grid",
+                gridTemplateColumns: "auto minmax(0, 1fr) auto auto",
+                alignItems: "center",
+                gap: 12,
+                padding: "10px 12px",
+                borderRadius: 10,
+                backgroundColor: "rgba(255,255,255,0.03)",
+                backgroundImage: "radial-gradient(circle, rgba(255,255,255,0.10) 0.7px, transparent 1.1px)",
+                backgroundSize: "9px 9px",
+                border: "1px solid rgba(255,255,255,0.06)",
+                opacity,
+              }}
+            >
+              <span style={{ width: 18, height: 18, borderRadius: 5, background: "rgba(255,255,255,0.10)" }} />
+              <span style={{ height: 10, borderRadius: 4, background: "rgba(255,255,255,0.10)", maxWidth: 160 }} />
+              <span style={{ width: 32, height: 8, borderRadius: 4, background: "rgba(255,255,255,0.08)" }} />
+              <span style={{ width: 56, height: 8, borderRadius: 4, background: "rgba(255,255,255,0.08)" }} />
+            </div>
+          ))
         ) : rows.map((a) => {
           const d = new Date(a.ts);
           const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
@@ -2817,15 +2815,15 @@ function DashboardPanel() {
   );
 }
 
-// Translate a transport error code into the inline copy shown under
-// the chat input. Server-side errors flow through useAgentStream's
-// error field; local "disconnected" comes from the send result.
+// Translate a transport error code into the toast copy shown when a
+// send fails. Server-side errors flow through useAgentStream's error
+// field; local "disconnected" comes from the send result.
 function sendErrorCopy(code: "disconnected" | "rate_limited" | "not_subscribed" | "auth_required"): string {
   switch (code) {
-    case "rate_limited":  return "Sending too quickly — retry shortly.";
-    case "disconnected":  return "Reconnecting — try again in a moment.";
-    case "not_subscribed":return "Not connected to the agent yet — try again in a moment.";
-    case "auth_required": return "Connect your wallet to chat with Sherpa.";
+    case "rate_limited":  return "Sending too quickly, retry shortly";
+    case "disconnected":  return "Reconnecting, try again in a moment";
+    case "not_subscribed":return "Not connected to the agent yet, try again in a moment";
+    case "auth_required": return "Connect your wallet to chat with Sherpa";
   }
 }
 
@@ -2835,11 +2833,6 @@ function AgentChatPanel() {
   const messages = useMemo(() => wire.map(toAgentMessage), [wire]);
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
-  // Local error stripe under the composer. Sourced from two paths:
-  // (a) sync send result for "disconnected", (b) reactive
-  // useAgentStream.error for server-side rate_limited /
-  // not_subscribed / auth_required. Cleared on next successful send.
-  const [sendError, setSendError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const didInitialScroll = useRef(false);
   const seenWireCount = useRef(0);
@@ -2870,15 +2863,25 @@ function AgentChatPanel() {
     }
   }, [wire]);
 
+  // Safety timeout: if no reply lands within 20s the indicator
+  // would otherwise spin forever (no agent connected, agent
+  // crashed, etc.). Clear silently — the absence of a reply is
+  // already evident in the empty feed; a toast would be noise.
+  useEffect(() => {
+    if (!thinking) return;
+    const timer = window.setTimeout(() => setThinking(false), 20_000);
+    return () => window.clearTimeout(timer);
+  }, [thinking]);
+
   // Pick up server-side errors as they arrive (rate_limited /
-  // not_subscribed / auth_required). The composer keeps the typed
-  // text in those cases — same recoverable-error doctrine the
-  // transport applies: the connection stays open, the user can retry.
+  // not_subscribed / auth_required). Toast and reset thinking —
+  // same recoverable-error doctrine the transport applies: the
+  // connection stays open, the user can retry.
   useEffect(() => {
     if (!agentError) return;
     const code = agentError.code;
     if (code === "rate_limited" || code === "not_subscribed" || code === "auth_required") {
-      setSendError(sendErrorCopy(code));
+      toast("error", sendErrorCopy(code));
       setThinking(false);
     }
   }, [agentError]);
@@ -2889,10 +2892,9 @@ function AgentChatPanel() {
     if (!text || thinking) return;
     const result = send(text);
     if (!result.ok) {
-      setSendError(sendErrorCopy(result.reason));
+      toast("error", sendErrorCopy(result.reason));
       return;
     }
-    setSendError(null);
     setInput("");
     setThinking(true);
   };
@@ -3012,15 +3014,14 @@ function AgentChatPanel() {
           display: "flex", alignItems: "center", gap: 8,
           padding: "5px 5px 5px 14px",
           background: "rgba(255,255,255,0.04)",
-          border: `1px solid ${sendError ? "rgba(248,113,113,0.55)" : "rgba(255,255,255,0.10)"}`,
+          border: "1px solid rgba(255,255,255,0.10)",
           borderRadius: 999,
-          transition: "border-color 200ms ease",
         }}>
           <input
             type="text"
             placeholder="How can I help you?"
             value={input}
-            onChange={(e) => { setInput(e.target.value); if (sendError) setSendError(null); }}
+            onChange={(e) => setInput(e.target.value)}
             disabled={thinking}
             style={{
               flex: 1, minWidth: 0,
@@ -3049,17 +3050,6 @@ function AgentChatPanel() {
             <StrokeIcon kind="arrow" size={12} />
           </button>
         </div>
-        {sendError && (
-          <div style={{
-            marginTop: 6, paddingLeft: 14,
-            color: "rgba(248,113,113,0.85)",
-            fontFamily: "var(--sans-stack)",
-            fontSize: 11, fontWeight: 500,
-            lineHeight: 1.3,
-          }}>
-            {sendError}
-          </div>
-        )}
       </form>
     </div>
   );
