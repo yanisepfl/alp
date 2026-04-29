@@ -1,0 +1,28 @@
+[Unit]
+Description=ALP Backend (read-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=alp
+Group=alp
+WorkingDirectory=/home/alp/alp/backend
+EnvironmentFile=/home/alp/alp/backend/.env
+ExecStart=/home/alp/.bun/bin/bun run src/index.ts
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/alp /home/alp/alp/backend
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

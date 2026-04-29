@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+.env.local
+
+# B6 sqlite store + WAL/SHM sidecars
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
