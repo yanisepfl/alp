@@ -123,7 +123,7 @@ contract UniV3ForkIntegrationTest is Test {
         uint256 vaultUsdcBefore = IERC20(USDC).balanceOf(address(vault));
         uint256 vaultWethBefore = IERC20(WETH).balanceOf(address(vault));
 
-        uint256 amountOut = vault.executeSwap(poolKeyHash, USDC, 100e6, 1, "");
+        uint256 amountOut = vault.executeSwap(poolKeyHash, USDC, 100e6, 1, abi.encode(block.timestamp + 600));
 
         assertGt(amountOut, 0);
         assertEq(IERC20(USDC).balanceOf(address(vault)), vaultUsdcBefore - 100e6);
@@ -133,7 +133,7 @@ contract UniV3ForkIntegrationTest is Test {
     function test_v3_collectFees_growsBookTAV() public {
         vm.prank(alice);
         vault.deposit(20_000e6, alice);
-        vault.executeSwap(poolKeyHash, USDC, 5_000e6, 1, "");
+        vault.executeSwap(poolKeyHash, USDC, 5_000e6, 1, abi.encode(block.timestamp + 600));
 
         uint256 vaultUsdc = IERC20(USDC).balanceOf(address(vault));
         uint256 vaultWeth = IERC20(WETH).balanceOf(address(vault));
@@ -157,7 +157,7 @@ contract UniV3ForkIntegrationTest is Test {
     function test_v3_increaseLiquidity_onExistingPosition() public {
         vm.prank(alice);
         vault.deposit(20_000e6, alice);
-        vault.executeSwap(poolKeyHash, USDC, 10_000e6, 1, "");
+        vault.executeSwap(poolKeyHash, USDC, 10_000e6, 1, abi.encode(block.timestamp + 600));
 
         uint256 vaultUsdc = IERC20(USDC).balanceOf(address(vault));
         uint256 vaultWeth = IERC20(WETH).balanceOf(address(vault));
@@ -198,7 +198,7 @@ contract UniV3ForkIntegrationTest is Test {
         vault.deposit(20_000e6, alice);
 
         // 2. Swap half to WETH
-        uint256 wethReceived = vault.executeSwap(poolKeyHash, USDC, 10_000e6, 1, "");
+        uint256 wethReceived = vault.executeSwap(poolKeyHash, USDC, 10_000e6, 1, abi.encode(block.timestamp + 600));
         assertGt(wethReceived, 0);
 
         // 3. Add liquidity full-range
@@ -220,7 +220,7 @@ contract UniV3ForkIntegrationTest is Test {
         // 5. Swap WETH back to USDC for clean withdraw accounting
         uint256 wethLeft = IERC20(WETH).balanceOf(address(vault));
         if (wethLeft > 0) {
-            vault.executeSwap(poolKeyHash, WETH, wethLeft, 1, "");
+            vault.executeSwap(poolKeyHash, WETH, wethLeft, 1, abi.encode(block.timestamp + 600));
         }
 
         // 6. Alice withdraws — should retrieve > 99% (round-trip swap fees ~0.1% twice)
@@ -244,7 +244,7 @@ contract UniV3ForkIntegrationTest is Test {
     function _setUpUnwindScenario() internal {
         vm.prank(alice);
         vault.deposit(50_000e6, alice);
-        vault.executeSwap(poolKeyHash, USDC, 30_000e6, 1, "");
+        vault.executeSwap(poolKeyHash, USDC, 30_000e6, 1, abi.encode(block.timestamp + 600));
         uint256 vUsdc = IERC20(USDC).balanceOf(address(vault));
         uint256 vWeth = IERC20(WETH).balanceOf(address(vault));
         vault.executeAddLiquidity(
@@ -370,7 +370,7 @@ contract UniV3ForkIntegrationTest is Test {
         uint256 sharePriceAfterAlice = vault.totalAssets() * 1e18 / vault.totalSupply();
 
         // Build a position so subsequent drift actually affects marketTAV.
-        vault.executeSwap(poolKeyHash, USDC, 10_000e6, 1, "");
+        vault.executeSwap(poolKeyHash, USDC, 10_000e6, 1, abi.encode(block.timestamp + 600));
         uint256 vUsdc = IERC20(USDC).balanceOf(address(vault));
         uint256 vWeth = IERC20(WETH).balanceOf(address(vault));
         vault.executeAddLiquidity(

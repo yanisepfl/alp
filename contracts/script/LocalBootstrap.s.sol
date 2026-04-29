@@ -210,7 +210,7 @@ contract LocalBootstrap is Script {
     /// @dev USDT seed: in-range ±50 ticks (wider than the agent's planned
     /// ±2). Swaps 2.5k USDC → USDT first so the LP add has both legs.
     function _seedUsdt(ALPVault vault, bytes32 usdtKey) internal {
-        vault.executeSwap(usdtKey, USDC, 2_500e6, 1, "");
+        vault.executeSwap(usdtKey, USDC, 2_500e6, 1, abi.encode(block.timestamp + 600));
         int24 tick = _currentTick(USDC, USDT, 100);
         int24 lower = _alignDown(tick - 50, 1);
         int24 upper = _alignUp(tick + 50, 1);
