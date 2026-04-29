@@ -41,6 +41,15 @@ export default {
       // spending gas.
       return runAndRespond(env, { dryRun: true });
     }
+    if (url.pathname === "/agent/plan" && (req.method === "GET" || req.method === "POST")) {
+      // Alias of /agent/dryrun specifically for KeeperHub workflow nodes
+      // that conditionally fan out per plan (e.g. "for each plans[] entry
+      // with action.kind == 'rebalance', call Direct Execution API"). Same
+      // payload, no auth, no execution. Force=true variant returns what the
+      // hysteresis-overridden plan would be — useful for the demo button.
+      const force = url.searchParams.get("force") === "true";
+      return runAndRespond(env, { dryRun: true, force });
+    }
     if (url.pathname === "/agent/health" && req.method === "GET") {
       // Liveness + config snapshot for KeeperHub uptime monitoring. No
       // secrets — only the public side of the agent's identity. Works as a

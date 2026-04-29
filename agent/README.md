@@ -47,7 +47,8 @@ Set per-pool in the config, not on-chain — easy to retune.
 |-------|------|-------------|
 | `POST /trigger` | HMAC \| Bearer | Normal scheduled tick (KeeperHub fires this every 30 min). |
 | `POST /force-rebalance` | HMAC \| Bearer | Demo button: ignore hysteresis and rebalance now. Body `{}` rebalances every position; body `{"positionKey": "..."}` rebalances just one. |
-| `GET /agent/dryrun` | none | Read-only: returns the plan the agent would execute against current chain state. Spends no gas. Use this to verify the agent is reading state correctly. |
+| `GET /agent/dryrun` | none | Read-only: returns the plan the agent would execute against current chain state. Spends no gas. |
+| `GET\|POST /agent/plan` | none | Alias of /agent/dryrun for KeeperHub workflow per-plan fan-out. `?force=true` returns the hysteresis-overridden plan. |
 | `GET /agent/health` | none | Liveness + public config snapshot. Used by KeeperHub uptime probes. |
 | `GET /agent/activity?limit=N` | none | Recent decisions + tx hashes. Frontend feed. |
 
@@ -82,4 +83,17 @@ pnpm wrangler secret put UR_ADAPTER_ADDRESS
 pnpm deploy
 ```
 
-Then point KeeperHub at `https://<your-worker>.workers.dev/trigger` (see agent README for workflow setup).
+## KeeperHub setup
+
+The repo ships [`keeperhub-workflow.json`](./keeperhub-workflow.json) — import into [app.keeperhub.com](https://app.keeperhub.com) (Workflows → Import) and fill the four secrets:
+
+| Secret | Where it comes from |
+|---|---|
+| `ALP_WORKER_URL` | Your `wrangler deploy` output, e.g. `alp-agent.username.workers.dev` |
+| `ALP_API_KEY` | Long random string. Set the same value as `KEEPERHUB_API_KEY` on the worker (`pnpm wrangler secret put KEEPERHUB_API_KEY`). |
+| `TG_BOT_TOKEN` | DM @BotFather on Telegram → `/newbot` → copy the token string. |
+| `TG_CHAT_ID` | DM your bot once, then `curl https://api.telegram.org/bot<TOKEN>/getUpdates` and look for `"chat":{"id":...}` — that's your private chat ID. |
+
+The workflow fires every 5 minutes, calls `POST /trigger`, and pings the Telegram chat **only when at least one position rebalanced** (with the per-position pool name + reason + new range). A failure-branch sends a separate alert if the worker call errors.
+
+To get a `kh_` org API key (only needed for programmatic workflow management — manual import via UI doesn't need it): in app.keeperhub.com → Settings → API Keys → New key, prefix `kh_`. Paste it as the `Authorization: Bearer <kh_key>` header when calling KeeperHub's REST API or `kh login --api-key <kh_key>` for the CLI.

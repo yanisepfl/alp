@@ -1,0 +1,56 @@
+{
+  "name": "ALP Rebalance Loop",
+  "description": "Triggers ALP's rebalance tick every 5 minutes against the deployed Cloudflare Worker, then notifies a private Telegram chat when at least one position rebalanced. Suitable for both production and the hackathon demo.",
+  "version": 1,
+  "trigger": {
+    "type": "schedule",
+    "cron": "*/5 * * * *",
+    "timezone": "UTC"
+  },
+  "nodes": [
+    {
+      "id": "tick",
+      "type": "send-webhook",
+      "method": "POST",
+      "url": "https://${ALP_WORKER_URL}/trigger",
+      "headers": {
+        "Authorization": "Bearer ${ALP_API_KEY}",
+        "Content-Type": "application/json"
+      },
+      "body": "{}",
+      "timeout_ms": 60000,
+      "retry": { "max_attempts": 2, "backoff_ms": 5000 }
+    },
+    {
+      "id": "did-rebalance",
+      "type": "condition",
+      "depends_on": ["tick"],
+      "expression": "$.nodes.tick.body.rebalances > 0"
+    },
+    {
+      "id": "notify-telegram",
+      "type": "send-webhook",
+      "depends_on": ["did-rebalance"],
+      "method": "POST",
+      "url": "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage",
+      "headers": { "Content-Type": "application/json" },
+      "body": "{\"chat_id\": \"${TG_CHAT_ID}\", \"parse_mode\": \"Markdown\", \"text\": \"*ALP rebalanced ${$.nodes.tick.body.rebalances} position(s)*\\n\\n${$.nodes.tick.body.plans | map(p -> '`' + p.pool + '`: ' + p.action.reason + (p.action.kind == 'rebalance' ? ' → range [' + p.action.newTickLower + ', ' + p.action.newTickUpper + ']' : '')) | join('\\n')}\"}"
+    },
+    {
+      "id": "notify-failure",
+      "type": "send-webhook",
+      "depends_on": ["tick"],
+      "trigger_on": "failure",
+      "method": "POST",
+      "url": "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage",
+      "headers": { "Content-Type": "application/json" },
+      "body": "{\"chat_id\": \"${TG_CHAT_ID}\", \"text\": \"\\u26a0\\ufe0f ALP tick failed: ${$.nodes.tick.error}\"}"
+    }
+  ],
+  "secrets": [
+    { "name": "ALP_WORKER_URL", "description": "host of the deployed worker, e.g. alp-agent.username.workers.dev" },
+    { "name": "ALP_API_KEY",    "description": "matches the worker's KEEPERHUB_API_KEY env var" },
+    { "name": "TG_BOT_TOKEN",   "description": "from @BotFather (a long string starting with the bot's numeric ID)" },
+    { "name": "TG_CHAT_ID",     "description": "your private Telegram chat ID (numeric, found via getUpdates)" }
+  ]
+}
