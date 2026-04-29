@@ -2,8 +2,8 @@
   {
     "label": "USDC/cbBTC 0.05% (V3)",
     "kind": "v3",
-    "lpKey": "0x0f249da91e64b3bbab451b016a78deadfc97bd2482e34ba62069c756fadfa2e2",
-    "urKey": "0xc666142be0ed23547c0f0f7e68ebe06bed7f043e9cc0626cdc94fa8f4634ce35",
+    "lpKey": "0xe0690ead755084e8536dedc0811254b4321f91ec2c6d405cf246982f0bdc8e37",
+    "urKey": "0xac13abaee5669929fc2ff9779d5491c59f2d81b7d33ec655889d4ef471626e02",
     "token0": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     "token1": "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
     "decimals0": 6,
@@ -16,8 +16,8 @@
   {
     "label": "USDC/USDT 0.01% (V3)",
     "kind": "v3",
-    "lpKey": "0xf6cc83685d69ee89a8153c0dc91d28883777eada019f5028261d839449a685c6",
-    "urKey": "0x1a2acd7f36f5ef809207e3de6ace7f16a132b89ad336dff7419622e744d1b933",
+    "lpKey": "0x7430e858fc4007d0addb6df6cd415cb3269ea45be94c4075195d3e8f24d8ee16",
+    "urKey": "0x9d7013f9629edc889b07291a8007649bea38729b8ebd2e38ff98a35f4fa87736",
     "token0": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     "token1": "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2",
     "decimals0": 6,
@@ -30,8 +30,8 @@
   {
     "label": "ETH/USDC dynamic-fee (V4 hooked)",
     "kind": "v4",
-    "lpKey": "0x3c2dc617a21e5a3e538545c17b037dcfae2a3a4985cccefd577ac5efd2ad63b8",
-    "urKey": "0xb0439ebe5ff5774d05ce8aa45e4d863c9cdc4b414b26d67f3dd5dba958d5d0f1",
+    "lpKey": "0x7727df19cb5072f4d1b7a7bfa7890281c1e70a102cd9e47000b89a186c7c1df2",
+    "urKey": "0xadc91d817dcb0105d5089c6aa97193589667a0cf348a2d5d4f3292ab9cd09685",
     "token0": "0x0000000000000000000000000000000000000000",
     "token1": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     "decimals0": 18,
