@@ -57,14 +57,19 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     /// hot path or the wind-down path.
     uint256 public constant MAX_POSITIONS_PER_POOL = 4;
 
-    /// @notice Max acceptable slippage on the auto-unwind non-base→base
-    /// swap, in basis points. The floor anchors on `getTwapSqrtPriceX96`
-    /// from the adapter (NOT spot) so a sandwich moving spot in the same
-    /// block can't shift the reference. V3 returns a real TWAP; V4 returns
-    /// the same value as spot (no built-in oracle), in which case the floor
-    /// only bounds per-call damage rather than eliminating sandwich risk —
-    /// documented limitation.
+    /// @notice Per-call slippage on the auto-unwind non-base→base swap,
+    /// applied against the pool's CURRENT spot. Spot is used so that natural
+    /// market drift between blocks doesn't break the swap; sandwich
+    /// resistance is provided by `UNWIND_SQRT_DEVIATION_BPS` instead.
     uint256 internal constant UNWIND_SLIPPAGE_BPS = 100; // 1%
+    /// @notice Max allowed deviation between spot sqrtPrice and the
+    /// `UNWIND_TWAP_SECONDS` TWAP sqrtPrice, in basis points. If the gap is
+    /// larger we skip this pool's swap on the assumption it's a sandwich /
+    /// flash-loan manipulation. 100 bps in sqrt ≈ 200 bps in price, so we
+    /// tolerate up to ~2% natural drift over the TWAP window before
+    /// flagging. Adapters without a real TWAP (V4) return spot, the
+    /// deviation reads 0 and the guard is a no-op for them.
+    uint256 internal constant UNWIND_SQRT_DEVIATION_BPS = 100;
     uint32 internal constant UNWIND_TWAP_SECONDS = 300;
 
     PoolRegistry public immutable registry;
@@ -1131,20 +1136,24 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
                 } catch {}
             }
 
-            // Swap any non-base proceeds back to base. The slippage floor
-            // anchors on a TWAP-derived sqrtPrice (not spot) so a third-party
-            // sandwich moving spot in the same block can't move the floor's
-            // reference point — the manipulator would have to hold price away
-            // from fair across the full UNWIND_TWAP_SECONDS window. Adapters
-            // without an oracle (V4 today) return 0; we then fall back to a
-            // tighter SPOT_FLOOR_BPS derived from spot, which only bounds the
-            // damage rather than eliminating it (documented limitation).
+            // Swap any non-base proceeds back to base. We size `expected`
+            // from CURRENT spot so natural drift between blocks doesn't
+            // break the swap. Sandwich resistance comes from a separate
+            // spot-vs-TWAP deviation guard: if the spot/TWAP sqrt-price gap
+            // exceeds UNWIND_SQRT_DEVIATION_BPS (≈ 2× that in price terms)
+            // the pool was likely manipulated this block, so we skip its
+            // swap and let other pools cover the shortfall. V4 adapter
+            // returns spot from getTwapSqrtPriceX96 (no oracle), so the
+            // deviation is always 0 there and the guard is a no-op
+            // (documented limitation).
             address nonBase = baseIsToken0 ? pool.token1 : pool.token0;
             uint256 nonBaseBal = _balanceOf(nonBase, address(this));
-            if (nonBaseBal > 0) {
-                uint160 ref = adapter_.getTwapSqrtPriceX96(pool, UNWIND_TWAP_SECONDS);
-                if (ref == 0) ref = sqrtPriceX96;
-                uint256 expected = _convertToBase(nonBaseBal, ref, !baseIsToken0);
+            uint160 twap = adapter_.getTwapSqrtPriceX96(pool, UNWIND_TWAP_SECONDS);
+            uint256 hi = sqrtPriceX96 > twap ? sqrtPriceX96 : twap;
+            uint256 lo = sqrtPriceX96 > twap ? twap : sqrtPriceX96;
+            bool sandwich = lo == 0 || (hi - lo) * BPS_DENOM > lo * UNWIND_SQRT_DEVIATION_BPS;
+            if (nonBaseBal > 0 && !sandwich) {
+                uint256 expected = _convertToBase(nonBaseBal, sqrtPriceX96, !baseIsToken0);
                 uint256 minOut = expected == 0 ? 1 : (expected * (BPS_DENOM - UNWIND_SLIPPAGE_BPS)) / BPS_DENOM;
                 if (minOut == 0) minOut = 1;
                 uint256 ethValue = 0;
