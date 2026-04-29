@@ -350,15 +350,15 @@ contract UniV4Adapter is ILiquidityAdapter {
     }
 
     /// @notice V4 PoolManager has no built-in oracle (oracles must be hooks).
-    /// Returns spot for now; the vault's slippage floor will only bound
-    /// per-call damage on V4 pools, not prevent sandwich extraction. Tracked
-    /// as a known limitation; mitigated operationally by per-pool maxAlloc.
-    function getTwapSqrtPriceX96(PoolRegistry.Pool calldata pool, uint32)
-        external
-        view
-        returns (uint160 sqrtPriceX96)
-    {
-        sqrtPriceX96 = _poolSqrtPrice(pool);
+    /// Returns 0 to signal "no manipulation-resistant reference available" —
+    /// the vault's `_unwindForWithdraw` then trips its `lo == 0` short-circuit
+    /// and skips the auto-unwind swap for V4 pools entirely. Users still have
+    /// `redeemInKind` as an escape hatch. Until a TWAP-providing hook ships,
+    /// returning spot here would silently let the vault swap at attacker-set
+    /// prices behind a slippage floor that was itself derived from the
+    /// manipulated spot — strictly worse than skipping.
+    function getTwapSqrtPriceX96(PoolRegistry.Pool calldata, uint32) external pure returns (uint160) {
+        return 0;
     }
 
     function nftManager() external view returns (address) {

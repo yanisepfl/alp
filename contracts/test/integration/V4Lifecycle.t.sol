@@ -463,11 +463,10 @@ contract V4LifecycleTest is V4Deployers {
         assertEq(vault.bookTAV() - bookBefore, expectedBump, "bookTAV should match base-side fees");
     }
 
-    function test_autoUnwind_onWithdrawShortfall() public {
-        // Alice deposits 10k USDC and the agent moves all of it into a position.
+    function test_autoUnwind_onWithdrawShortfall_v4_skipsSwap_redeemInKindWorks() public {
+        // Alice deposits 10k USDC and the agent moves all of it into a V4 position.
         vm.prank(alice);
         vault.deposit(10_000e18, alice);
-        // Agent: swap half to WETH, then add the position with both sides.
         uint256 amtOut = vault.executeSwap(poolKeyHash, address(usdc), 5_000e18, 1, abi.encode(block.timestamp + 600));
         assertGt(amtOut, 0);
         vault.executeAddLiquidity(
@@ -478,17 +477,33 @@ contract V4LifecycleTest is V4Deployers {
             0,
             abi.encode(int24(-6_000), int24(6_000), block.timestamp + 600, uint256(0))
         );
-        // Idle base now ~= 0, all value in the position.
         assertLt(usdc.balanceOf(address(vault)), 100e18, "expected most of base to be in the position");
 
-        // Alice tries to redeem half her shares. Idle base is short → auto-unwind kicks in.
+        // Alice tries to redeem half her shares. V4 has no real TWAP oracle —
+        // adapter returns 0, vault's deviation guard short-circuits to
+        // sandwich=true, the unwind swap is intentionally skipped to prevent
+        // attacker-priced V4 fills. With the swap skipped, idle base stays
+        // short and super._withdraw reverts on the ERC20 transfer.
         vm.roll(block.number + 1);
         uint256 sharesToBurn = vault.balanceOf(alice) / 2;
-        uint256 aliceBefore = usdc.balanceOf(alice);
         vm.prank(alice);
-        uint256 received = vault.redeem(sharesToBurn, alice, alice);
-        assertGt(received, 0, "auto-unwind should have produced base");
-        assertGt(usdc.balanceOf(alice), aliceBefore);
+        vm.expectRevert(); // ERC20InsufficientBalance from super._withdraw
+        vault.redeem(sharesToBurn, alice, alice);
+
+        // Escape hatch: redeemInKind doesn't go through the unwind swap, so
+        // it works even when the deviation guard locks the swap path out.
+        // Alice receives a pro-rata slice of base + non-base directly.
+        uint256 aliceUsdcBefore = usdc.balanceOf(alice);
+        uint256 aliceWethBefore = weth.balanceOf(alice);
+        address[] memory expectedTokens = new address[](0);
+        uint256[] memory mins = new uint256[](0);
+        vm.prank(alice);
+        vault.redeemInKind(sharesToBurn, alice, alice, expectedTokens, mins);
+        assertGt(
+            usdc.balanceOf(alice) + weth.balanceOf(alice) - aliceUsdcBefore - aliceWethBefore,
+            0,
+            "redeemInKind should pay out a slice"
+        );
     }
 
     // -------- Slippage-protected wrappers --------

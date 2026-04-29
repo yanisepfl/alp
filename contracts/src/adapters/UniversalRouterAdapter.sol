@@ -91,10 +91,21 @@ contract UniversalRouterAdapter is ILiquidityAdapter {
         // adapter holds nothing between calls, so any pre-call balance of
         // tokenIn or tokenOut is either an attacker-planted donation or a
         // bug. Either way, refusing to swap when the adapter is "dirty"
-        // closes the loophole where attacker pre-sends tokenOut to inflate
+        // closes the loophole where an attacker pre-sends tokenOut to inflate
         // the post-swap balance delta and silently bypass amountOutMin.
-        if (_balanceOfHolder(tokenIn, address(this)) != 0) revert UnexpectedAdapterBalance();
-        if (_balanceOfHolder(tokenOut, address(this)) != 0) revert UnexpectedAdapterBalance();
+        //
+        // Native-ETH carve-out: msg.value is credited to address(this).balance
+        // BEFORE this function body runs, so the naive check would falsely
+        // flag the vault's own legitimate forward as a donation and DoS every
+        // native-input UR swap. Compare against msg.value for the native side
+        // so only excess (donation) balance trips the guard.
+        uint256 inDirty = tokenIn == address(0)
+            ? address(this).balance - msg.value
+            : _balanceOfHolder(tokenIn, address(this));
+        uint256 outDirty = tokenOut == address(0)
+            ? address(this).balance - msg.value
+            : _balanceOfHolder(tokenOut, address(this));
+        if (inDirty != 0 || outDirty != 0) revert UnexpectedAdapterBalance();
 
         (bytes memory commands, bytes[] memory inputs, uint256 deadline) = abi.decode(extra, (bytes, bytes[], uint256));
 

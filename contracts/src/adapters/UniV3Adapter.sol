@@ -314,8 +314,14 @@ contract UniV3Adapter is ILiquidityAdapter {
         ago[1] = 0;
         try IUniswapV3Pool(poolAddr).observe(ago) returns (int56[] memory ticks, uint160[] memory) {
             int56 tickDelta = ticks[1] - ticks[0];
-            int24 avgTick = int24(tickDelta / int56(uint56(secondsAgo)));
-            sqrtPriceX96 = TickMath.getSqrtPriceAtTick(avgTick);
+            int56 secondsSigned = int56(uint56(secondsAgo));
+            int56 avg = tickDelta / secondsSigned;
+            // Solidity signed division truncates toward zero; Uniswap's
+            // OracleLibrary uses floor (toward -infinity) for negative
+            // remainders. Match the reference impl so the TWAP doesn't drift
+            // by 1 tick on negative cumulative deltas.
+            if (tickDelta < 0 && tickDelta % secondsSigned != 0) avg--;
+            sqrtPriceX96 = TickMath.getSqrtPriceAtTick(int24(avg));
         } catch {
             return 0;
         }
