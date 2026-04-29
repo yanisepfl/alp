@@ -65,16 +65,21 @@ export default {
         { headers: { "content-type": "application/json", "access-control-allow-origin": "*" } },
       );
     }
-    if (url.pathname === "/trigger" && req.method === "POST") {
+    // Accept POST or GET so KeeperHub workflow nodes that don't expose a
+    // method picker (or where the picker silently defaults to GET) still
+    // hit the right handler. Auth is enforced regardless of method.
+    if (url.pathname === "/trigger" && (req.method === "POST" || req.method === "GET")) {
       return handleAuthedRun(req, env, () => ({}));
     }
-    if (url.pathname === "/force-rebalance" && req.method === "POST") {
+    if (url.pathname === "/force-rebalance" && (req.method === "POST" || req.method === "GET")) {
       return handleAuthedRun(req, env, (body) => ({
         force: true,
         positionKey: body.positionKey,
       }));
     }
-    return new Response("not found", { status: 404 });
+    // Diagnostic 404: include method + path so callers can immediately
+    // see whether they hit a typo or wrong verb. Bodies aren't logged.
+    return new Response(`not found: ${req.method} ${url.pathname}`, { status: 404 });
   },
 };
 
