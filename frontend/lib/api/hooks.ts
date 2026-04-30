@@ -10,15 +10,16 @@
 // fetch for react-query to manage. Quote/preview endpoints, when
 // added, are the natural home for useQuery.
 //
-// Error handling: each topic-aware hook returns `{ snapshot|messages,
-// error }`. `error` carries non-fatal recoverable failures (rejected
-// subscriptions, server-emitted error frames). Snapshots clear the
-// error on the next successful push. See client.ts for the full
-// "rejected vs error vs close" doctrine.
+// Auth: `useApiWallet` wires wagmi → ApiClient. The connected
+// wallet's lower-cased address is sent on the subscribe frame
+// (trust-on-claim, no SIWE). Disconnects/swaps trigger a forced
+// reconnect so the new principal binds cleanly. See client.ts for
+// the rationale.
 
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useAccount } from "wagmi";
 
 import { createApiClient } from "./client";
 import { createStubClient } from "./stub";
@@ -41,92 +42,32 @@ const wssUrl = process.env.NEXT_PUBLIC_SHERPA_WSS_URL;
 
 let _client: ApiClient | null = null;
 
-// Stored-session helpers. Backend mints 24h JWTs; persisting the token
-// in localStorage lets a page reload skip the SIWE popup as long as
-// the wallet is already reconnected (wagmi cookieStorage handles that)
-// and the JWT hasn't expired. Cleared on disconnect, wallet swap, or
-// backend rejection (4001/4003). Memory-only fallback otherwise.
-const TOKEN_KEY = "alp:auth-session";
-type StoredSession = { token: string; wallet: string; exp: number };
-
-function decodeJwt(token: string): { sub: string; exp: number } | null {
-  try {
-    const parts = token.split(".");
-    if (parts.length !== 3) return null;
-    const payload = parts[1];
-    const padded = payload + "===".slice((payload.length + 3) % 4);
-    const json = atob(padded.replace(/-/g, "+").replace(/_/g, "/"));
-    const obj = JSON.parse(json) as { sub?: unknown; exp?: unknown };
-    if (typeof obj.sub !== "string" || typeof obj.exp !== "number") return null;
-    return { sub: obj.sub, exp: obj.exp };
-  } catch { return null; }
-}
-
-export function loadStoredSession(): StoredSession | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = window.localStorage.getItem(TOKEN_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as StoredSession;
-    if (typeof parsed.token !== "string" || typeof parsed.wallet !== "string") return null;
-    // 60s buffer so we don't present a JWT that expires mid-handshake.
-    if (typeof parsed.exp !== "number" || parsed.exp * 1000 < Date.now() + 60_000) return null;
-    // Validate decode matches storage (catches truncated/corrupted blobs).
-    const claims = decodeJwt(parsed.token);
-    if (!claims || claims.exp !== parsed.exp) return null;
-    return parsed;
-  } catch { return null; }
-}
-
-export function saveStoredSession(s: StoredSession): void {
-  if (typeof window === "undefined") return;
-  try { window.localStorage.setItem(TOKEN_KEY, JSON.stringify(s)); } catch { /* ignore */ }
-}
-
-export function clearStoredSession(): void {
-  if (typeof window === "undefined") return;
-  try { window.localStorage.removeItem(TOKEN_KEY); } catch { /* ignore */ }
-}
-
-// `setApiAuthToken` may be called before any hook mounts (e.g. wagmi
-// session restored at boot). Park the token here so the live client
-// picks it up on first creation, avoiding a setAuthToken round-trip.
-// Seeded from localStorage so a refresh-within-24h auto-resumes the
-// authed session without an extra SIWE round-trip.
-let _pendingAuthToken: string | undefined = loadStoredSession()?.token;
-
-// Auth-invalid subscriber set. The auth bridge registers here at mount
-// to react to backend's 4001/4003 close codes (re-mint and reconnect).
-// Module-level rather than passed at createApiClient time so the bridge
-// can attach after the client is already running.
-const _authInvalidListeners = new Set<(closeCode: number) => void>();
-
-export function onApiAuthInvalid(fn: (closeCode: number) => void): () => void {
-  _authInvalidListeners.add(fn);
-  return () => { _authInvalidListeners.delete(fn); };
-}
+// Park the wallet here if `setApiWallet` is called before the first
+// hook mounts (rare but possible on fast cookie-rehydration). Drained
+// into createApiClient on first getClient() call.
+let _pendingWallet: string | undefined;
 
 export function forceApiReconnect(): void {
   if (typeof window === "undefined") return;
   _client?.forceReconnect();
 }
 
+// Pass-through. Calling with `undefined` drops to public-only topics.
+// Function (not a hook) so wagmi event handlers outside React's render
+// tree can call it directly.
+export function setApiWallet(wallet: string | undefined): void {
+  if (typeof window === "undefined") return;
+  if (_client) {
+    _client.setWallet(wallet);
+    return;
+  }
+  _pendingWallet = wallet;
+}
+
 function getClient(): ApiClient {
   if (_client) return _client;
   _client = wssUrl
-    ? createApiClient({
-        url: wssUrl,
-        authToken: _pendingAuthToken,
-        onAuthInvalid: (code) => {
-          // Token was rejected (4001/4003). Drop the pending copy AND
-          // the persisted session so a re-mount or reload doesn't
-          // re-present the same dead JWT, then fan out to subscribers
-          // (the auth bridge re-mints).
-          _pendingAuthToken = undefined;
-          clearStoredSession();
-          for (const fn of _authInvalidListeners) fn(code);
-        },
-      })
+    ? createApiClient({ url: wssUrl, wallet: _pendingWallet })
     : createStubClient();
   return _client;
 }
@@ -234,16 +175,28 @@ export function useSendUserMessage(): (text: string) => SendResult {
   }, []);
 }
 
-// Pass-through for SIWE wiring. Calling with `undefined` drops to
-// public-only topics. A function (not a hook) so wagmi event handlers
-// outside React's render tree can call it directly.
-export function setApiAuthToken(token: string | undefined): void {
-  if (typeof window === "undefined") return;
-  if (_client) {
-    _client.setAuthToken(token);
-    return;
-  }
-  // Hook hasn't materialised the client yet — park the token so the
-  // first getClient() call passes it through `authToken` directly.
-  _pendingAuthToken = token;
+// Bridge wagmi → ApiClient. Mounts at top of /app. Watches the
+// connected address and routes transitions:
+//   - undefined → addr  : setWallet(addr) only (additive subscribe)
+//   - addr      → undefined : setWallet(undefined) + forceReconnect
+//   - addr1     → addr2     : setWallet(addr2) + forceReconnect (rebind)
+//
+// No async, no signing, no storage. Trust-on-claim.
+export function useApiWallet(): void {
+  const { address, isConnected } = useAccount();
+  const cur = isConnected && address ? address.toLowerCase() : undefined;
+  const prevRef = useRef<string | undefined>(undefined);
+
+  useEffect(() => {
+    if (!wssUrl) return; // stub mode dormant
+    const prev = prevRef.current;
+    if (prev === cur) return;
+    prevRef.current = cur;
+
+    setApiWallet(cur);
+    // Reconnect on every transition. Backend may not reliably switch
+    // principals on an existing connection, so the safest path is to
+    // drop and reopen — agentCursor is preserved across the reconnect.
+    forceApiReconnect();
+  }, [cur]);
 }

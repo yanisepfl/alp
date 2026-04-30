@@ -152,7 +152,12 @@ export type ClientFrame =
       type: "subscribe";
       topics?: Topic[];
       since?: { agent?: string };
-      auth?: string;
+      // Lower-cased wallet address. When present, backend binds this
+      // connection's principal to that wallet for user-topic delivery
+      // and Sherpa rate-limit accounting. Trust-on-claim — no SIWE
+      // verification (hackathon scope; all served data is derivable
+      // from public chain anyway).
+      wallet?: string;
     }
   | {
       v: 1;
@@ -215,10 +220,11 @@ export type ApiClient = {
   // composer can keep the typed text and surface inline feedback.
   sendUserMessage(text: string): SendResult;
 
-  // SIWE JWT pass-through. Setting it (re)issues the subscribe frame
-  // on the existing connection so the server upgrades the principal
-  // without reconnecting. Wired from wagmi state once SIWE flows land.
-  setAuthToken(token: string | undefined): void;
+  // Bind the connection's principal to a wallet (or anon if undefined).
+  // Sets the wallet field carried on subsequent subscribe frames; the
+  // bridge calls forceReconnect after to ensure the next frame goes out
+  // with the new value. No JWT — backend trusts the claim.
+  setWallet(wallet: string | undefined): void;
 
   // Drop the current socket and reopen. Backend convention (B7
   // "Conventions chosen where the contract is silent"): the wallet

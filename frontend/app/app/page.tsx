@@ -15,7 +15,7 @@ import {
 import { getAppKit } from "@/components/web3-provider";
 import {
   useAgentStream,
-  useAuthBridge,
+  useApiWallet,
   useSendUserMessage,
   useUser,
   useVault,
@@ -1260,8 +1260,9 @@ function sharesToNumber(weiStr: string): number {
 }
 
 function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
+  const { isConnected } = useAccount();
   const { snapshot } = useUser();
-  const position = snapshot?.position ?? null;
+  const position = isConnected ? (snapshot?.position ?? null) : null;
   const valueUsd = position?.valueUsd ?? 0;
   const sharesNum = position ? sharesToNumber(position.shares) : 0;
   const totalDeposited = position?.totalDepositedUsd ?? 0;
@@ -1271,7 +1272,7 @@ function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
   return (
     <Card style={{
       height: "100%", display: "flex", flexDirection: "column",
-      background: "#0c0c10",
+      background: "rgba(12, 12, 16, 0.65)",
       border: "1px solid rgba(255,255,255,0.08)",
       backdropFilter: "none",
       WebkitBackdropFilter: "none",
@@ -1353,14 +1354,14 @@ function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
 function UserAprCard() {
   const { isConnected } = useAccount();
   const { snapshot: vault } = useVault();
-  const { snapshot: user, error: userError } = useUser();
+  const { snapshot: user } = useUser();
   const data = vault?.apr30d ?? [];
-  const realizedApy = user?.position?.realizedApyPct ?? 0;
-  // auth_required → dashes (no CTA — the Position card next to us
-  // carries the bento row's CTA). Only honor it when the wallet
-  // is actually disconnected; transient mid-auth rejections fall
-  // through to the normal numeric layout.
-  const authRequired = !isConnected && userError?.code === "auth_required";
+  const realizedApy = isConnected ? (user?.position?.realizedApyPct ?? 0) : 0;
+  // Wallet disconnected → dashes (no CTA — the Position card next to
+  // us carries the bento row's CTA). When connected, server-side
+  // auth_required indicates a transient backend issue, not a "show
+  // dashes" case for the user.
+  const authRequired = !isConnected;
 
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -1399,7 +1400,7 @@ function UserAprCard() {
     // without touching any of the card's internal structure.
     <Card style={{
       height: "100%", display: "flex", flexDirection: "column",
-      backgroundColor: "#131317",
+      backgroundColor: "rgba(19, 19, 23, 0.65)",
       backgroundImage: "radial-gradient(circle, rgba(255,255,255,0.10) 0.7px, transparent 1.1px)",
       backgroundSize: "9px 9px",
       border: "1px solid rgba(255,255,255,0.08)",
@@ -1804,23 +1805,21 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
 
 // Full-width log of the user's own deposits/withdrawals.
 function UserActivityCard() {
-  // Use useUser directly so the auth_required state can be branched
-  // on the same error surface as Position. useUserActivity is a
-  // derived helper without an error channel. auth_required only
-  // reads when the wallet is genuinely disconnected — transient
-  // mid-auth rejections drop through to the empty-skeleton layout.
+  // Gate the rows on isConnected — same shape as VaultCard's USDC
+  // balance, which goes to zero when wagmi reports disconnected.
+  // The cached useUser snapshot can hold whatever it wants; the
+  // render layer simply ignores it when the wallet isn't connected.
   const { isConnected } = useAccount();
-  const { snapshot, error } = useUser();
-  const rows = snapshot?.activity ?? [];
-  const authRequired = !isConnected && error?.code === "auth_required";
-  const empty = rows.length === 0 || authRequired;
+  const { snapshot } = useUser();
+  const rows = isConnected ? (snapshot?.activity ?? []) : [];
+  const empty = rows.length === 0;
   return (
     // Dark frame matching VaultCard / Position. Each item gets its
     // own dot-grid surface (matching the Deposit input field); the
     // Card bg behind them stays plain dark.
     <Card style={{
       height: "100%", display: "flex", flexDirection: "column",
-      background: "#0c0c10",
+      background: "rgba(12, 12, 16, 0.65)",
       border: "1px solid rgba(255,255,255,0.08)",
       backdropFilter: "none",
       WebkitBackdropFilter: "none",
@@ -1885,7 +1884,7 @@ function UserActivityCard() {
               href={`${TX_BASE_URL}${a.tx}`}
               target="_blank"
               rel="noopener noreferrer"
-              className="chat-tx-link"
+              className="chat-tx-link activity-row"
               style={{
                 display: "grid",
                 gridTemplateColumns: "auto minmax(0, 1fr) auto auto",
@@ -2828,8 +2827,21 @@ function DashboardPanel() {
           </div>
         </div>
 
-        <div style={{ marginTop: 8, padding: "0 10px" }}>
+        <div style={{
+          marginTop: 8, padding: "0 10px",
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
+        }}>
           <SectionTitle>Recent actions</SectionTitle>
+          {recentActions.length === 0 && (
+            <span style={{
+              color: "rgba(255,255,255,0.45)",
+              fontFamily: "var(--sans-stack)",
+              fontSize: 11, fontWeight: 500,
+              letterSpacing: "-0.005em",
+            }}>
+              No recent actions
+            </span>
+          )}
         </div>
       </div>
 
@@ -2842,7 +2854,36 @@ function DashboardPanel() {
         padding: "12px 14px 16px",
         display: "flex", flexDirection: "column", gap: 4,
       }}>
-        {recentActions.map((m) => <ActionLogRow key={m.id} m={m} />)}
+        {recentActions.length === 0 ? (
+          // Skeleton placeholder rows — same 3-column grid as
+          // ActionLogRow (chip + label + time) but rendered as muted
+          // bars. Four rows fading out so the empty feed has visual
+          // weight without lying about content. Mirrors the Activity
+          // card's empty-state pattern.
+          [0.45, 0.30, 0.18, 0.10].map((opacity, i) => (
+            <div
+              key={i}
+              aria-hidden
+              style={{
+                display: "grid",
+                gridTemplateColumns: "auto minmax(0, 1fr) auto",
+                alignItems: "center",
+                gap: 8,
+                padding: "7px 10px",
+                borderRadius: 8,
+                backgroundColor: "rgba(255,255,255,0.03)",
+                backgroundImage: "radial-gradient(circle, rgba(255,255,255,0.10) 0.7px, transparent 1.1px)",
+                backgroundSize: "9px 9px",
+                border: "1px solid rgba(255,255,255,0.06)",
+                opacity,
+              }}
+            >
+              <span style={{ width: 14, height: 14, borderRadius: 4, background: "rgba(255,255,255,0.10)" }} />
+              <span style={{ height: 9, borderRadius: 3, background: "rgba(255,255,255,0.10)", maxWidth: 120 }} />
+              <span style={{ width: 28, height: 7, borderRadius: 3, background: "rgba(255,255,255,0.08)" }} />
+            </div>
+          ))
+        ) : recentActions.map((m) => <ActionLogRow key={m.id} m={m} />)}
       </div>
     </div>
   );
@@ -3468,11 +3509,10 @@ function FooterStrip({
 /* ---------- Page ---------- */
 
 export default function AppPage() {
-  // Bridges wagmi's connected address into the api client's auth
-  // token (mint via /auth/dev-token today; SIWE in 7c). Dormant in
-  // stub mode. Must run on every /app render so connect/disconnect
+  // Bridges wagmi's connected address into the api client. Dormant
+  // in stub mode. Must run on every /app render so connect/disconnect
   // events route through it.
-  useAuthBridge();
+  useApiWallet();
   const router = useRouter();
   const [withdrawOpen, setWithdrawOpen] = useState(false);
   const [showHowItWorks, setShowHowItWorks] = useState(false);
@@ -3711,6 +3751,13 @@ export default function AppPage() {
         /* Tx hash link in the action header — brighten both text and
            the trailing arrow icon together on hover. */
         .chat-tx-link:hover { color: rgba(255,255,255,0.95) !important; }
+
+        /* Activity rows are also clickable links to BaseScan; on hover
+           lift the bg one notch so the affordance is legible. Scoped
+           via .activity-row so inline tx-links inside chat bubbles
+           keep their text-only hover. */
+        .activity-row { transition: background-color 180ms ease; }
+        .activity-row:hover { background-color: rgba(255,255,255,0.06) !important; }
 
         /* "Now" bar in the activity histogram — slow opacity pulse so
            the rightmost (current hour) bar reads as live. */

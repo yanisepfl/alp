@@ -6,6 +6,14 @@
 // late subscribers (e.g. components mounting after the first
 // snapshot) see state without waiting for the next backend push.
 //
+// Auth model: trust-on-claim. The subscribe frame includes a
+// `wallet` field carrying the lower-cased connected address; backend
+// binds the connection's principal to that wallet for user-topic
+// delivery and Sherpa rate-limit accounting. No SIWE / JWT — every
+// served field is derivable from public chain anyway, so verifying
+// wallet ownership doesn't gate any private data. Decision made
+// 2026-04-30 after the SIWE bridge ate too much demo time.
+//
 // Recoverable-error doctrine (CONTRACT §3.1, backend B7
 // "Conventions chosen where the contract is silent"):
 //
@@ -18,13 +26,9 @@
 //     from a too-early or too-fast `user_message`). Connection stays
 //     open; routed by code to the topic that triggered it (or to the
 //     top-level `onError` if no topic mapping applies).
-//   - WS close codes 4001 (auth_invalid) and 4003 (forbidden) are
-//     *fatal* for the socket and authoritatively reject the current
-//     token. The client clears the stored token and surfaces via
-//     `onAuthInvalid`; it does NOT auto-reconnect because the same
-//     token would just close again. 4400 (bad_frame) is also fatal —
-//     a client bug — so we don't reconnect on it either. Everything
-//     else falls through to exponential backoff with cursor replay.
+//   - WS close codes 4400 (bad_frame) is fatal — a client bug — so we
+//     don't reconnect on it. Everything else falls through to
+//     exponential backoff with cursor replay.
 
 import { clientId } from "@/lib/agent-stream";
 import type {
@@ -46,15 +50,13 @@ import type {
 
 export type ApiClientOptions = {
   url: string;
-  authToken?: string;
+  // Initial wallet to bind on first connect. Optional; setWallet can
+  // (re)bind later from wagmi state.
+  wallet?: string;
   // Errors not bound to a specific topic (bad_frame, unknown_topic,
   // internal, plus any error frame whose code we don't know how to
   // route). Topic-bound errors flow through the topic's `onError`.
   onError?: (error: ApiError) => void;
-  // Fired on close codes 4001 / 4003 — the current token is invalid
-  // and reconnecting with it would loop. Consumer should drop SIWE
-  // session state and re-run the sign-in flow.
-  onAuthInvalid?: (closeCode: number) => void;
 };
 
 const RECONNECT_CAP_MS = 10_000;
@@ -72,7 +74,7 @@ const ERROR_TOPIC: Partial<Record<ErrorCode, Topic>> = {
 };
 
 export function createApiClient(opts: ApiClientOptions): ApiClient {
-  let authToken = opts.authToken;
+  let wallet = opts.wallet;
 
   const agentListeners = new Set<AgentHandlers>();
   const vaultListeners = new Set<VaultHandlers>();
@@ -91,7 +93,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
 
   const desiredTopics = (): Topic[] => {
     const t: Topic[] = ["agent", "vault"];
-    if (authToken) t.push("user");
+    if (wallet) t.push("user");
     return t;
   };
 
@@ -109,7 +111,7 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
       type: "subscribe",
       topics: desiredTopics(),
       since: agentCursor ? { agent: agentCursor } : undefined,
-      auth: authToken,
+      wallet,
     });
   };
 
@@ -132,11 +134,6 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
   const handleFrame = (frame: StreamFrame) => {
     switch (frame.type) {
       case "ack": {
-        // Treat `rejected` undefined as []. Each rejection is a
-        // per-topic recoverable failure; route to that topic's
-        // onError so late mounts can render a CTA / retry. Accepted
-        // topics need no signal here — their priming frame arrives
-        // next, just as on a clean subscribe.
         const rejected = frame.rejected ?? [];
         for (const r of rejected) {
           const topic = (["agent", "vault", "user"] as Topic[]).includes(r.topic as Topic)
@@ -207,16 +204,9 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
     });
     ws.addEventListener("close", (e) => {
       if (manuallyClosed) return;
-      // 4001 (auth_invalid) and 4003 (forbidden) authoritatively reject
-      // the current token. Looping with the same JWT would just close
-      // again, so clear it and tell the consumer; SIWE re-auth is the
-      // recovery path. 4400 (bad_frame) means the client sent something
-      // malformed — reconnecting won't fix that either.
-      if (e.code === 4001 || e.code === 4003) {
-        authToken = undefined;
-        opts.onAuthInvalid?.(e.code);
-        return;
-      }
+      // 4400 (bad_frame) means the client sent something malformed —
+      // reconnecting won't fix that. Everything else: exponential
+      // backoff with cursor replay.
       if (e.code === 4400) return;
       const delay = Math.min(RECONNECT_CAP_MS, 500 * Math.pow(2, retry++));
       window.setTimeout(connect, delay);
@@ -260,30 +250,25 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
       return { ok: true, clientId: cid };
     },
 
-    setAuthToken(token: string | undefined): void {
-      const prev = authToken;
-      authToken = token;
-      // Authentication change widens (or narrows) topic visibility;
-      // re-subscribe so the server rebinds the principal. Reuses the
-      // existing connection — no close/reopen, agentCursor preserved.
-      if (prev !== token) {
+    setWallet(next: string | undefined): void {
+      const prev = wallet;
+      wallet = next;
+      if (prev !== next) {
         userSnapshot = undefined;
+        // Re-issue subscribe on the existing connection. The bridge
+        // calls forceReconnect after this for transitions where the
+        // backend can't safely upgrade in-place (wallet swap, anon
+        // pickup), so the followup ensures the new socket carries
+        // `wallet` from frame zero.
         if (ws && ws.readyState === WebSocket.OPEN) issueSubscribe();
       }
     },
 
     forceReconnect(): void {
-      // Drop the user-topic cache so the next connection's priming
-      // either re-snapshots or surfaces auth_required cleanly.
       userSnapshot = undefined;
-      // Reset backoff so the reopen is fast (~500ms via close→connect
-      // path). Keeps agentCursor intact so the new subscribe replays
-      // only the gap.
       retry = 0;
       if (ws && ws.readyState !== WebSocket.CLOSED) {
         ws.close();
-        // The close listener handles the reopen via the normal backoff
-        // path (this is a 1005 close, not 4001/4003/4400).
       } else {
         connect();
       }

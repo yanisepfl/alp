@@ -205,8 +205,8 @@ export function createStubClient(): ApiClient {
       }, 1200);
       return { ok: true, clientId: cid };
     },
-    setAuthToken(_token: string | undefined): void {
-      // No-op; the stub serves the same data regardless of auth.
+    setWallet(_wallet: string | undefined): void {
+      // No-op; the stub serves the same data regardless of wallet.
     },
     forceReconnect(): void {
       // No-op; the stub has no transport.

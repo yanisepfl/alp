@@ -31,8 +31,9 @@ export type {
 } from "./types";
 
 export {
-  setApiAuthToken,
+  setApiWallet,
   useAgentStream,
+  useApiWallet,
   useSendUserMessage,
   useUser,
   useUserActivity,
@@ -40,7 +41,3 @@ export {
   useVault,
   useVaultSnapshot,
 } from "./hooks";
-
-export { useAuthBridge } from "./auth-bridge";
-export { deriveAuthBaseUrl, getAuthSession } from "./auth";
-export type { AuthSession } from "./auth";
