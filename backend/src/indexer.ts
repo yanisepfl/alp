@@ -281,6 +281,19 @@ export function getVaultStats(tvlMillions: number, tvl30dMillions: number[]): {
     apr30d[i] = aprFor(dailyUsd, dayTvl, 1);
   }
 
+  // Demo-mode fallback: when the per-day buckets are all zero but the
+  // trailing 30d headline `apr` is non-zero (deploy is younger than a UTC
+  // day, so only today's bucket has events and a single-day point comes
+  // out wildly annualised), backfill all 30 slots with the headline value
+  // so the sparkline reads as a flat line at the realised APR rather than
+  // a flat zero. Drop this once the vault has accrued ≥1 full UTC day of
+  // history.
+  let dailyMax = 0;
+  for (const v of apr30d) if (v > dailyMax) dailyMax = v;
+  if (dailyMax === 0 && apr > 0) {
+    for (let i = 0; i < apr30d.length; i++) apr30d[i] = apr;
+  }
+
   return {
     users,
     earned30dUsd: round(earned30dUsd, 2),
@@ -618,6 +631,12 @@ async function applyLogs(client: PublicClient, logs: Log[], cursorAt: bigint | n
             feeEvents.push({ id, tsMs: blockTs * 1000, usdcAmount, poolKey });
             insertFeeEvent(id, blockTs * 1000, usdcAmount, poolKey);
           }
+        } else {
+          // Backfill window started after the matching PoolTracked event —
+          // raise VAULT_DEPLOY_BLOCK or widen DEFAULT_BACKFILL_DEPTH. Without
+          // orientation we can't tell which side is USDC, so this fee event
+          // is dropped from basketEarned30d / basketApr / per-pool earned30d.
+          console.warn(`[indexer] FeesCollected dropped — missing PoolTracked orientation for poolKey=${poolKey} (block ${blockNumber}, tx ${txHash}); basket APR/earned will under-count`);
         }
         ad.push({
           kind: "fees_collected", poolKey, positionId, amount0, amount1,
