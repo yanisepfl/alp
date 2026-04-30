@@ -5,7 +5,6 @@
 //     (null = vault-global signal/action; wallet string = private user/reply)
 //     and stamped with a monotonic insertion sequence
 //   - the per-connection subscriber map (cid -> { wallet, deliver })
-//   - the live signal broadcaster (every ~30s — signal kind only)
 //
 // Routing per CONTRACT.md §4.3:
 //   - kind: "signal" | "action"  — broadcast to every agent subscriber
@@ -22,7 +21,7 @@
 
 import type { ActionCategory, ErrorCode, StreamFrame, TokenSymbol, WireChip, WireMessage, WireSource } from "../types";
 import { ulid } from "../ulid";
-import { primingHistory, liveSignalText, cannedReply } from "../mocks/agent-script";
+import { primingHistory } from "../mocks/agent-script";
 import { subscribeAgentActions, getPoolOrientation, type AgentActionEvent } from "../indexer";
 import { tokenDecimals, tokenSymbolForAddress, USDC_BASE_ADDRESS } from "../chain";
 import { appendAgentRingEntry, deleteAgentRingEntry, loadAllAgentRing, readSherpaUsage, writeSherpaUsage } from "../db";
@@ -198,9 +197,10 @@ function todayUtc(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-// Echo the user's message + invoke Sherpa for a real reply. Falls back
-// to the canned-reply bot if the claude subprocess fails (missing
-// binary, transient subprocess error, sub-25s timeout).
+// Echo the user's message + invoke Sherpa for a real reply. If the claude
+// subprocess fails (missing binary, transient error, sub-25s timeout) we
+// emit a single short apology — never scripted prose. The cooldown lets
+// the user retry once Sherpa recovers.
 export function handleUserMessage(cid: string, wallet: string, text: string, clientId: string): void {
   const userMsg: WireMessage = {
     id: clientId,
@@ -263,13 +263,12 @@ export function handleUserMessage(cid: string, wallet: string, text: string, cli
     })
     .catch((err) => {
       console.warn(`[sherpa] subprocess failed: ${err instanceof Error ? err.message : String(err)}`);
-      // Fallback to the canned-reply bot so the user still gets *something*.
       // Doesn't refund the daily counter — that's the simpler accounting.
       const reply: WireMessage = {
         id: ulid(),
         ts: new Date().toISOString(),
         kind: "reply",
-        text: cannedReply(text),
+        text: "Sorry, I'm not available right now.",
         replyTo: clientId,
       };
       deliverPrivate(cid, reply, wallet);
@@ -431,25 +430,11 @@ export function startAgentScript(): void {
   if (scriptStarted) return;
   scriptStarted = true;
 
-  // Seed the ring with priming history at startup so any subscriber sees the
-  // same baseline. Clients-with-cursor on reconnect skip past these.
-  // B6 — only seed if the ring is empty after the sqlite load. A persisted
-  // ring already carries seeds from the previous boot, and re-seeding would
-  // duplicate them on every restart.
+  // primingHistory() currently returns []; the seed loop is retained as the
+  // splice point if a future scripted source ever wants to reseed the ring
+  // on a fresh boot. Real chain action events flow through
+  // startAgentActionBridge; agent narration arrives via /ingest/{signal,reply}.
   if (ring.length === 0) {
     for (const msg of primingHistory()) pushToRing(msg, null);
   }
-
-  // Live signal broadcaster (~30s). Only emits `signal` kind — never action.
-  let i = 0;
-  setInterval(() => {
-    if (subs.size === 0) return;
-    const msg: WireMessage = {
-      id: ulid(),
-      ts: new Date().toISOString(),
-      kind: "signal",
-      text: liveSignalText(i++),
-    };
-    broadcastGlobal(msg);
-  }, 30_000);
 }
