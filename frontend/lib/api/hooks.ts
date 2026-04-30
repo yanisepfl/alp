@@ -40,10 +40,60 @@ import type {
 const wssUrl = process.env.NEXT_PUBLIC_SHERPA_WSS_URL;
 
 let _client: ApiClient | null = null;
+
+// Stored-session helpers. Backend mints 24h JWTs; persisting the token
+// in localStorage lets a page reload skip the SIWE popup as long as
+// the wallet is already reconnected (wagmi cookieStorage handles that)
+// and the JWT hasn't expired. Cleared on disconnect, wallet swap, or
+// backend rejection (4001/4003). Memory-only fallback otherwise.
+const TOKEN_KEY = "alp:auth-session";
+type StoredSession = { token: string; wallet: string; exp: number };
+
+function decodeJwt(token: string): { sub: string; exp: number } | null {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    const payload = parts[1];
+    const padded = payload + "===".slice((payload.length + 3) % 4);
+    const json = atob(padded.replace(/-/g, "+").replace(/_/g, "/"));
+    const obj = JSON.parse(json) as { sub?: unknown; exp?: unknown };
+    if (typeof obj.sub !== "string" || typeof obj.exp !== "number") return null;
+    return { sub: obj.sub, exp: obj.exp };
+  } catch { return null; }
+}
+
+export function loadStoredSession(): StoredSession | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(TOKEN_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StoredSession;
+    if (typeof parsed.token !== "string" || typeof parsed.wallet !== "string") return null;
+    // 60s buffer so we don't present a JWT that expires mid-handshake.
+    if (typeof parsed.exp !== "number" || parsed.exp * 1000 < Date.now() + 60_000) return null;
+    // Validate decode matches storage (catches truncated/corrupted blobs).
+    const claims = decodeJwt(parsed.token);
+    if (!claims || claims.exp !== parsed.exp) return null;
+    return parsed;
+  } catch { return null; }
+}
+
+export function saveStoredSession(s: StoredSession): void {
+  if (typeof window === "undefined") return;
+  try { window.localStorage.setItem(TOKEN_KEY, JSON.stringify(s)); } catch { /* ignore */ }
+}
+
+export function clearStoredSession(): void {
+  if (typeof window === "undefined") return;
+  try { window.localStorage.removeItem(TOKEN_KEY); } catch { /* ignore */ }
+}
+
 // `setApiAuthToken` may be called before any hook mounts (e.g. wagmi
 // session restored at boot). Park the token here so the live client
 // picks it up on first creation, avoiding a setAuthToken round-trip.
-let _pendingAuthToken: string | undefined;
+// Seeded from localStorage so a refresh-within-24h auto-resumes the
+// authed session without an extra SIWE round-trip.
+let _pendingAuthToken: string | undefined = loadStoredSession()?.token;
 
 // Auth-invalid subscriber set. The auth bridge registers here at mount
 // to react to backend's 4001/4003 close codes (re-mint and reconnect).
@@ -68,10 +118,12 @@ function getClient(): ApiClient {
         url: wssUrl,
         authToken: _pendingAuthToken,
         onAuthInvalid: (code) => {
-          // Token was rejected (4001/4003). Drop the pending copy so
-          // a re-mount doesn't re-present the same expired JWT, then
-          // fan out to subscribers (the auth bridge re-mints).
+          // Token was rejected (4001/4003). Drop the pending copy AND
+          // the persisted session so a re-mount or reload doesn't
+          // re-present the same dead JWT, then fan out to subscribers
+          // (the auth bridge re-mints).
           _pendingAuthToken = undefined;
+          clearStoredSession();
           for (const fn of _authInvalidListeners) fn(code);
         },
       })

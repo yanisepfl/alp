@@ -24,7 +24,7 @@ import { useAccount, useSignMessage } from "wagmi";
 import { toast } from "../toast";
 
 import { AuthError, getAuthSession } from "./auth";
-import { forceApiReconnect, onApiAuthInvalid, setApiAuthToken } from "./hooks";
+import { clearStoredSession, forceApiReconnect, loadStoredSession, onApiAuthInvalid, saveStoredSession, setApiAuthToken } from "./hooks";
 
 const wssUrl = process.env.NEXT_PUBLIC_SHERPA_WSS_URL;
 
@@ -59,12 +59,21 @@ export function useAuthBridge(): void {
 
     if (prev === undefined && cur !== undefined) {
       // anon → authed. Additive subscribe; existing connection stays.
+      // Skip SIWE if a valid JWT for this wallet is already in storage
+      // (24h TTL backend-side); a refresh-within-day inherits the
+      // existing session without prompting the wallet again.
+      const stored = loadStoredSession();
+      if (stored && stored.wallet.toLowerCase() === cur) {
+        setApiAuthToken(stored.token);
+        return;
+      }
       let cancelled = false;
       (async () => {
         try {
           const session = await getAuthSession(cur, (m) => signMessageAsync({ message: m }));
           if (cancelled) return;
           setApiAuthToken(session.token);
+          saveStoredSession({ token: session.token, wallet: session.wallet, exp: session.exp });
         } catch (err) {
           handleAuthFailure(err);
         }
@@ -75,7 +84,9 @@ export function useAuthBridge(): void {
     if (prev !== undefined && cur === undefined) {
       // authed → anon. Reconnect without auth so the new socket
       // subscribes anon and the user topic is rejected via
-      // ack.rejected → the CTA renders.
+      // ack.rejected → the CTA renders. Drop any stored session too —
+      // we don't reuse it for a different wallet on the next connect.
+      clearStoredSession();
       setApiAuthToken(undefined);
       forceApiReconnect();
       return;
@@ -83,13 +94,17 @@ export function useAuthBridge(): void {
 
     if (prev !== undefined && cur !== undefined) {
       // Wallet swap. Reconnect bound to the new principal — backend
-      // ignores token swaps on an already-authed connection.
+      // ignores token swaps on an already-authed connection. The
+      // stored session was minted for the OLD wallet, so clear it
+      // before re-minting to avoid presenting it on the next reload.
+      clearStoredSession();
       let cancelled = false;
       (async () => {
         try {
           const session = await getAuthSession(cur, (m) => signMessageAsync({ message: m }));
           if (cancelled) return;
           setApiAuthToken(session.token);
+          saveStoredSession({ token: session.token, wallet: session.wallet, exp: session.exp });
           forceApiReconnect();
         } catch (err) {
           handleAuthFailure(err);
@@ -118,6 +133,7 @@ export function useAuthBridge(): void {
         const session = await getAuthSession(addr, (m) => sign({ message: m }));
         if (curRef.current !== addr) return;
         setApiAuthToken(session.token);
+        saveStoredSession({ token: session.token, wallet: session.wallet, exp: session.exp });
         forceApiReconnect();
       } catch (err) {
         handleAuthFailure(err);

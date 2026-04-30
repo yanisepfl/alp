@@ -12,22 +12,6 @@
   color-scheme: dark;
   --sans-stack: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 
-  /* Single source of truth for canvas scaling. Used by both pages
-     (landing's Shell + /app's outer wrapper) and the persistent
-     backdrop. CSS-only — no JS measurement, no SSR/CSR mismatch, no
-     route-transition timing issues. The canvas hits scale=1 at
-     viewport ≥ 1920×1017; below that it shrinks proportionally.
-     The width reference (1920) is sized for /app's full panel +
-     sidebar combo with comfortable side margins; landing only uses
-     the panel itself, so it has more breathing room at scale=1.
-     Length-by-length division yields a unitless number, which
-     scale() requires. */
-  --shell-scale: min(
-    1,
-    calc(100vw / 1920px),
-    calc(100vh / 1017px)
-  );
-
   /* The central panel rect — shared by landing and /app. Both pages
      render the SAME centered rectangle at the SAME size; whatever
      surrounds it (decorative scenery on landing, sidebars on /app)
@@ -41,12 +25,6 @@
      stays centered without extra logic. */
   --panel-w-design: 1380px;
   --panel-h-design: 780px;
-  --panel-w: calc(var(--panel-w-design) * var(--shell-scale));
-  --panel-h: calc(var(--panel-h-design) * var(--shell-scale));
-  --panel-left: calc((100vw - var(--panel-w)) / 2);
-  --panel-top: calc((100vh - var(--panel-h)) / 2);
-  --panel-right: calc(var(--panel-left) + var(--panel-w));
-  --panel-bottom: calc(var(--panel-top) + var(--panel-h));
 
   /* Right-sidebar slot used on /app. Width is fixed in design px and
      scales with the canvas, so the sidebar holds its proportions
@@ -54,8 +32,50 @@
      gap is the visible breathing room between panel and sidebar.
      `--combo-w` is the full panel + gap + sidebar block — /app
      centers this instead of just the panel. */
-  --sidebar-w-design: 480px;
+  --sidebar-w-design: 450px;
   --sidebar-gap-design: 16px;
+  --combo-w-design: calc(var(--panel-w-design) + var(--sidebar-gap-design) + var(--sidebar-w-design));
+
+  /* Single source of truth for canvas scaling. Used by both pages
+     (landing's Shell + /app's outer wrapper) and the persistent
+     backdrop. CSS-only — no JS measurement, no SSR/CSR mismatch, no
+     route-transition timing issues.
+
+     Margin-based budgeting: we reserve `--canvas-margin` of breathing
+     room on each side, then size the canvas to fill whatever
+     viewport remains, taking the binding axis (width or height).
+     Landing and /app both scale off the COMBO width so the panel
+     rect stays identical between the two — landing has extra
+     horizontal slack since it doesn't render the sidebar, but
+     that's intentional (more breathing room for the scenery).
+
+     Width is clamped to a 2200px reference — past that the canvas
+     stops growing so the composition doesn't dwarf content on very
+     large displays. Height denominator (`--canvas-h-design`) is
+     panel + 2× top-chrome (= 780 + 2×(14 gap + 47 nav) = 902);
+     using twice the top chrome (rather than top + bottom) is what
+     keeps the panel vertically centered AND guarantees the nav
+     pill clears the margin on short viewports — without it, a
+     1920×950 browser-chrome viewport pushes the nav right against
+     the top edge.
+
+     Length-by-length division yields a unitless number, which
+     scale() requires. */
+  --canvas-margin: 20px;
+  --canvas-w-cap: 2200px;
+  --canvas-h-design: 902px;
+  --shell-scale: min(
+    calc((min(100vw, var(--canvas-w-cap)) - 2 * var(--canvas-margin)) / var(--combo-w-design)),
+    calc((100vh - 2 * var(--canvas-margin)) / var(--canvas-h-design))
+  );
+
+  --panel-w: calc(var(--panel-w-design) * var(--shell-scale));
+  --panel-h: calc(var(--panel-h-design) * var(--shell-scale));
+  --panel-left: calc((100vw - var(--panel-w)) / 2);
+  --panel-top: calc((100vh - var(--panel-h)) / 2);
+  --panel-right: calc(var(--panel-left) + var(--panel-w));
+  --panel-bottom: calc(var(--panel-top) + var(--panel-h));
+
   --sidebar-w: calc(var(--sidebar-w-design) * var(--shell-scale));
   --sidebar-gap: calc(var(--sidebar-gap-design) * var(--shell-scale));
   --combo-w: calc(var(--panel-w) + var(--sidebar-gap) + var(--sidebar-w));

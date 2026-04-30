@@ -876,21 +876,35 @@ function VaultCard() {
   // to "Deposit" on its own. After deposit confirms → clear amount;
   // backend pushes the new user.snapshot via its event listener.
   // Toasts give the user feedback that the tx landed.
+  //
+  // Dedupe by tx hash: wagmi v2 returns a fresh query-object identity
+  // every render, so listing the query in deps fires the effect on
+  // every re-render where isSuccess is true → spammed toasts. We
+  // toast/refetch only when the receipt's hash differs from the last
+  // one we acted on. refetch is captured by closure and stable.
+  const toastedApproveHash = useRef<`0x${string}` | null>(null);
   useEffect(() => {
-    if (approveReceipt.isSuccess) {
+    if (approveReceipt.isSuccess && approveTx.data && toastedApproveHash.current !== approveTx.data) {
+      toastedApproveHash.current = approveTx.data;
       toast("success", "USDC approval confirmed");
       void allowanceQuery.refetch();
       void balanceQuery.refetch();
     }
-  }, [approveReceipt.isSuccess, allowanceQuery, balanceQuery]);
+    // wagmi v2 query objects get fresh identity each render; deps
+    // intentionally exclude allowanceQuery/balanceQuery.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [approveReceipt.isSuccess, approveTx.data]);
+  const toastedDepositHash = useRef<`0x${string}` | null>(null);
   useEffect(() => {
-    if (depositReceipt.isSuccess) {
+    if (depositReceipt.isSuccess && depositTx.data && toastedDepositHash.current !== depositTx.data) {
+      toastedDepositHash.current = depositTx.data;
       toast("success", "Deposit confirmed");
       setAmount("");
       void balanceQuery.refetch();
       void allowanceQuery.refetch();
     }
-  }, [depositReceipt.isSuccess, balanceQuery, allowanceQuery]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [depositReceipt.isSuccess, depositTx.data]);
 
   const approving  = approveTx.isPending  || approveReceipt.isLoading;
   const depositing = depositTx.isPending  || depositReceipt.isLoading;
@@ -1459,22 +1473,30 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
   const { snapshot: user } = useUser();
   const sharePrice = vault?.sharePrice ?? 0;
   const tvl = vault?.tvl ?? 0;
-  const userShares = user?.position ? sharesToNumber(user.position.shares) : 0;
+  const userSharesWei: bigint = user?.position ? BigInt(user.position.shares) : 0n;
+  const userShares = user?.position ? sharesToNumber(user.position.shares) : 0; // display only
   const usdcOut = num * sharePrice;
-  const valid = num > 0 && num <= userShares;
 
-  // Parse to wei-precision shares for the redeem call. ALP shares
-  // are 18-decimal per ERC4626 default (backend B3). Catch malformed
-  // input (e.g. "1e9", "1.2.3") so the disabled-state gating stays
-  // honest instead of throwing in the click handler.
+  // Parse the input to wei once and gate the CTA on a wei-to-wei
+  // comparison against user.position.shares. Comparing the parsed
+  // float `num` to a Number-converted balance breaks two ways: (1)
+  // Balance click formerly used toFixed(2) which rounds up, so e.g.
+  // 0.0999 shares → "0.10" → num > userShares → !valid; (2) even
+  // with exact decimals, num and Number(BigInt)/1e12 can drift by
+  // an epsilon. parseUnits throws on malformed strings ("1e9",
+  // "1.2.3") — catch keeps the disabled-state gate honest instead
+  // of crashing the click handler.
   const parsedShares: bigint | null = (() => {
-    if (!valid) return null;
+    if (num <= 0) return null;
     try {
-      return parseUnits(amount.replace(/,/g, "") as `${number}`, ALP_DECIMALS);
+      const wei = parseUnits(amount.replace(/,/g, "") as `${number}`, ALP_DECIMALS);
+      if (wei <= 0n || wei > userSharesWei) return null;
+      return wei;
     } catch {
       return null;
     }
   })();
+  const valid = parsedShares !== null;
 
   const redeemTx = useWriteContract();
   const redeemReceipt = useWaitForTransactionReceipt({ hash: redeemTx.data });
@@ -1483,13 +1505,16 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
   // Backend pushes a fresh user.snapshot once the on-chain Withdraw
   // event lands; we close the modal and let the position card update
   // through its existing subscription. Toast confirms the redemption
-  // landed since the modal disappears immediately.
+  // landed since the modal disappears immediately. Dedupe by hash so
+  // the effect doesn't fire repeatedly on re-renders (see VaultCard).
+  const toastedRedeemHash = useRef<`0x${string}` | null>(null);
   useEffect(() => {
-    if (redeemReceipt.isSuccess) {
+    if (redeemReceipt.isSuccess && redeemTx.data && toastedRedeemHash.current !== redeemTx.data) {
+      toastedRedeemHash.current = redeemTx.data;
       toast("success", "Withdrawal confirmed");
       onClose();
     }
-  }, [redeemReceipt.isSuccess, onClose]);
+  }, [redeemReceipt.isSuccess, redeemTx.data, onClose]);
 
   const handleRedeem = async () => {
     if (!parsedShares || !address) return;
@@ -1646,7 +1671,13 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
               </span>
               <button
                 type="button"
-                onClick={() => setAmount(userShares.toFixed(2))}
+                onClick={() => {
+                  if (!user?.position) return;
+                  // formatUnits → canonical exact decimal that
+                  // parseUnits inverts cleanly. Avoids toFixed
+                  // rounding that produced values > userShares.
+                  setAmount(formatUnits(BigInt(user.position.shares), ALP_DECIMALS));
+                }}
                 onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "#fff"; }}
                 onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.55)"; }}
                 style={{
