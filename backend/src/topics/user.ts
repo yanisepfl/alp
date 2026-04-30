@@ -17,6 +17,7 @@
 // indexer.getUserSnapshot for WAVG + FIFO accounting.
 
 import type { StreamFrame } from "../types";
+import { SHARE_UNIT } from "../chain";
 import { demoUserSnapshot } from "../mocks/user-state";
 import { getUserSnapshot, getWalletShares, subscribeUserUpdates } from "../indexer";
 import { currentSharePrice, isChainMode, isIndexerEnabled } from "./vault";
@@ -43,7 +44,7 @@ export function subscribeUser(cid: string, wallet: string, deliver: Deliver): vo
   // emit as the priming snapshot — so the first 5s vault tick after
   // subscribe doesn't fire a duplicate "delta from 0" re-emit.
   const seedValueUsd = isChainMode() && isIndexerEnabled()
-    ? (Number(getWalletShares(walletKey)) / 1e18) * currentSharePrice()
+    ? (Number(getWalletShares(walletKey)) / Number(SHARE_UNIT)) * currentSharePrice()
     : 0;
 
   const sub: Sub = {
@@ -99,7 +100,7 @@ export function reEmitOnSharePriceTick(): void {
 
   for (const sub of subs.values()) {
     const balance = getWalletShares(sub.walletKey);
-    const newValueUsd = (Number(balance) / 1e18) * sharePriceNow;
+    const newValueUsd = (Number(balance) / Number(SHARE_UNIT)) * sharePriceNow;
     const delta = Math.abs(newValueUsd - sub.lastValueUsd);
     const elapsed = now - sub.lastEmitTs;
 

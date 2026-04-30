@@ -1236,11 +1236,13 @@ function KvRow({ label, value, valueColor }: { label: string; value: string; val
 // Yield pinned to the card floor on plain dark surface. Outer
 // frame matches VaultCard (dark + 0.08 border) so the segments
 // read as one family.
-// Shares wei → display number. The wire ships shares as a wei string
-// (1e18-scaled). We narrow precision to 1e6 via BigInt math before
-// crossing to Number so we don't lose precision on the trailing wei.
+// Shares wei → display number. ALPVault uses 12-decimal shares
+// (USDC asset 6 + `_decimalsOffset()` 6). Narrow precision to 1e6
+// via BigInt math before crossing to Number so we don't lose the
+// trailing wei on large balances. If vault decimals ever change,
+// update `ALP_DECIMALS` in lib/contracts.ts and the divisor here.
 function sharesToNumber(weiStr: string): number {
-  return Number(BigInt(weiStr) / 10n ** 12n) / 1e6;
+  return Number(BigInt(weiStr) / 10n ** 6n) / 1e6;
 }
 
 function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
@@ -3824,15 +3826,30 @@ export default function AppPage() {
         width: "var(--sidebar-w)",
         top: "var(--panel-top)",
         height: "var(--panel-h)",
-        borderRadius: 20,
+        borderRadius: "calc(20px * var(--shell-scale))",
         overflow: "hidden",
-        display: "flex", flexDirection: "column",
         isolation: "isolate",
         zIndex: 1,
         background: "#0c0c10",
         border: "1px solid rgba(255,255,255,0.08)",
       }} className={rightSidebarClass}>
-        {sidebarTab === "agent" ? <AgentChatPanel /> : <DashboardPanel />}
+        {/* Scaled inner: the section above sizes itself in viewport
+            units (sidebar-w × panel-h, both already scaled), but its
+            children are written in design px. This wrapper renders
+            the children at design dimensions (450 × 780) and
+            applies the same shell-scale transform the main canvas
+            uses, so font sizes, padding, and icons inside the
+            agent/stats panels scale in lockstep with the panel. */}
+        <div style={{
+          width: 450,
+          height: PANEL_H,
+          transform: "scale(var(--shell-scale))",
+          transformOrigin: "top left",
+          display: "flex",
+          flexDirection: "column",
+        }}>
+          {sidebarTab === "agent" ? <AgentChatPanel /> : <DashboardPanel />}
+        </div>
       </section>
     </main>
   );

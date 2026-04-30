@@ -16,7 +16,7 @@
 import type { PublicClient } from "viem";
 import type { StreamFrame, VaultSnapshot, VaultTick } from "../types";
 import { currentVaultSnapshot, stepVault } from "../mocks/vault-state";
-import { erc4626Abi, getPublicClient, vaultAddress } from "../chain";
+import { erc4626Abi, getPublicClient, SHARE_UNIT, vaultAddress } from "../chain";
 import { getVaultStats, indexUpToHead } from "../indexer";
 import { reEmitOnSharePriceTick } from "./user";
 
@@ -135,7 +135,10 @@ async function readVaultPair(
       address: addr,
       abi: erc4626Abi,
       functionName: "convertToAssets",
-      args: [10n ** 18n],
+      // 1 share at the vault's actual decimals (USDC 6 + offset 6 = 12).
+      // Using 1e18 yields USDC for ~1e6 ALP shares → bogus sharePrice
+      // around $1,000,000 once the offset-6 seed mint lands.
+      args: [SHARE_UNIT],
       ...blockOpt,
     }),
     client.readContract({

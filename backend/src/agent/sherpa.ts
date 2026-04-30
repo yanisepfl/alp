@@ -15,6 +15,7 @@
 
 import { spawn } from "bun";
 
+import { SHARE_UNIT } from "../chain";
 import { vaultSnapshotFrame } from "../topics/vault";
 import { userSnapshotFrame } from "../topics/user";
 import type { StreamFrame, UserSnapshot, VaultSnapshot } from "../types";
@@ -110,7 +111,7 @@ function formatUserBlock(wallet: string): string {
       0,
       Math.floor((Date.now() - new Date(p.firstDepositTs).getTime()) / 86_400_000),
     );
-    const sharesNum = Number(BigInt(p.shares)) / 1e18;
+    const sharesNum = Number(BigInt(p.shares)) / Number(SHARE_UNIT);
     const lastActivity = u.activity[0]
       ? `${u.activity[0].kind} ${u.activity[0].amount.toFixed(2)} ${u.activity[0].token} on ${u.activity[0].ts}`
       : "(none)";

@@ -72,7 +72,10 @@ export const vaultAbi = [
 ] as const;
 
 // Token decimal scales — referenced by the deposit/withdraw input
-// parsers. USDC is 6 decimals; ALP shares are 18 (vault uses default
-// ERC4626 scaling per backend B3).
+// parsers. USDC is 6 decimals. ALP vault overrides ERC4626
+// `_decimalsOffset()` to 6, so its share token is 12 decimals
+// (asset 6 + offset 6). Must match `SHARE_DECIMALS` in
+// backend/src/chain.ts. Better long-term: read vault.decimals() at
+// boot — see future_work.md.
 export const USDC_DECIMALS = 6;
-export const ALP_DECIMALS = 18;
+export const ALP_DECIMALS = 12;

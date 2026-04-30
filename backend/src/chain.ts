@@ -14,6 +14,16 @@ import type { TokenSymbol } from "./types";
 // .toLowerCase() on counterparts.
 export const USDC_BASE_ADDRESS = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" as const;
 
+// ALPVault overrides ERC4626 _decimalsOffset() to 6, so the share token's
+// decimals are USDC's 6 + offset 6 = 12 (NOT the OZ-default 18). All
+// share-amount math (sharePrice computation, balance → valueUsd, basis
+// lot WAVG) must use this scale. If a redeploy ever changes the offset,
+// update this constant and the matching `ALP_DECIMALS` in
+// frontend/lib/contracts.ts. Better long-term fix: read vault.decimals()
+// once at boot.
+export const SHARE_DECIMALS = 12;
+export const SHARE_UNIT = 10n ** BigInt(SHARE_DECIMALS);
+
 // Address → display symbol resolver for B5 action messages. Keys are
 // lower-cased Base mainnet addresses. UNI on Base is intentionally absent —
 // no canonical bridged address pinned at hackathon time; falls through to

@@ -43,7 +43,7 @@
 // only for the gap, not for full history.
 
 import { parseAbiItem, type Log, type PublicClient } from "viem";
-import { USDC_BASE_ADDRESS } from "./chain";
+import { SHARE_UNIT, USDC_BASE_ADDRESS } from "./chain";
 import type { UserActivityRow, UserSnapshot } from "./types";
 import {
   appendActivity, appendLot, deleteFirstDeposit, deleteLot, insertFeeEvent,
@@ -103,7 +103,7 @@ type Lot = {
   assetsIn: bigint;            // USDC base units (6 dec)
   sharesMinted: bigint;        // share base units (18 dec) — original size
   sharesRemaining: bigint;     // FIFO-consumed; reaches 0 then lot is dropped
-  sharePriceAtEntry: number;   // (assetsIn/1e6) / (sharesMinted/1e18); cached at ingest
+  sharePriceAtEntry: number;   // (assetsIn/1e6) / (sharesMinted/SHARE_UNIT); cached at ingest
 };
 
 const ACTIVITY_CAP = 100;
@@ -309,7 +309,7 @@ export function getUserSnapshot(wallet: string, sharePriceNow: number): UserSnap
   // position with zeroed basis rather than crashing or returning null.
   if (walletLots.length === 0) {
     console.warn(`[indexer] wallet ${w} has shares=${balance} but no basis lots — peer transfer? returning zero-basis position`);
-    const sharesFloat = Number(balance) / 1e18;
+    const sharesFloat = Number(balance) / Number(SHARE_UNIT);
     return {
       wallet,
       position: {
@@ -344,7 +344,7 @@ export function getUserSnapshot(wallet: string, sharePriceNow: number): UserSnap
       )
     : 0;
 
-  const sharesFloat = Number(balance) / 1e18;
+  const sharesFloat = Number(balance) / Number(SHARE_UNIT);
   const valueUsd = sharesFloat * sharePriceNow;
   const pnlUsd = valueUsd - totalDepositedUsd;
   // pnlPct is "as percent of consumed-basis cost" per contract — interpreted
@@ -658,7 +658,7 @@ async function applyLogs(client: PublicClient, logs: Log[], cursorAt: bigint | n
         const shares = args.shares as bigint;
         if (shares === 0n) continue; // defensive; ERC4626 normally rejects this
         const tsMs = blockTs * 1000;
-        const sharePriceAtEntry = (Number(assets) / 1e6) / (Number(shares) / 1e18);
+        const sharePriceAtEntry = (Number(assets) / 1e6) / (Number(shares) / Number(SHARE_UNIT));
 
         const idx = nextLotIndex.get(owner) ?? 0;
         const newLot: Lot = {
