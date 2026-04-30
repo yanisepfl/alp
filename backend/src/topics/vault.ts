@@ -46,7 +46,7 @@ let chainBasketApr: number | null = null;
 let chainBasketEarned30d: number | null = null;
 let indexerEnabled = false;
 
-const POLL_MS = 5000;
+const POLL_MS = 10000;
 const EPS_SHARE_PRICE = 0.0001;
 const EPS_TVL = 0.001;
 const EPS_APR = 0.01;

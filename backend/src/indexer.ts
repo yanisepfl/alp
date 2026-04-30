@@ -497,25 +497,18 @@ async function fetchAllEventLogs(
   fromBlock: bigint,
   toBlock: bigint,
 ): Promise<Log[]> {
-  const [
-    transfers, fees, pools, deposits, withdraws,
-    liqAdded, liqRemoved, swaps, posTracked, posUntracked,
-  ] = await Promise.all([
-    client.getLogs({ address: vaultAddr, event: TRANSFER_EVENT,            fromBlock, toBlock }),
-    client.getLogs({ address: vaultAddr, event: FEES_COLLECTED_EVENT,      fromBlock, toBlock }),
-    client.getLogs({ address: vaultAddr, event: POOL_TRACKED_EVENT,        fromBlock, toBlock }),
-    client.getLogs({ address: vaultAddr, event: DEPOSIT_EVENT,             fromBlock, toBlock }),
-    client.getLogs({ address: vaultAddr, event: WITHDRAW_EVENT,            fromBlock, toBlock }),
-    client.getLogs({ address: vaultAddr, event: LIQUIDITY_ADDED_EVENT,     fromBlock, toBlock }),
-    client.getLogs({ address: vaultAddr, event: LIQUIDITY_REMOVED_EVENT,   fromBlock, toBlock }),
-    client.getLogs({ address: vaultAddr, event: SWAPPED_EVENT,             fromBlock, toBlock }),
-    client.getLogs({ address: vaultAddr, event: POSITION_TRACKED_EVENT,    fromBlock, toBlock }),
-    client.getLogs({ address: vaultAddr, event: POSITION_UNTRACKED_EVENT,  fromBlock, toBlock }),
-  ]);
-  return [
-    ...transfers, ...fees, ...pools, ...deposits, ...withdraws,
-    ...liqAdded, ...liqRemoved, ...swaps, ...posTracked, ...posUntracked,
-  ] as Log[];
+  const logs = await client.getLogs({
+    address: vaultAddr,
+    events: [
+      TRANSFER_EVENT, FEES_COLLECTED_EVENT, POOL_TRACKED_EVENT,
+      DEPOSIT_EVENT, WITHDRAW_EVENT, LIQUIDITY_ADDED_EVENT,
+      LIQUIDITY_REMOVED_EVENT, SWAPPED_EVENT,
+      POSITION_TRACKED_EVENT, POSITION_UNTRACKED_EVENT,
+    ],
+    fromBlock,
+    toBlock,
+  });
+  return logs as Log[];
 }
 
 // Apply a batch of mixed-event logs in (block, logIndex) order. PoolTracked

@@ -108,7 +108,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS sherpa_usage (
     wallet TEXT NOT NULL,              -- lowercased
     day TEXT NOT NULL,                 -- UTC YYYY-MM-DD
-    count INTEGER NOT NULL,            -- messages sent on `day` so far
+    count INTEGER NOT NULL,            -- messages sent on this day so far
     last_msg_ms INTEGER NOT NULL,      -- epoch ms of most recent send
     PRIMARY KEY (wallet, day)
   );

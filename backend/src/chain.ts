@@ -5,7 +5,7 @@
 //   0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 (6 decimals)
 // All reads in B3 go through the vault (ERC4626) — never USDC directly.
 
-import { createPublicClient, http, type PublicClient } from "viem";
+import { createPublicClient, fallback, http, type PublicClient } from "viem";
 import { base } from "viem/chains";
 import type { TokenSymbol } from "./types";
 
@@ -179,10 +179,19 @@ export function getPublicClient(): PublicClient | null {
   if (_client) return _client;
   const rpc = Bun.env.BASE_RPC_URL;
   if (!rpc) return null;
+  // Optional secondary RPC — wired through viem's fallback() so we try the
+  // primary first and only spill to the fallback on transport errors
+  // (rate-limit, timeout, network). Default rank=false keeps strict primary
+  // ordering rather than racing for the fastest.
+  const fallbackRpc = Bun.env.BASE_RPC_URL_FALLBACK;
+  const transport = fallbackRpc
+    ? fallback([http(rpc), http(fallbackRpc)])
+    : http(rpc);
+  console.log(`[chain] transport: primary=${rpc}${fallbackRpc ? ` fallback=${fallbackRpc}` : ""}`);
   // The default-generic PublicClient widens the chain-bound client returned
   // by createPublicClient; cast keeps the rest of the code generic without
   // dragging the chain type parameter through every helper signature.
-  _client = createPublicClient({ chain: base, transport: http(rpc) }) as PublicClient;
+  _client = createPublicClient({ chain: base, transport }) as PublicClient;
   return _client;
 }
 
