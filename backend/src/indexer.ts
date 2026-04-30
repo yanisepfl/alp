@@ -289,6 +289,20 @@ export function getVaultStats(tvlMillions: number, tvl30dMillions: number[]): {
   };
 }
 
+// B3c — sum of USDC-side fee revenue (in USD, not base units) for a single
+// poolKey across the trailing 30d window. Used by topics/vault-composition
+// to derive per-pool earned30d + APR. Returns 0 for unknown pools.
+export function getPoolEarned30dUsd(poolKey: `0x${string}`): number {
+  const cutoff = Date.now() - 30 * DAY_MS;
+  let usd = 0;
+  for (const fee of feeEvents) {
+    if (fee.poolKey === poolKey && fee.tsMs >= cutoff) {
+      usd += Number(fee.usdcAmount) / 1e6;
+    }
+  }
+  return usd;
+}
+
 // B4 — per-wallet position + activity snapshot. Server is authoritative for
 // every numeric field (per CONTRACT.md §4.2 cost-basis rule); FE renders
 // verbatim.

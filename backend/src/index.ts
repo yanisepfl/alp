@@ -13,6 +13,7 @@ import {
   connectionCount, broadcastShutdownPing, type WsData,
 } from "./ws";
 import { setIndexerEnabled, startVaultChainReader, startVaultMockTicker } from "./topics/vault";
+import { startComposition } from "./topics/vault-composition";
 import { getPublicClient, vaultAddress } from "./chain";
 import {
   startAgentScript, startAgentActionBridge, loadAgentRingState, agentRingSize,
@@ -171,6 +172,10 @@ if (VAULT_MODE === "chain") {
     // priming ring on boot); the bridge picks up incremental events from
     // every subsequent indexUpToHead tick.
     if (indexerOk) startAgentActionBridge();
+    // B3c — composition reader (allocations + pools). Subscribes to the
+    // same agent-action stream for cache invalidation, so it must come up
+    // after the indexer (and hence after the action-bridge) is wired.
+    if (client && indexerOk) startComposition(client, addr);
     await startVaultChainReader();
   })();
 } else {

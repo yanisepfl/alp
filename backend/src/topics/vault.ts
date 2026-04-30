@@ -19,6 +19,7 @@ import { currentVaultSnapshot, stepVault } from "../mocks/vault-state";
 import { erc4626Abi, getPublicClient, SHARE_UNIT, vaultAddress } from "../chain";
 import { getVaultStats, indexUpToHead } from "../indexer";
 import { reEmitOnSharePriceTick } from "./user";
+import { getCompositionSnapshot } from "./vault-composition";
 
 type Deliver = (f: StreamFrame) => void;
 
@@ -73,6 +74,16 @@ export function vaultSnapshotFrame(): StreamFrame {
     chainUsers = stats.users;
     chainBasketApr = stats.apr;
     chainBasketEarned30d = stats.earned30dUsd;
+  }
+  // B3c — replace mock allocations + pools with on-chain composition once
+  // the read pipeline has primed (10s cache lives in vault-composition.ts).
+  // Returns null until first prime completes; mock fallback covers the gap.
+  if (chainReaderStarted) {
+    const comp = getCompositionSnapshot();
+    if (comp) {
+      snapshot.allocations = comp.allocations;
+      snapshot.pools = comp.pools;
+    }
   }
   return { v: 1, type: "snapshot", topic: "vault", snapshot };
 }

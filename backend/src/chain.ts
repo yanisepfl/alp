@@ -29,8 +29,15 @@ export const SHARE_UNIT = 10n ** BigInt(SHARE_DECIMALS);
 // no canonical bridged address pinned at hackathon time; falls through to
 // the unknown-token warning path and is rendered as "USDC" so the chip
 // stays readable. Add to this map as new pools are tracked.
+//
+// Native ETH (0x0…0) is the V4 convention for the chain's native asset.
+// Several V4 pools — including the deployed ETH/USDC dynamic-fee pool —
+// list it as token0. Without this entry the resolver would warn-then-fall
+// back to USDC, mislabeling V4 ETH legs as USDC. Same display symbol as
+// WETH (`0x420…06`) since the FE has only one ETH chip.
 export const TOKEN_BY_ADDRESS: Record<string, TokenSymbol> = {
   "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": "USDC",
+  "0x0000000000000000000000000000000000000000": "ETH",   // native ETH (V4 token0 convention)
   "0x4200000000000000000000000000000000000006": "ETH",   // WETH on Base
   "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf": "BTC",   // cbBTC on Base
   "0xfde4c96c8593536e31f229ea8f37b2ada2699bb2": "USDT",
@@ -81,6 +88,119 @@ export const erc4626Abi = [
     stateMutability: "view",
     inputs: [{ name: "shares", type: "uint256" }],
     outputs: [{ name: "assets", type: "uint256" }],
+  },
+] as const;
+
+// B3c — composition reads against ALPVault. The Pool tuple mirrors
+// PoolRegistry.Pool's storage layout (adapter, token0, token1, hooks, fee,
+// tickSpacing, maxAllocationBps, enabled). All four functions are pure
+// view, called from topics/vault-composition.ts to populate snapshot.pools
+// + snapshot.allocations.
+export const vaultCompositionAbi = [
+  {
+    type: "function",
+    name: "getActivePools",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "bytes32[]" }],
+  },
+  {
+    type: "function",
+    name: "trackedPool",
+    stateMutability: "view",
+    inputs: [{ name: "key", type: "bytes32" }],
+    outputs: [{
+      name: "", type: "tuple",
+      components: [
+        { name: "adapter",          type: "address" },
+        { name: "token0",           type: "address" },
+        { name: "token1",           type: "address" },
+        { name: "hooks",            type: "address" },
+        { name: "fee",              type: "uint24" },
+        { name: "tickSpacing",      type: "int24" },
+        { name: "maxAllocationBps", type: "uint16" },
+        { name: "enabled",          type: "bool" },
+      ],
+    }],
+  },
+  {
+    type: "function",
+    name: "getPositionIds",
+    stateMutability: "view",
+    inputs: [{ name: "poolKey", type: "bytes32" }],
+    outputs: [{ name: "", type: "uint256[]" }],
+  },
+  {
+    type: "function",
+    name: "poolValueExternal",
+    stateMutability: "view",
+    inputs: [{ name: "key", type: "bytes32" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;
+
+// Adapter views needed for per-position token decomposition + spot pricing.
+// The Pool tuple is identical to vaultCompositionAbi's `trackedPool` return
+// — both adapter functions take the same struct that the vault stores.
+export const adapterAbi = [
+  {
+    type: "function",
+    name: "getPositionAmountsAtPrice",
+    stateMutability: "view",
+    inputs: [
+      {
+        name: "pool", type: "tuple",
+        components: [
+          { name: "adapter",          type: "address" },
+          { name: "token0",           type: "address" },
+          { name: "token1",           type: "address" },
+          { name: "hooks",            type: "address" },
+          { name: "fee",              type: "uint24" },
+          { name: "tickSpacing",      type: "int24" },
+          { name: "maxAllocationBps", type: "uint16" },
+          { name: "enabled",          type: "bool" },
+        ],
+      },
+      { name: "positionId",   type: "uint256" },
+      { name: "sqrtPriceX96", type: "uint160" },
+    ],
+    outputs: [
+      { name: "amount0", type: "uint256" },
+      { name: "amount1", type: "uint256" },
+    ],
+  },
+  {
+    type: "function",
+    name: "getSpotSqrtPriceX96",
+    stateMutability: "view",
+    inputs: [
+      {
+        name: "pool", type: "tuple",
+        components: [
+          { name: "adapter",          type: "address" },
+          { name: "token0",           type: "address" },
+          { name: "token1",           type: "address" },
+          { name: "hooks",            type: "address" },
+          { name: "fee",              type: "uint24" },
+          { name: "tickSpacing",      type: "int24" },
+          { name: "maxAllocationBps", type: "uint16" },
+          { name: "enabled",          type: "bool" },
+        ],
+      },
+    ],
+    outputs: [{ name: "sqrtPriceX96", type: "uint160" }],
+  },
+] as const;
+
+// USDC.balanceOf(vault) read for the idle reserve. Limited to the one
+// function we actually call.
+export const erc20BalanceAbi = [
+  {
+    type: "function",
+    name: "balanceOf",
+    stateMutability: "view",
+    inputs: [{ name: "account", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
   },
 ] as const;
 
