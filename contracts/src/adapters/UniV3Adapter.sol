@@ -32,6 +32,8 @@ contract UniV3Adapter is ILiquidityAdapter {
     error UnknownToken(address token);
     error PoolNotFound();
     error NotVault();
+    error UnexpectedEth();
+    error DeadlineExpired();
 
     modifier onlyVault() {
         if (msg.sender != vault) revert NotVault();
@@ -59,18 +61,21 @@ contract UniV3Adapter is ILiquidityAdapter {
         uint256 amount0Min,
         uint256 amount1Min,
         bytes calldata extra
-    ) external onlyVault returns (uint256 positionId, uint128 liquidity, uint256 amount0Used, uint256 amount1Used) {
+    )
+        external
+        payable
+        onlyVault
+        returns (uint256 positionId, uint128 liquidity, uint256 amount0Used, uint256 amount1Used)
+    {
+        // V3 only handles ERC20 tokens. The interface is `payable` to allow
+        // the V4 adapter to receive native ETH; here we reject any ETH that
+        // gets forwarded so it can't accumulate (slither: locking-ether).
+        if (msg.value != 0) revert UnexpectedEth();
         (int24 tickLower, int24 tickUpper, uint256 deadline, uint256 existingPositionId) =
             abi.decode(extra, (int24, int24, uint256, uint256));
 
         IERC20(pool.token0).safeTransferFrom(msg.sender, address(this), amount0Desired);
         IERC20(pool.token1).safeTransferFrom(msg.sender, address(this), amount1Desired);
-
-        // Track balance-before so the refund step works correctly with
-        // fee-on-transfer non-base tokens (where `amountUsed` reported by
-        // NPM does not match the actual amount removed from this contract).
-        uint256 bal0Before = IERC20(pool.token0).balanceOf(address(this));
-        uint256 bal1Before = IERC20(pool.token1).balanceOf(address(this));
 
         IERC20(pool.token0).forceApprove(address(npm), amount0Desired);
         IERC20(pool.token1).forceApprove(address(npm), amount1Desired);
@@ -107,9 +112,14 @@ contract UniV3Adapter is ILiquidityAdapter {
         IERC20(pool.token0).forceApprove(address(npm), 0);
         IERC20(pool.token1).forceApprove(address(npm), 0);
 
-        uint256 leftover0 = IERC20(pool.token0).balanceOf(address(this)) - (bal0Before - amount0Desired);
-        uint256 leftover1 = IERC20(pool.token1).balanceOf(address(this)) - (bal1Before - amount1Desired);
+        // Refund anything left on the adapter after NPM consumed its share —
+        // works for both standard ERC20s and fee-on-transfer tokens (where
+        // `amountUsed` from NPM does not equal the actual balance delta on
+        // this contract). The adapter never custodies value between calls,
+        // so any residual balance belongs to the vault.
+        uint256 leftover0 = IERC20(pool.token0).balanceOf(address(this));
         if (leftover0 > 0) IERC20(pool.token0).safeTransfer(msg.sender, leftover0);
+        uint256 leftover1 = IERC20(pool.token1).balanceOf(address(this));
         if (leftover1 > 0) IERC20(pool.token1).safeTransfer(msg.sender, leftover1);
     }
 
@@ -172,8 +182,20 @@ contract UniV3Adapter is ILiquidityAdapter {
         uint256 amountIn,
         uint256 amountOutMin,
         bytes calldata extra
-    ) external onlyVault returns (uint256 amountOut) {
+    ) external payable onlyVault returns (uint256 amountOut) {
+        if (msg.value != 0) revert UnexpectedEth();
         if (tokenIn != pool.token0 && tokenIn != pool.token1) revert UnknownToken(tokenIn);
+        // Enforce caller-supplied deadline at the adapter layer. Uniswap's
+        // SwapRouter02 dropped the deadline param entirely, so without this
+        // check a signed `executeSwap` tx could sit in the public mempool
+        // and be replayed by a validator after the price has moved
+        // adversely; the only remaining protection would be the `amountOutMin`
+        // computed at sign time, which goes stale fast on volatile pairs.
+        // We accept the same `abi.encode(uint256 deadline)` payload the
+        // agent already passes through every adapter so the encoding stays
+        // uniform across V3 / V4 / UR.
+        uint256 deadline = abi.decode(extra, (uint256));
+        if (block.timestamp > deadline) revert DeadlineExpired();
         address tokenOut = (tokenIn == pool.token0) ? pool.token1 : pool.token0;
 
         IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
@@ -192,10 +214,6 @@ contract UniV3Adapter is ILiquidityAdapter {
         );
 
         IERC20(tokenIn).forceApprove(address(swapRouter), 0);
-        // The V3 SwapRouter02 does not enforce a deadline, but we accept the
-        // V4-shaped `abi.encode(uint256 deadline)` payload anyway so the
-        // agent can pass identical extra-data through either adapter.
-        extra;
     }
 
     function getPositionAmounts(PoolRegistry.Pool calldata pool, uint256 positionId)
@@ -261,15 +279,60 @@ contract UniV3Adapter is ILiquidityAdapter {
             uint128,
             uint128
         ) {
-            // Match PoolRegistry.poolKey for V3: hooks=0, tickSpacing=0.
-            return keccak256(abi.encode(address(this), token0, token1, fee, int24(0), address(0)));
+            // Match PoolRegistry.poolKey for V3: derive the canonical
+            // tickSpacing for the fee tier so the computed key matches what
+            // the guardian registered. (Registry forbids tickSpacing == 0.)
+            int24 spacing = _v3SpacingForFee(fee);
+            return keccak256(abi.encode(address(this), token0, token1, fee, spacing, address(0)));
         } catch {
             return bytes32(0);
         }
     }
 
+    /// @dev Internal mirror of `v3TickSpacingForFee` for use by view methods.
+    /// Returns 0 for non-standard fees so the resulting key is obviously
+    /// invalid rather than reverting (callers iterate; reverts would brick).
+    function _v3SpacingForFee(uint24 fee) internal pure returns (int24) {
+        if (fee == 100) return 1;
+        if (fee == 500) return 10;
+        if (fee == 3000) return 60;
+        if (fee == 10_000) return 200;
+        return 0;
+    }
+
     function getSpotSqrtPriceX96(PoolRegistry.Pool calldata pool) external view returns (uint160 sqrtPriceX96) {
         sqrtPriceX96 = _poolSqrtPrice(pool);
+    }
+
+    /// @notice TWAP-derived sqrtPriceX96 over the last `secondsAgo` seconds via
+    /// the V3 pool's cumulative-tick oracle. Returns 0 if the pool's
+    /// observation cardinality is too small to satisfy the lookback (caller
+    /// then falls back to spot). Manipulation cost: an attacker has to hold
+    /// price away from fair across the full window, not just the current block.
+    function getTwapSqrtPriceX96(PoolRegistry.Pool calldata pool, uint32 secondsAgo)
+        external
+        view
+        returns (uint160 sqrtPriceX96)
+    {
+        if (secondsAgo == 0) return _poolSqrtPrice(pool);
+        address poolAddr = factory.getPool(pool.token0, pool.token1, pool.fee);
+        if (poolAddr == address(0)) return 0;
+        uint32[] memory ago = new uint32[](2);
+        ago[0] = secondsAgo;
+        ago[1] = 0;
+        try IUniswapV3Pool(poolAddr).observe(ago) returns (int56[] memory ticks, uint160[] memory) {
+            int56 tickDelta = ticks[1] - ticks[0];
+            int56 secondsSigned = int56(uint56(secondsAgo));
+            int56 avg = tickDelta / secondsSigned;
+            // Solidity signed division truncates toward zero; Uniswap's
+            // OracleLibrary uses floor (toward -infinity) for negative
+            // remainders. Match the reference impl so the TWAP doesn't drift
+            // by 1 tick on negative cumulative deltas.
+            if (tickDelta < 0 && tickDelta % secondsSigned != 0) avg--;
+            sqrtPriceX96 = TickMath.getSqrtPriceAtTick(int24(avg));
+        } catch {
+            return 0;
+        }
     }
 
     function nftManager() external view returns (address) {

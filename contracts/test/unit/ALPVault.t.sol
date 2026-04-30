@@ -328,7 +328,7 @@ contract ALPVaultUnitTest is Test {
 
     function test_executeSwap_byNonAgent_reverts() public {
         vm.expectRevert(ALPVault.NotAgent.selector);
-        vault.executeSwap(bytes32(0), address(0), 0, 0, "");
+        vault.executeSwap(bytes32(0), address(0), 0, 0, abi.encode(block.timestamp + 600));
     }
 
     function test_executeAddLiquidity_unwhitelistedPool_reverts() public {
@@ -509,14 +509,14 @@ contract ALPVaultUnitTest is Test {
         vm.prank(agent);
         // Pass non-zero amountOutMin so we hit the pool-known check, not the
         // SlippageMinRequired guard.
-        vault.executeSwap(fake, address(usdc), 1, 1, "");
+        vault.executeSwap(fake, address(usdc), 1, 1, abi.encode(block.timestamp + 600));
     }
 
     function test_executeSwap_zeroAmountOutMin_reverts() public {
         bytes32 fake = keccak256("fake");
         vm.expectRevert(ALPVault.SlippageMinRequired.selector);
         vm.prank(agent);
-        vault.executeSwap(fake, address(usdc), 1, 0, "");
+        vault.executeSwap(fake, address(usdc), 1, 0, abi.encode(block.timestamp + 600));
     }
 
     function test_executeAddLiquidity_paused_reverts() public {
