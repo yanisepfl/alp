@@ -644,7 +644,7 @@ function PanelLandscape({ muted = false }: { muted?: boolean }) {
 
 /* ---------- Floating nav pill — full main-panel width, sits just above it ---------- */
 
-function FloatingNav({ layout, exiting, onBack }: { layout: PanelLayout; exiting: boolean; onBack: () => void }) {
+function FloatingNav({ layout, exiting, muted = false, onBack }: { layout: PanelLayout; exiting: boolean; muted?: boolean; onBack: () => void }) {
   const { address, isConnected } = useAccount();
   return (
     <div className={exiting ? "app-nav-exit" : "app-nav-enter"} style={{
@@ -666,7 +666,8 @@ function FloatingNav({ layout, exiting, onBack }: { layout: PanelLayout; exiting
         <div aria-hidden style={{ position: "absolute", inset: 0, zIndex: 0 }}>
           <Image src="/landscape.png" alt="" fill priority sizes="100vw" style={{
             objectFit: "cover",
-            filter: LANDSCAPE_FILTER,
+            filter: muted ? LANDSCAPE_FILTER_MUTED : LANDSCAPE_FILTER,
+            transition: "filter 1400ms cubic-bezier(0.16, 1, 0.3, 1)",
           }} />
         </div>
 
@@ -1165,7 +1166,7 @@ function VaultCard() {
               <InfoIcon size={12} />
             </InfoTip>
           </span>
-          <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)", fontVariantNumeric: "tabular-nums" }}>${tvl.toFixed(2)}M</span>
+          <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)", fontVariantNumeric: "tabular-nums" }}>{fmtUsdAdaptive(tvl * 1_000_000)}</span>
         </div>
       </div>
 
@@ -1226,11 +1227,18 @@ function VaultCard() {
   );
 }
 
-const fmtUsd2 = (n: number, signed = false) => {
-  const sign = signed ? (n >= 0 ? "+" : "−") : "";
+// 2 decimals always; scales to K/M/B based on magnitude. Input is
+// raw USD — caller is responsible for unit conversion (e.g. multiply
+// vault.tvl by 1e6 since backend ships it in millions). `signed=true`
+// forces a leading "+" on non-negatives; negatives always carry "−".
+function fmtUsdAdaptive(n: number, signed = false): string {
+  const sign = signed ? (n >= 0 ? "+" : "−") : (n < 0 ? "−" : "");
   const abs = Math.abs(n);
-  return `${sign}$${abs.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-};
+  if (abs >= 1e9) return `${sign}$${(abs / 1e9).toFixed(2)}B`;
+  if (abs >= 1e6) return `${sign}$${(abs / 1e6).toFixed(2)}M`;
+  if (abs >= 1e3) return `${sign}$${(abs / 1e3).toFixed(2)}K`;
+  return `${sign}$${abs.toFixed(2)}`;
+}
 
 // Compact key/value row used in the user-side cards.
 function KvRow({ label, value, valueColor }: { label: string; value: string; valueColor?: string }) {
@@ -1324,7 +1332,7 @@ function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
           fontSize: 26, fontWeight: 600, lineHeight: 1,
           letterSpacing: "-0.015em", fontVariantNumeric: "tabular-nums",
         }}>
-          {fmtUsd2(valueUsd)}
+          {fmtUsdAdaptive(valueUsd)}
         </span>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
           <AlpChip size={20} />
@@ -1341,8 +1349,8 @@ function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
       {/* KvRows pinned to the card floor; Performance is the taller
           sibling so this just absorbs the height difference. */}
       <div style={{ marginTop: "auto", paddingTop: 14, display: "flex", flexDirection: "column", gap: 6 }}>
-        <KvRow label="Deposited" value={fmtUsd2(totalDeposited)} />
-        <KvRow label="Yield" value={fmtUsd2(pnl, true)} valueColor={accent} />
+        <KvRow label="Deposited" value={fmtUsdAdaptive(totalDeposited)} />
+        <KvRow label="PnL" value={fmtUsdAdaptive(pnl, true)} valueColor={accent} />
       </div>
     </Card>
   );
@@ -1361,7 +1369,14 @@ function UserAprCard() {
   // us carries the bento row's CTA). When connected, server-side
   // auth_required indicates a transient backend issue, not a "show
   // dashes" case for the user.
-  const authRequired = !isConnected;
+  // Same-day deposit → dashes too: realized APY annualized over a
+  // sub-day window is noise (typically rounds to 0.0%), and rendering
+  // it as a number makes the card look broken before there's anything
+  // meaningful to display.
+  const daysHeld = user?.position?.firstDepositTs
+    ? (Date.now() - new Date(user.position.firstDepositTs).getTime()) / 86_400_000
+    : 0;
+  const showDash = !isConnected || (!!user?.position && daysHeld < 1);
 
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -1419,12 +1434,12 @@ function UserAprCard() {
       </div>
       <div style={{ marginTop: 14 }}>
         <span style={{
-          color: authRequired ? "rgba(255,255,255,0.45)" : "rgb(134, 239, 172)",
+          color: showDash ? "rgba(255,255,255,0.45)" : "rgb(134, 239, 172)",
           fontFamily: "var(--sans-stack)",
           fontSize: 26, fontWeight: 600, lineHeight: 1,
           letterSpacing: "-0.015em", fontVariantNumeric: "tabular-nums",
         }}>
-          {authRequired ? "-" : `${value.toFixed(1)}%`}
+          {showDash ? "—" : `${value.toFixed(1)}%`}
         </span>
       </div>
       {/* marginTop matches the gap from the value to the KvRows in
@@ -1750,7 +1765,7 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
                 <InfoIcon size={12} />
               </InfoTip>
             </span>
-            <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)", fontVariantNumeric: "tabular-nums" }}>${tvl.toFixed(2)}M</span>
+            <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)", fontVariantNumeric: "tabular-nums" }}>{fmtUsdAdaptive(tvl * 1_000_000)}</span>
           </div>
         </div>
 
@@ -1765,7 +1780,7 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
             : redeeming
             ? "Withdrawing…"
             : valid
-            ? `Withdraw ${fmtUsd2(usdcOut)}`
+            ? `Withdraw ${fmtUsdAdaptive(usdcOut)}`
             : "Enter an amount";
           const ctaDisabled = isConnected && (redeeming || !valid || !parsedShares || !address);
           const ctaOnClick = !isConnected
@@ -1908,7 +1923,7 @@ function UserActivityCard() {
                 fontFamily: "var(--sans-stack)", fontSize: 12.5, fontWeight: 500,
                 whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
               }}>
-                {a.kind === "deposit" ? "Deposited" : "Withdrew"} {a.amount.toLocaleString("en-US")} {token.slug}
+                {a.kind === "deposit" ? "Deposit" : "Withdraw"} {a.amount.toLocaleString("en-US")} {token.slug}
               </span>
               <span style={{
                 color: "rgba(255,255,255,0.45)",
@@ -2406,11 +2421,6 @@ function MessageView({ m, todayLabel, flash }: { m: AgentMessage; todayLabel: st
 
 /* ---------- Dashboard panel (right sidebar, Stats tab) ---------- */
 
-const fmtUsd = (n: number) => {
-  if (n === 0) return "$0";
-  return `$${n.toLocaleString("en-US", { minimumFractionDigits: n < 1000 ? 2 : 0, maximumFractionDigits: n < 1000 ? 2 : 0 })}`;
-};
-
 const fmtPct = (n: number) => n === 0 ? "0%" : `${n.toFixed(1)}%`;
 
 const CATEGORY_LABEL: Record<ActionCategory, string> = {
@@ -2566,7 +2576,7 @@ function ExposureRow({ p, dimmed }: { p: PoolEntry; dimmed: boolean }) {
         {fmtPct(apr)}
       </span>
       <span style={{ color: earned === 0 ? muted : "rgba(255,255,255,0.85)", fontSize: 11, fontWeight: 500, fontFamily: "var(--sans-stack)", fontVariantNumeric: "tabular-nums", textAlign: "right" }}>
-        {fmtUsd(earned)}
+        {fmtUsdAdaptive(earned)}
       </span>
     </div>
   );
@@ -2718,10 +2728,10 @@ function DashboardPanel() {
                 Vault TVL
               </div>
               <div style={{ marginTop: 4, color: "#fff", fontFamily: "var(--sans-stack)", fontSize: 22, fontWeight: 600, lineHeight: 1, letterSpacing: "-0.015em", fontVariantNumeric: "tabular-nums" }}>
-                ${tvl.toFixed(2)}M
+                {fmtUsdAdaptive(tvl * 1_000_000)}
               </div>
             </div>
-            <MiniSparkline data={tvl30d} width={80} height={24} label="TVL" formatValue={(v) => `$${v.toFixed(2)}M`} />
+            <MiniSparkline data={tvl30d} width={80} height={24} label="TVL" formatValue={(v) => fmtUsdAdaptive(v * 1_000_000)} />
           </div>
           {/* Bottom row: 3 stats inline with equal gaps between them
               via space-between. */}
@@ -2733,7 +2743,7 @@ function DashboardPanel() {
             paddingTop: 10,
             borderTop: "1px solid rgba(255,255,255,0.05)",
           }}>
-            <DashStat value={fmtUsd(basketEarned30d)} label="fees earned" />
+            <DashStat value={fmtUsdAdaptive(basketEarned30d)} label="fees earned" />
             <DashStat value={String(activePools)} label="active pools" />
             <DashStat value={String(users)} label="users" />
           </div>
@@ -3401,6 +3411,8 @@ function FooterStrip({
   showHowItWorks: boolean;
   onToggleHowItWorks: () => void;
 }) {
+  const { snapshot: vault } = useVault();
+  const vaultAddress = vault?.address;
   return (
     <div style={{
       position: "absolute",
@@ -3468,7 +3480,9 @@ function FooterStrip({
       </button>
       <span style={{ display: "inline-flex", alignItems: "center", gap: 14 }}>
         <a
-          href="#"
+          href={vaultAddress ? `https://basescan.org/address/${vaultAddress}` : "#"}
+          target="_blank"
+          rel="noopener noreferrer"
           className="text-haze transition-colors hover:text-mist"
           style={{
             textDecoration: "none",
@@ -3476,7 +3490,7 @@ function FooterStrip({
             display: "inline-flex", alignItems: "center", gap: 6,
           }}
         >
-          <span>Vault: 0xA1b2…f9c8</span>
+          <span>Vault: {vaultAddress ? shortAddress(vaultAddress) : "0xA1b2…f9c8"}</span>
           <span
             className="inline-flex items-center justify-center bg-white/10"
             style={{ width: 16, height: 16, borderRadius: 4, position: "relative", top: "1px" }}
@@ -3791,7 +3805,7 @@ export default function AppPage() {
         }
       `}</style>
 
-      <FloatingNav layout={MAIN_PANEL} exiting={exiting} onBack={handleBack} />
+      <FloatingNav layout={MAIN_PANEL} exiting={exiting} muted={showHowItWorks} onBack={handleBack} />
 
       {/* Main panel — fills the canvas exactly. */}
       <section style={{

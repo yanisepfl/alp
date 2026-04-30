@@ -3115,11 +3115,17 @@ export function LearnMoreContent({ open, onAppNav, inline = false }: { open: boo
             CardLabel pill at top followed by a side-by-side row, here the
             CardLabel lives INSIDE the left column so the viz can start
             at the same Y as the pill (aligned to card top-padding).
-            Height + paddingBottom are fixed (264 / 12) so the bottom
-            edge lines up exactly with Strategy's bottom in the right
-            column — measured via DevTools, not a flex/stretch trick,
-            because the two cards live in independent columns. */}
-        <Card style={{ paddingBottom: 12, height: 264, display: "flex", flexDirection: "column" }}>
+            On the landing version, height + paddingBottom are fixed
+            (264 / 12) — measured via DevTools — so the bottom edge lines
+            up exactly with Strategy's bottom in the right column.
+            On /app (inline), the right column hides the Open App row,
+            so the bento's content height is dictated by the right
+            column's natural height instead. We let Stack grow with
+            flex:1 (minHeight 264 keeps the StackViz from collapsing)
+            so its bottom tracks Strategy's bottom in inline mode. */}
+        <Card style={inline
+          ? { paddingBottom: 12, flex: 1, minHeight: 264, display: "flex", flexDirection: "column" }
+          : { paddingBottom: 12, height: 264, display: "flex", flexDirection: "column" }}>
           <StackBody open={open} />
         </Card>
         </div>
