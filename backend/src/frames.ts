@@ -43,7 +43,7 @@ export function summarize(frame: StreamFrame | ClientFrame): string {
     case "event":     return `type=event topic=agent kind=${frame.event.kind} id=${frame.event.id}`;
     case "snapshot":  return `type=snapshot topic=${frame.topic}`;
     case "tick":      return `type=tick topic=vault keys=[${Object.keys(frame.tick).filter(k => k !== "ts").join(",")}]`;
-    case "subscribe": return `type=subscribe topics=[${(frame.topics ?? ["agent"]).join(",")}]${frame.auth ? " auth=<set>" : ""}${frame.since?.agent ? ` since.agent=${frame.since.agent}` : ""}`;
+    case "subscribe": return `type=subscribe topics=[${(frame.topics ?? ["agent"]).join(",")}]${frame.wallet ? ` wallet=${frame.wallet}` : ""}${frame.since?.agent ? ` since.agent=${frame.since.agent}` : ""}`;
     case "user_message": return `type=user_message clientId=${frame.clientId} text="${frame.text.slice(0, 32)}${frame.text.length > 32 ? "…" : ""}"`;
     case "unsubscribe":  return `type=unsubscribe topics=[${frame.topics.join(",")}]`;
   }

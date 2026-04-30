@@ -88,8 +88,8 @@ export function notifyForwardSubscribers(args: {
   }
 }
 
-// Boot guard. Mirrors JWT_SECRET semantics: required at start, ≥32 chars.
-// Called from index.ts before the server binds.
+// Boot guard. Required at start, ≥32 chars. Called from index.ts before
+// the server binds.
 export function assertIngestSecretConfigured(): void {
   if (!INGEST_SECRET_RAW || INGEST_SECRET_RAW.length < 32) {
     console.error("FATAL: INGEST_SECRET env var is required (min 32 chars). Generate with: openssl rand -base64 48");

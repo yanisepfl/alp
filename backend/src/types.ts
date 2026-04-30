@@ -55,7 +55,7 @@ export type StreamFrame =
   | { v: 1; type: "snapshot"; topic: "user";  snapshot: UserSnapshot };
 
 export type ClientFrame =
-  | { v: 1; type: "subscribe";    topics?: Topic[]; since?: { agent?: string }; auth?: string }
+  | { v: 1; type: "subscribe";    topics?: Topic[]; since?: { agent?: string }; wallet?: string }
   | { v: 1; type: "user_message"; text: string; clientId: string }
   | { v: 1; type: "unsubscribe";  topics: Topic[] };
 

@@ -1,6 +1,7 @@
 // Entrypoint. Bun.serve handles both the WS upgrade on /stream (public,
-// auth via subscribe.auth) and on /ingest/stream (private, auth via
-// ?secret=), plus HTTP routes via Hono (/health, /auth/*, /ingest/*).
+// trust-on-claim wallet via subscribe.wallet) and on /ingest/stream
+// (private, auth via ?secret=), plus HTTP routes via Hono (/health,
+// /ingest/*).
 
 import type { ServerWebSocket, WebSocketHandler } from "bun";
 import { Hono } from "hono";
@@ -18,8 +19,6 @@ import { getPublicClient, vaultAddress } from "./chain";
 import {
   startAgentScript, startAgentActionBridge, loadAgentRingState, agentRingSize,
 } from "./topics/agent";
-import { startNonceSweeper, loadAuthState } from "./auth";
-import { buildAuthRoutes } from "./routes/auth";
 import { buildIngestRoutes } from "./routes/ingest";
 import { startIndexer, getLastIndexedBlock } from "./indexer";
 import {
@@ -28,17 +27,12 @@ import {
   type IngestWsData,
 } from "./ingest";
 
-if (!Bun.env.JWT_SECRET || Bun.env.JWT_SECRET.length < 32) {
-  console.error("FATAL: JWT_SECRET env var is required (min 32 chars). Generate with: openssl rand -base64 48");
-  process.exit(1);
-}
 assertIngestSecretConfigured();
 
 // B6 — rehydrate state that doesn't depend on the chain client. The indexer
 // load runs inside startIndexer() in chain mode; mock mode skips it (mock
 // state is meaningless to persist). Agent ring loads regardless so prior
 // scripted signals + chain actions replay correctly.
-loadAuthState();
 loadAgentRingState();
 
 const PORT = Number(Bun.env.PORT ?? 8787);
@@ -48,14 +42,6 @@ const VAULT_MODE: "chain" | "mock" =
 const BOOT_TS = Date.now();
 
 const app = new Hono();
-app.use(
-  "/auth/*",
-  cors({
-    origin: CORS_ORIGIN,
-    allowMethods: ["GET", "POST", "OPTIONS"],
-    allowHeaders: ["content-type"],
-  }),
-);
 app.use(
   "/health",
   cors({
@@ -78,7 +64,6 @@ app.get("/health", (c) => {
     uptimeSec: Math.floor((Date.now() - BOOT_TS) / 1000),
   });
 });
-app.route("/auth", buildAuthRoutes());
 app.route("/ingest", buildIngestRoutes());
 
 // B7 — WS data is a discriminated union: public stream cids vs ingest agents.
@@ -183,13 +168,11 @@ if (VAULT_MODE === "chain") {
   startVaultMockTicker();
 }
 startAgentScript();
-startNonceSweeper();
 
 console.log(`[alp-backend] listening on http://localhost:${server.port}`);
 console.log(`  ws://localhost:${server.port}/stream`);
 console.log(`  ws://localhost:${server.port}/ingest/stream`);
 console.log(`  http://localhost:${server.port}/health`);
-console.log(`  http://localhost:${server.port}/auth/{nonce,verify${(Bun.env.AUTH_DEV_BYPASS ?? "0") === "1" ? ",dev-token" : ""}}`);
 console.log(`  http://localhost:${server.port}/ingest/{signal,reply}`);
 
 // B7 — graceful shutdown. SIGTERM is what systemd sends on `systemctl stop`;

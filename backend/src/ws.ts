@@ -1,18 +1,18 @@
 // WebSocket connection lifecycle:
 //   - mints a connection id (cid) per upgrade
-//   - tracks per-connection state: subscribedTopics, auth, wallet, lastAgentCursor
+//   - tracks per-connection state: subscribedTopics, wallet, lastAgentCursor
 //   - dispatches subscribe / unsubscribe / user_message
 //   - emits ack + per-topic priming, ping every 30s, error frames on bad input
 //
-// Auth: subscribe.auth carries a SIWE-bound JWT. Valid → wallet decoded from
-// the token's `sub`. Invalid/expired/malformed → close with WS code 4001.
+// Auth: trust-on-claim. subscribe.wallet (lower-cased address) is taken at
+// face value and stored on the connection; no signature verification. The
+// user topic and user_message frames require a non-null state.wallet.
 //
 // All actual topic logic (ring, vault tick, user mock) lives in src/topics/*.
 
 import type { ServerWebSocket } from "bun";
 import type { ClientFrame, ErrorCode, StreamFrame, Topic } from "./types";
 import { BadFrameError, encode, parseClientFrame, summarize } from "./frames";
-import { verifyJwt } from "./auth";
 import {
   subscribeAgent, unsubscribeAgent, agentHistoryFrame, handleUserMessage, bindWallet,
 } from "./topics/agent";
@@ -43,7 +43,6 @@ type ConnState = {
   cid: string;
   ws: Conn;
   subscribedTopics: Set<Topic>;
-  auth: string | null;
   wallet: string | null;
   lastAgentCursor: string | null;
   pingTimer: ReturnType<typeof setInterval> | null;
@@ -107,7 +106,6 @@ export function handleOpen(ws: Conn): void {
     cid,
     ws,
     subscribedTopics: new Set(),
-    auth: null,
     wallet: null,
     lastAgentCursor: null,
     pingTimer: null,
@@ -185,26 +183,20 @@ async function handleSubscribe(
   state: ConnState,
   frame: Extract<ClientFrame, { type: "subscribe" }>,
 ): Promise<void> {
-  // Auth field present: validate the JWT and bind the connection's wallet
-  // from the token's `sub`. Per contract §1.1.8, an invalid/expired/malformed
-  // token closes the connection with code 4001.
-  if (typeof frame.auth === "string" && frame.auth.length > 0) {
-    if (state.auth === null) {
-      const decoded = await verifyJwt(frame.auth);
-      if (decoded === null) {
-        if (DEBUG) console.log(`[ws cid=${state.cid} close] code=4001 auth_invalid`);
-        try { state.ws.close(4001, "auth_invalid"); } catch {}
-        return;
-      }
-      state.auth = frame.auth;
-      state.wallet = decoded.sub;
-      // If already subscribed to agent (unauthed), upgrade the binding so
-      // future user/reply messages route correctly.
-      if (state.subscribedTopics.has("agent")) bindWallet(state.cid, state.wallet);
-    } else if (DEBUG) {
-      // Re-subscribe carrying a token while already authed: ignore — wallet
-      // doesn't switch mid-connection.
-      console.log(`[ws cid=${state.cid} dir=in] subscribe auth ignored (already authed)`);
+  // Trust-on-claim: subscribe.wallet (lower-cased address) is bound to the
+  // connection without any signature verification. Absent → state.wallet
+  // stays null and the user topic / user_message frames are rejected with
+  // auth_required. The FE owns lifecycle (close+reopen on wallet swap).
+  const claimed = typeof frame.wallet === "string" && frame.wallet.length > 0
+    ? frame.wallet.toLowerCase()
+    : null;
+  if (claimed !== state.wallet) {
+    state.wallet = claimed;
+    // If we were already subscribed to agent under a different (or no)
+    // wallet, rebind so future user/reply private routing keys on the
+    // current claim.
+    if (claimed !== null && state.subscribedTopics.has("agent")) {
+      bindWallet(state.cid, claimed);
     }
   }
 
@@ -221,7 +213,7 @@ async function handleSubscribe(
       rejected.push({ topic: t as string, reason: "unknown_topic" });
       continue;
     }
-    if (t === "user" && !state.auth) {
+    if (t === "user" && !state.wallet) {
       rejected.push({ topic: t, reason: "auth_required" });
       continue;
     }
@@ -273,8 +265,8 @@ function handleUserMsg(
   state: ConnState,
   frame: Extract<ClientFrame, { type: "user_message" }>,
 ): void {
-  if (!state.auth || !state.wallet) {
-    sendError(state, "auth_required", "user_message requires an authenticated subscribe");
+  if (!state.wallet) {
+    sendError(state, "auth_required", "user_message requires a wallet on subscribe");
     return;
   }
   if (!state.subscribedTopics.has("agent")) {
