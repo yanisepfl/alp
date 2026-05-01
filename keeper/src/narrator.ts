@@ -42,25 +42,27 @@ Bad examples:
 Respond with the sentence only — no prefix, no preamble.`;
 
 const THOUGHT_SYSTEM = `You are the inner voice of an automated liquidity-provisioning agent on Base mainnet. \
-The input describes a per-tick observation your code made but DID NOT act on. Your job is to produce a single short sentence summarizing what you noticed, with quoted live numbers.
+The input describes a per-tick observation your code made but DID NOT act on. Your job is to produce a single short sentence summarizing what you noticed.
 
 Output requirements:
-- Length: maximum 15 words. Aim for 8-12. Single sentence only.
+- Length: STRICT MAXIMUM 15 words. Count them. If you draft something longer, rewrite shorter. Aim for 8-12.
 - Format: one sentence ending with a period. No markdown, no lists, no code blocks, no quotes.
 - Voice: first-person ("I see", "I'm watching", "I noticed"). Active voice preferred.
 - Content: quote concrete numbers verbatim from the input (pool names, percentages, tick values). Convey the observation crisply. No advice, no predictions, no hype ("crushing", "great", "huge"), no apologies. Make clear nothing was acted upon. Skip technical jargon that isn't load-bearing (NFT ids, internal struct names, basis-points unless meaningful).
+- Composite inputs: when the input describes ALL pools at once (e.g. vol/cap/idle composites), DO NOT enumerate every pool. Pick the most extreme or summarize: "tightest case" / "across all pools" / "outliers".
 
-Good examples:
+Good examples (note the brevity):
 - "USDC/USDT holding firm at tick 5, deep inside its [-595, 605] band."
 - "Idle reserves at 31% of TAV — enough to deploy if a pool wanted top-up."
-- "ETH/USDC has only flexed 129 ticks this hour, far less than the live ±600 range."
+- "All three pools' realized vol stays well below their live ±600 widths."
+- "ETH/USDC the loosest of the three at 129 ticks of recent vol vs 600 width."
 
-Bad examples:
+Bad examples (rejected):
+- "All three pools are running half-width 600 but realized vol is far tighter — ETH/USDC only moved 39 ticks, USDC/cbBTC 52, USDC/USDT zero." (24 words, enumerates all)
 - "I will rebalance USDC/USDT soon." (prediction)
-- "USDC/cbBTC at 47.75% of TAV vs 100% cap, 52.25pp headroom; pool is trading near the in-range portion." (over 15 words, debug shape)
 - "Looking good across the board." (vague, hype-adjacent)
 
-Respond with the sentence only — no prefix, no preamble.`;
+Respond with the sentence only — no prefix, no preamble. If you cannot fit the observation into 15 words, summarize the headline only.`;
 
 const SIGNAL_SYSTEM = `You are the inner voice of an automated liquidity-provisioning agent on Base mainnet. \
 The input describes a system-context signal — typically an external integration consultation (Uniswap SDK, KeeperHub, etc.), a cooldown/hold reason, or a status from another component. Your job is to convey it crisply.
@@ -150,7 +152,41 @@ ${recentBlock}
 Polish per the system rules.`;
 }
 
+// Concurrency limiter: each `claude -p` subprocess is ~250MB RSS. With
+// 5+ thoughts + 2 consultations + 1 action per /scan, unbounded concurrency
+// peaks at ~2GB which OOM'd the VM during the soak. Cap at 2 concurrent
+// narrators; the rest queue. Total per-tick narrator wallclock rises (~50s
+// at 5x serial) but stays well inside the 5-min cron window.
+const MAX_CONCURRENT_NARRATORS = 2;
+let activeNarrators = 0;
+const narratorQueue: Array<() => void> = [];
+
+function acquireNarratorSlot(): Promise<void> {
+  if (activeNarrators < MAX_CONCURRENT_NARRATORS) {
+    activeNarrators++;
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    narratorQueue.push(() => { activeNarrators++; resolve(); });
+  });
+}
+
+function releaseNarratorSlot(): void {
+  activeNarrators--;
+  const next = narratorQueue.shift();
+  if (next) next();
+}
+
 async function runClaude(systemPrompt: string, userPrompt: string): Promise<string | null> {
+  await acquireNarratorSlot();
+  try {
+    return await runClaudeInner(systemPrompt, userPrompt);
+  } finally {
+    releaseNarratorSlot();
+  }
+}
+
+async function runClaudeInner(systemPrompt: string, userPrompt: string): Promise<string | null> {
   let proc;
   try {
     proc = spawn({

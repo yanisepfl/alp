@@ -110,10 +110,17 @@ function chooseAndGate(
   }
 
   if (!chosenCandidate) {
-    // No actuator emitted: pick the highest-priority non-actuator as the
-    // principal Decision so the /scan response reflects what the policies
-    // *did* say (rather than a synthetic "no actuator" filler).
-    chosenCandidate = all.sort((a, b) => b.priority - a.priority)[0] ?? null;
+    // No actuator emitted. Rotate which non-actuator wins by tick so the
+    // feed doesn't read as "always idle" — idle's priority is the highest
+    // among non-actuators, but every other policy has signal worth
+    // surfacing too. Granularity: 1-minute slot, so KH's 5-min ticks land
+    // on different policies across consecutive cycles. Sort by priority
+    // first so the rotation walks meaningful candidates, not duplicates.
+    const sorted = [...all].sort((a, b) => b.priority - a.priority);
+    if (sorted.length > 0) {
+      const idx = Math.floor(Date.now() / 60_000) % sorted.length;
+      chosenCandidate = sorted[idx]!;
+    }
   }
 
   if (!chosenCandidate) {

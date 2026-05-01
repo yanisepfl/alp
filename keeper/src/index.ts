@@ -14,9 +14,29 @@ import { forceRouter } from "./routes/force";
 
 const app = new Hono();
 
+// Log every incoming request — useful to diagnose what an external
+// caller (e.g. KH workflow) is actually sending when it errors.
+app.use("*", async (c, next) => {
+  console.log(`[req] ${c.req.method} ${c.req.path}${c.req.url.includes("?") ? "?…" : ""} ua="${c.req.header("user-agent")?.slice(0, 40) ?? "-"}"`);
+  await next();
+});
+
 app.route("/health", healthRouter);
 app.route("/scan", scanRouter);
 app.route("/force", forceRouter);
+
+// Lenient routing: KH and other orchestrators may append a trailing
+// slash or use GET. Rewrite trailing-slash → no-slash internally so
+// the query string survives, and accept GET on /scan as a fallback
+// so KH workflows that default to GET still work.
+app.all("/scan/", async (c) => {
+  const qs = c.req.url.includes("?") ? "?" + c.req.url.split("?")[1] : "";
+  return c.redirect(`/scan${qs}`, 307);
+});
+app.all("/force/", async (c) => {
+  const qs = c.req.url.includes("?") ? "?" + c.req.url.split("?")[1] : "";
+  return c.redirect(`/force${qs}`, 307);
+});
 
 app.notFound((c) => c.json({ error: "not_found", path: c.req.path }, 404));
 app.onError((err, c) => {

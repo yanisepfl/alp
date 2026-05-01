@@ -29,10 +29,12 @@ export const scanRouter = new Hono();
 
 scanRouter.use("*", requireBearer);
 
-scanRouter.post("/", async (c) => {
-  const result = await runScan({});
-  return c.json(result);
-});
+// Accept POST (canonical) and GET (KH workflow runtime ignores our
+// method=POST config and defaults to GET). Request body is {} either
+// way so HTTP semantics are preserved.
+const handler = async (c: any) => c.json(await runScan({}));
+scanRouter.post("/", handler);
+scanRouter.get("/", handler);
 
 export interface ScanRunOpts {
   forcePool?: string;
@@ -60,15 +62,13 @@ export async function runScan(opts: ScanRunOpts): Promise<ScanResponse> {
   let actuated = false;
   let dryRun = false;
 
-  // Always emit thoughts to the agent feed. Raw goes immediate (so
-  // /scan returns fast and the feed never goes silent if Claude lags),
-  // polished thought rewrite supersedes via fire-and-forget.
+  // Emit polished-only per thought. Narrator rewrites in the background;
+  // on success, the polished entry lands. On null (timeout / Claude
+  // error), narrateThoughtAsync falls back to the raw decisionToSignalText
+  // so the feed never goes silent. One ring entry per thought, no dupes.
   const thoughtRecent = result.thoughts.map(decisionToSignalText);
   for (const t of result.thoughts) {
     if (t.action === "thought") {
-      void signal(decisionToSignalText(t)).catch((e) => {
-        console.warn("[scan] thought ingest failed:", (e as Error).message);
-      });
       void narrateThoughtAsync(t, thoughtRecent);
     }
   }
@@ -120,27 +120,19 @@ export async function runScan(opts: ScanRunOpts): Promise<ScanResponse> {
       // signal() resolves with {ok:false} on transport errors instead
       // of rejecting, so we await + check ok explicitly to surface
       // backend-down conditions in the keeper log.
-      // Build sources for this actuation tx — frontend groups our
-      // narrated entry with the indexer's kind:"action" entries by
-      // tx hash so they render as one logical event.
+      // Sources let the frontend group our narrated entries with the
+      // indexer's kind:"action" entries on the same tx hash.
       const actuationSources = !exec.dryRun ? [
         { kind: "basescan" as const, label: "rebalance tx", tx: exec.txHash },
         { kind: "uniswap" as const, label: "Uniswap V3/V4 SDK consult", url: "https://developers.uniswap.org/docs/liquidity/overview" },
       ] : undefined;
+      // Polished-only emit. Narrators fall back to raw on timeout so
+      // failures still produce a single entry per logical event.
       for (const line of exec.consultations) {
-        const rawConsult = `[uniswap-sdk] ${line}`;
-        void signal(rawConsult, { sources: actuationSources }).then((r) => {
-          if (!r.ok) console.warn(`[scan] consultation ingest failed (status=${r.status}): ${r.error}`);
-        });
-        // Polished signal-lane rewrite for each consultation.
         void narrateSignalAsync("uniswap-sdk", line, [
           ...result.thoughts.map(decisionToSignalText),
         ], actuationSources);
       }
-      void signal(decisionToSignalText(result.chosen), { sources: actuationSources }).then((r) => {
-        if (!r.ok) console.warn(`[scan] raw chosen ingest failed (status=${r.status}): ${r.error}`);
-      });
-      // Action-lane rewrite for the chosen actuating decision.
       const recentForAction = [
         ...result.thoughts.map(decisionToSignalText),
         ...exec.consultations.map((l) => `[uniswap-sdk] ${l}`),
@@ -153,13 +145,14 @@ export async function runScan(opts: ScanRunOpts): Promise<ScanResponse> {
     const consecutive = bumpHoldCounter();
     const shouldNarrate = env.SHERPA_NARRATE_HOLDS || consecutive % 5 === 0;
     if (shouldNarrate) {
-      void signal(decisionToSignalText(result.chosen)).catch((e) => {
-        console.warn("[scan] hold ingest failed:", (e as Error).message);
-      });
       // Hold reasons (anti-whipsaw cooldowns, error-downgrades) are
       // signal-lane: name the integration/cause, quote any timestamps.
+      // Narrator falls back to raw if Claude times out.
       void narrateSignalAsync(result.chosen.policy, result.chosen.reasoning, thoughtRecent);
     }
+  } else if (result.chosen.action === "thought") {
+    // Non-actuating thought won the engine's pick this tick. Already
+    // emitted via the thoughts loop above — don't double-narrate.
   }
 
   const decisions = [...result.thoughts, result.chosen];
@@ -178,20 +171,30 @@ export async function runScan(opts: ScanRunOpts): Promise<ScanResponse> {
   };
 }
 
+// Narrator helpers — each returns a polished entry on Claude success and
+// falls back to the raw input on timeout/error so the feed always gets
+// exactly one entry per logical event (no dupes, no silence on failure).
+
 async function narrateActionAsync(decision: Decision, recent: readonly string[], sources?: WireSource[]): Promise<void> {
   const polished = await rewriteAction(decision, { recentDecisions: recent });
-  if (!polished) return;
-  await signal(`[${decision.policy}] ${polished}`, { sources });
+  const text = polished
+    ? `[${decision.policy}] ${polished}`
+    : decisionToSignalText(decision);
+  await signal(text, { sources });
 }
 
 async function narrateThoughtAsync(decision: Decision, recent: readonly string[]): Promise<void> {
   const polished = await rewriteThought(decision, { recentDecisions: recent });
-  if (!polished) return;
-  await signal(`[${decision.policy}] ${polished}`);
+  const text = polished
+    ? `[${decision.policy}] ${polished}`
+    : decisionToSignalText(decision);
+  await signal(text);
 }
 
 async function narrateSignalAsync(policy: string, rawText: string, recent: readonly string[], sources?: WireSource[]): Promise<void> {
   const polished = await rewriteSignal(rawText, policy, { recentDecisions: recent });
-  if (!polished) return;
-  await signal(`[${policy}] ${polished}`, { sources });
+  const text = polished
+    ? `[${policy}] ${polished}`
+    : `[${policy}] ${rawText}`;
+  await signal(text, { sources });
 }
