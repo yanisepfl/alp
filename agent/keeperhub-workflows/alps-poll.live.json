@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "exportedAt": "2026-05-01T21:36:03.950Z",
+  "workflow": {
+    "name": "alps-poll",
+    "description": ""
+  },
+  "nodes": [
+    {
+      "id": "6JcHO4iisovN-Sj9Wvh0X",
+      "data": {
+        "type": "trigger",
+        "label": "",
+        "config": {
+          "triggerType": "Schedule",
+          "scheduleCron": "*/5 * * * *"
+        },
+        "status": "idle",
+        "description": ""
+      },
+      "type": "trigger",
+      "position": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": "7qMyG-iO8nVbPECJeUvnS",
+      "data": {
+        "type": "action",
+        "label": "Tick keeper /scan with KH context",
+        "config": {
+          "url": "https://rest-charged-vision-forum.trycloudflare.com/scan?token=zrf4NTCitWwwJrxGTWHWqDztFd7UWKmoAWHrmGzzdlyptMG3NVTd0wFT20DRjqmI",
+          "body": "{\"context\":{\"source\":\"kh-alps-poll\",\"note\":\"static-context-from-kh-workflow\"}}",
+          "inputs": {
+            "url": "https://rest-charged-vision-forum.trycloudflare.com/scan?token=zrf4NTCitWwwJrxGTWHWqDztFd7UWKmoAWHrmGzzdlyptMG3NVTd0wFT20DRjqmI",
+            "method": "GET"
+          },
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "endpoint": "https://rest-charged-vision-forum.trycloudflare.com/scan?token=zrf4NTCitWwwJrxGTWHWqDztFd7UWKmoAWHrmGzzdlyptMG3NVTd0wFT20DRjqmI",
+          "timeoutMs": 60000,
+          "actionType": "HTTP Request",
+          "parameters": {
+            "url": "https://rest-charged-vision-forum.trycloudflare.com/scan?token=zrf4NTCitWwwJrxGTWHWqDztFd7UWKmoAWHrmGzzdlyptMG3NVTd0wFT20DRjqmI",
+            "method": "GET"
+          },
+          "requestUrl": "https://rest-charged-vision-forum.trycloudflare.com/scan?token=zrf4NTCitWwwJrxGTWHWqDztFd7UWKmoAWHrmGzzdlyptMG3NVTd0wFT20DRjqmI"
+        },
+        "status": "idle",
+        "description": "Fires every 5 min, expects JSON {chosen, thoughts, txs, decisions, meta}"
+      },
+      "type": "action",
+      "position": {
+        "x": 411.523506865129,
+        "y": -5.835324836805881
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "n1lxsGgU274_XGZZdxJ9r",
+      "type": "animated",
+      "source": "6JcHO4iisovN-Sj9Wvh0X",
+      "target": "7qMyG-iO8nVbPECJeUvnS"
+    }
+  ],
+  "integrationBindings": []
+}

@@ -11,6 +11,7 @@ import { readVaultAgent } from "./vault";
 import { healthRouter } from "./routes/health";
 import { scanRouter, runScan } from "./routes/scan";
 import { forceRouter } from "./routes/force";
+import { postRebalanceRouter } from "./routes/postRebalance";
 
 const app = new Hono();
 
@@ -24,19 +25,18 @@ app.use("*", async (c, next) => {
 app.route("/health", healthRouter);
 app.route("/scan", scanRouter);
 app.route("/force", forceRouter);
+app.route("/post-rebalance", postRebalanceRouter);
 
 // Lenient routing: KH and other orchestrators may append a trailing
 // slash or use GET. Rewrite trailing-slash → no-slash internally so
 // the query string survives, and accept GET on /scan as a fallback
 // so KH workflows that default to GET still work.
-app.all("/scan/", async (c) => {
-  const qs = c.req.url.includes("?") ? "?" + c.req.url.split("?")[1] : "";
-  return c.redirect(`/scan${qs}`, 307);
-});
-app.all("/force/", async (c) => {
-  const qs = c.req.url.includes("?") ? "?" + c.req.url.split("?")[1] : "";
-  return c.redirect(`/force${qs}`, 307);
-});
+for (const path of ["/scan", "/force", "/post-rebalance"]) {
+  app.all(`${path}/`, async (c) => {
+    const qs = c.req.url.includes("?") ? "?" + c.req.url.split("?")[1] : "";
+    return c.redirect(`${path}${qs}`, 307);
+  });
+}
 
 app.notFound((c) => c.json({ error: "not_found", path: c.req.path }, 404));
 app.onError((err, c) => {

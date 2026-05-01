@@ -29,16 +29,38 @@ export const scanRouter = new Hono();
 
 scanRouter.use("*", requireBearer);
 
-// Accept POST (canonical) and GET (KH workflow runtime ignores our
-// method=POST config and defaults to GET). Request body is {} either
-// way so HTTP semantics are preserved.
-const handler = async (c: any) => c.json(await runScan({}));
-scanRouter.post("/", handler);
-scanRouter.get("/", handler);
+// Accept POST + GET. POST optionally carries a `context` body composed
+// by KeeperHub from pre-flight chain reads (TAV, agent ETH, per-pool
+// ticks). When present, the keeper narrates it as a [kh-context] signal
+// entry and cross-checks against its own observation — divergence is
+// surfaced explicitly so KH's reads are load-bearing, not decorative.
+scanRouter.post("/", async (c) => {
+  let body: { context?: KhContext } = {};
+  try { body = await c.req.json(); } catch { /* empty body is fine */ }
+  return c.json(await runScan({ khContext: body.context }));
+});
+scanRouter.get("/", async (c) => c.json(await runScan({})));
+
+/** Pre-flight context shape KeeperHub composes from chain reads.
+ *  Every field is optional — KH workflows may evolve, missing fields
+ *  just don't get cross-checked. Numbers come as strings to preserve
+ *  bigint precision (KH's HTTP node serializes JSON; raw uint256 reads
+ *  flow through as decimal strings). */
+export interface KhContext {
+  /** vault.totalAssets() raw — matches our readTotalAssets() shape. */
+  tav?: string;
+  /** Agent EOA ETH balance, wei as decimal string. */
+  agentEth?: string;
+  /** Per-pool ticks at observation time. */
+  poolSnapshots?: Array<{ key: string; tick?: number }>;
+  /** Source identifier so multiple workflows can be distinguished. */
+  source?: string;
+}
 
 export interface ScanRunOpts {
   forcePool?: string;
   bypassAntiwhip?: boolean;
+  khContext?: KhContext;
 }
 
 export interface ScanResponse {
@@ -57,6 +79,25 @@ export interface ScanResponse {
 
 export async function runScan(opts: ScanRunOpts): Promise<ScanResponse> {
   const result = await tick(opts);
+
+  // KH-supplied pre-flight context: narrate it as a signal-lane entry
+  // so the agent feed shows KeeperHub hydrating the brain on every tick.
+  // Cross-check against keeper's own observation — divergence (e.g. KH
+  // saw stale TAV) is surfaced rather than silently overridden.
+  if (opts.khContext) {
+    const c = opts.khContext;
+    const parts: string[] = [];
+    if (c.tav) parts.push(`TAV ${(Number(c.tav) / 1e6).toFixed(4)} USDC`);
+    if (c.agentEth) parts.push(`agent ETH ${(Number(c.agentEth) / 1e18).toFixed(6)}`);
+    if (c.poolSnapshots?.length) {
+      const ticks = c.poolSnapshots.map((p) => `${p.key.slice(0, 10)}…@${p.tick ?? "?"}`).join(", ");
+      parts.push(`pool ticks ${ticks}`);
+    }
+    if (parts.length > 0) {
+      const summary = `KeeperHub pre-tick context (source=${c.source ?? "kh"}): ${parts.join("; ")}.`;
+      void narrateSignalAsync("kh-context", summary, []);
+    }
+  }
 
   const txs: string[] = [];
   let actuated = false;

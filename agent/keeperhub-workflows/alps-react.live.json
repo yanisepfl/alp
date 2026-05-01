@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "exportedAt": "2026-05-01T21:36:04.090Z",
+  "workflow": {
+    "name": "alps-react",
+    "description": "Reactive workflow: when vault.LiquidityAdded fires on chain, post a health snapshot back to the keeper."
+  },
+  "nodes": [
+    {
+      "id": "blockchain-event-trigger",
+      "data": {
+        "type": "trigger",
+        "label": "vault.LiquidityAdded on Base",
+        "config": {
+          "event": "LiquidityAdded",
+          "chainId": 8453,
+          "eventName": "LiquidityAdded",
+          "triggerType": "Blockchain Event",
+          "eventSignature": "LiquidityAdded(bytes32 indexed,uint256 indexed,address,uint128,uint256,uint256)",
+          "contractAddress": "0x3F0e6cef3a75f52F1E55806Afe40317f51199CaE"
+        },
+        "status": "idle",
+        "description": ""
+      },
+      "type": "trigger",
+      "position": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": "post-rebalance-http",
+      "data": {
+        "type": "action",
+        "label": "POST /post-rebalance",
+        "config": {
+          "url": "https://rest-charged-vision-forum.trycloudflare.com/post-rebalance?token=zrf4NTCitWwwJrxGTWHWqDztFd7UWKmoAWHrmGzzdlyptMG3NVTd0wFT20DRjqmI",
+          "body": "{\"event\":{\"tx\":\"${trigger.tx}\",\"poolKey\":\"${trigger.args.poolKey}\",\"eventName\":\"LiquidityAdded\"},\"postState\":{}}",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "timeoutMs": 60000,
+          "actionType": "HTTP Request",
+          "requestUrl": "https://rest-charged-vision-forum.trycloudflare.com/post-rebalance?token=zrf4NTCitWwwJrxGTWHWqDztFd7UWKmoAWHrmGzzdlyptMG3NVTd0wFT20DRjqmI"
+        },
+        "status": "idle",
+        "description": ""
+      },
+      "type": "action",
+      "position": {
+        "x": 300,
+        "y": 0
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "type": "animated",
+      "source": "blockchain-event-trigger",
+      "target": "post-rebalance-http"
+    }
+  ],
+  "integrationBindings": []
+}
