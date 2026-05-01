@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "exportedAt": "2026-05-01T22:11:48.928Z",
+  "exportedAt": "2026-05-01T22:13:01.166Z",
   "workflow": {
     "name": "alps-poll",
-    "description": ""
+    "description": "Hydrates the ALP brain with chain context every 5 min. The Schedule fires → KeeperHub reads vault.totalAssets() and the agent's ETH balance from Base mainnet via web3/read-contract + web3/check-balance → POSTs to the keeper's /scan endpoint with the values rendered into body.context via {{@nodeId:Label.field}} templates → a Condition node branches on whether a rebalance was actuated. KeeperHub is the data plane between Base and the brain."
   },
   "nodes": [
     {

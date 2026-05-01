@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "exportedAt": "2026-05-01T22:11:49.116Z",
+  "exportedAt": "2026-05-01T22:13:01.313Z",
   "workflow": {
     "name": "alps-react",
-    "description": "Reactive workflow: when vault.LiquidityAdded fires on chain, post a health snapshot back to the keeper."
+    "description": "Reactive workflow listening for vault.LiquidityAdded events on Base. When a rebalance lands on-chain, KeeperHub's Event trigger fires → re-reads post-state TAV and agent ETH balance via web3/* primitives → POSTs to the keeper's /post-rebalance endpoint with event metadata + post-state in the body. Produces a distinct [kh-event] narration entry, separate from the backend indexer's auto-folded [action] entries — this is KeeperHub's independent on-chain observation."
   },
   "nodes": [
     {
