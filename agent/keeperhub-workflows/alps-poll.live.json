@@ -1,22 +1,22 @@
 {
   "version": 1,
-  "exportedAt": "2026-05-01T21:36:03.950Z",
+  "exportedAt": "2026-05-01T22:00:03.682Z",
   "workflow": {
     "name": "alps-poll",
     "description": ""
   },
   "nodes": [
     {
-      "id": "6JcHO4iisovN-Sj9Wvh0X",
+      "id": "trigger-schedule",
       "data": {
         "type": "trigger",
-        "label": "",
+        "label": "Every 5 min",
         "config": {
           "triggerType": "Schedule",
-          "scheduleCron": "*/5 * * * *"
+          "scheduleCron": "*/5 * * * *",
+          "scheduleTimezone": "UTC"
         },
-        "status": "idle",
-        "description": ""
+        "status": "idle"
       },
       "type": "trigger",
       "position": {
@@ -25,46 +25,106 @@
       }
     },
     {
-      "id": "7qMyG-iO8nVbPECJeUvnS",
+      "id": "read-tav",
       "data": {
         "type": "action",
-        "label": "Tick keeper /scan with KH context",
+        "label": "Read TAV",
         "config": {
-          "url": "https://rest-charged-vision-forum.trycloudflare.com/scan?token=zrf4NTCitWwwJrxGTWHWqDztFd7UWKmoAWHrmGzzdlyptMG3NVTd0wFT20DRjqmI",
-          "body": "{\"context\":{\"source\":\"kh-alps-poll\",\"note\":\"static-context-from-kh-workflow\"}}",
-          "inputs": {
-            "url": "https://rest-charged-vision-forum.trycloudflare.com/scan?token=zrf4NTCitWwwJrxGTWHWqDztFd7UWKmoAWHrmGzzdlyptMG3NVTd0wFT20DRjqmI",
-            "method": "GET"
-          },
-          "method": "POST",
-          "headers": {
-            "Content-Type": "application/json"
-          },
-          "endpoint": "https://rest-charged-vision-forum.trycloudflare.com/scan?token=zrf4NTCitWwwJrxGTWHWqDztFd7UWKmoAWHrmGzzdlyptMG3NVTd0wFT20DRjqmI",
-          "timeoutMs": 60000,
-          "actionType": "HTTP Request",
-          "parameters": {
-            "url": "https://rest-charged-vision-forum.trycloudflare.com/scan?token=zrf4NTCitWwwJrxGTWHWqDztFd7UWKmoAWHrmGzzdlyptMG3NVTd0wFT20DRjqmI",
-            "method": "GET"
-          },
-          "requestUrl": "https://rest-charged-vision-forum.trycloudflare.com/scan?token=zrf4NTCitWwwJrxGTWHWqDztFd7UWKmoAWHrmGzzdlyptMG3NVTd0wFT20DRjqmI"
+          "abi": "[{\"type\":\"function\",\"name\":\"totalAssets\",\"stateMutability\":\"view\",\"inputs\":[],\"outputs\":[{\"type\":\"uint256\"}]}]",
+          "network": "8453",
+          "actionType": "web3/read-contract",
+          "abiFunction": "totalAssets",
+          "functionArgs": "[]",
+          "contractAddress": "0x3F0e6cef3a75f52F1E55806Afe40317f51199CaE"
         },
-        "status": "idle",
-        "description": "Fires every 5 min, expects JSON {chosen, thoughts, txs, decisions, meta}"
+        "status": "idle"
       },
       "type": "action",
       "position": {
-        "x": 411.523506865129,
-        "y": -5.835324836805881
+        "x": 280,
+        "y": 0
+      }
+    },
+    {
+      "id": "read-eth",
+      "data": {
+        "type": "action",
+        "label": "Agent ETH",
+        "config": {
+          "address": "0x8cf03f65ffC08a514dA09063b5632deC0b11475D",
+          "network": "8453",
+          "actionType": "web3/check-balance"
+        },
+        "status": "idle"
+      },
+      "type": "action",
+      "position": {
+        "x": 560,
+        "y": 0
+      }
+    },
+    {
+      "id": "tick-keeper",
+      "data": {
+        "type": "action",
+        "label": "Tick keeper /scan",
+        "config": {
+          "endpoint": "https://${KEEPER_PUBLIC_HOST}/scan?token=${KEEPER_INBOUND_BEARER}",
+          "httpBody": "{\"context\":{\"tav\":\"{{@read-tav:Read TAV.result}}\",\"agentEth\":\"{{@read-eth:Agent ETH.balanceWei}}\",\"source\":\"kh-alps-poll\"}}",
+          "actionType": "HTTP Request",
+          "httpMethod": "POST",
+          "httpHeaders": "{\"Content-Type\":\"application/json\"}"
+        },
+        "status": "idle"
+      },
+      "type": "action",
+      "position": {
+        "x": 840,
+        "y": 0
+      }
+    },
+    {
+      "id": "did-actuate",
+      "data": {
+        "type": "action",
+        "label": "Did Actuate?",
+        "config": {
+          "condition": "{{@tick-keeper:Tick keeper /scan.data.meta.actuated}} == true",
+          "actionType": "Condition"
+        },
+        "status": "idle"
+      },
+      "type": "action",
+      "position": {
+        "x": 1120,
+        "y": 0
       }
     }
   ],
   "edges": [
     {
-      "id": "n1lxsGgU274_XGZZdxJ9r",
+      "id": "e1",
       "type": "animated",
-      "source": "6JcHO4iisovN-Sj9Wvh0X",
-      "target": "7qMyG-iO8nVbPECJeUvnS"
+      "source": "trigger-schedule",
+      "target": "read-tav"
+    },
+    {
+      "id": "e2",
+      "type": "animated",
+      "source": "read-tav",
+      "target": "read-eth"
+    },
+    {
+      "id": "e3",
+      "type": "animated",
+      "source": "read-eth",
+      "target": "tick-keeper"
+    },
+    {
+      "id": "e4",
+      "type": "animated",
+      "source": "tick-keeper",
+      "target": "did-actuate"
     }
   ],
   "integrationBindings": []
