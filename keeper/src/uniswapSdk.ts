@@ -68,6 +68,15 @@ export interface ConsultationResponse {
    *  re-derive decimals. */
   symbol0?: string;
   symbol1?: string;
+  /** Human-readable spot price of token0 in token1 units, computed by the
+   *  SDK Pool entity. E.g. "0.99987" for USDC/USDT, "2547.13" for ETH/USDC. */
+  token0Price?: string;
+  /** Inverse — token1 priced in token0. */
+  token1Price?: string;
+  /** Pool fee tier in basis points (V3 fixed, V4 dynamic snapshot). */
+  feeBps?: number;
+  /** SDK protocol version actually used for this consultation. */
+  protocol?: "v3" | "v4";
 }
 
 /** ERC20 decimals cache. Each token decimals() read is a single
@@ -253,6 +262,10 @@ export async function consultDecrease(args: ConsultDecreaseArgs): Promise<Liquid
       poolTick: tick,
       symbol0: sym(args.pool.token0),
       symbol1: sym(args.pool.token1),
+      token0Price: (sdkPool as V3Pool).token0Price.toSignificant(6),
+      token1Price: (sdkPool as V3Pool).token1Price.toSignificant(6),
+      feeBps: args.pool.fee / 100,
+      protocol: args.pool.kind,
     };
     return { ok: true, data, latencyMs: Math.round(performance.now() - start), status: 0 };
   } catch (e) {
@@ -312,6 +325,10 @@ export async function consultCreate(args: ConsultCreateArgs): Promise<LiquidityA
       poolTick: tick,
       symbol0: sym(args.pool.token0),
       symbol1: sym(args.pool.token1),
+      token0Price: (sdkPool as V3Pool).token0Price.toSignificant(6),
+      token1Price: (sdkPool as V3Pool).token1Price.toSignificant(6),
+      feeBps: args.pool.fee / 100,
+      protocol: args.pool.kind,
     };
     return { ok: true, data, latencyMs: Math.round(performance.now() - start), status: 0 };
   } catch (e) {
@@ -352,8 +369,17 @@ export function summariseConsultation(label: string, r: LiquidityApiResult<Consu
   const min1 = fmt(d.amount1Min, dec1, d.symbol1 ?? "tok1");
   const range = `[${d.tickLower}, ${d.tickUpper}]`;
   const slip = d.slippageBps !== undefined ? `${d.slippageBps}bps slippage` : "";
+  // Spot price reads as "token1 per 1 token0" by SDK convention. Surface
+  // it both ways so narrator can pick the natural direction (e.g. "ETH at
+  // 2547 USDC" rather than "USDC at 0.000392 ETH").
+  const priceLine = d.token0Price && d.token1Price && d.symbol0 && d.symbol1
+    ? `, spot=${d.token0Price} ${d.symbol1}/${d.symbol0} (${d.token1Price} ${d.symbol0}/${d.symbol1})`
+    : "";
+  const protoFee = d.protocol && d.feeBps !== undefined
+    ? `, ${d.protocol.toUpperCase()} ${d.feeBps}bps`
+    : "";
   return (
-    `Uniswap SDK /${label} (${r.latencyMs}ms, pool tick ${d.poolTick}, range ${range}, ${slip}): ` +
+    `Uniswap ${d.protocol === "v4" ? "V4" : "V3"} SDK /${label} (${r.latencyMs}ms, pool tick ${d.poolTick}, range ${range}, ${slip}${protoFee}${priceLine}): ` +
     `amount0=${a0}, amount1=${a1}, liquidity=${d.liquidity ?? "?"}, ` +
     `min0=${min0}, min1=${min1}.`
   );

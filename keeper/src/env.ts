@@ -45,6 +45,10 @@ const Schema = z.object({
   KEEPER_COOLDOWN_SECONDS: z.coerce.number().int().positive().default(1800),
   SHERPA_NARRATE_HOLDS: BoolFromEnv(false),
   CLAUDE_NARRATOR_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
+  // Optional internal /scan tick (ms). When set, the keeper fires its own
+  // /scan on a setInterval — useful for soak testing without a KH workflow
+  // wired up. KH (Phase 4) replaces this with an external schedule.
+  KEEPER_INTERNAL_TICK_MS: z.coerce.number().int().positive().optional(),
   // 2b: real chain-write gate. Defaults to true so a stray boot during 2b
   // dev never lands a tx — flip to false explicitly and only after the
   // pre-flight protocol clears.
@@ -77,6 +81,7 @@ function loadEnv() {
     KEEPER_COOLDOWN_SECONDS: Bun.env.KEEPER_COOLDOWN_SECONDS,
     SHERPA_NARRATE_HOLDS: Bun.env.SHERPA_NARRATE_HOLDS,
     CLAUDE_NARRATOR_TIMEOUT_MS: Bun.env.CLAUDE_NARRATOR_TIMEOUT_MS,
+    KEEPER_INTERNAL_TICK_MS: Bun.env.KEEPER_INTERNAL_TICK_MS,
     KEEPER_DRY_RUN: Bun.env.KEEPER_DRY_RUN,
     SWAP_SLIPPAGE_BPS: Bun.env.SWAP_SLIPPAGE_BPS,
     LIQUIDITY_SLIPPAGE_BPS: Bun.env.LIQUIDITY_SLIPPAGE_BPS,

@@ -20,8 +20,8 @@ import { bumpHoldCounter, markCooldown, resetHoldCounter, readHoldCounter } from
 import { tick } from "../engine";
 import { env } from "../env";
 import { execute } from "../executor";
-import { decisionToSignalText, signal } from "../ingest";
-import { rewrite } from "../narrator";
+import { decisionToSignalText, signal, type WireSource } from "../ingest";
+import { rewriteAction, rewriteSignal, rewriteThought } from "../narrator";
 import { ACTUATING, type Decision } from "../policies/types";
 import { requireBearer } from "./auth";
 
@@ -60,14 +60,16 @@ export async function runScan(opts: ScanRunOpts): Promise<ScanResponse> {
   let actuated = false;
   let dryRun = false;
 
-  // Always emit thoughts to the agent feed first — they reflect the
-  // brain's per-tick reasoning regardless of whether we actuate.
+  // Always emit thoughts to the agent feed. Raw goes immediate (so
+  // /scan returns fast and the feed never goes silent if Claude lags),
+  // polished thought rewrite supersedes via fire-and-forget.
+  const thoughtRecent = result.thoughts.map(decisionToSignalText);
   for (const t of result.thoughts) {
     if (t.action === "thought") {
-      // Fire-and-forget; failures are logged but don't fail the scan.
       void signal(decisionToSignalText(t)).catch((e) => {
         console.warn("[scan] thought ingest failed:", (e as Error).message);
       });
+      void narrateThoughtAsync(t, thoughtRecent);
     }
   }
 
@@ -118,24 +120,33 @@ export async function runScan(opts: ScanRunOpts): Promise<ScanResponse> {
       // signal() resolves with {ok:false} on transport errors instead
       // of rejecting, so we await + check ok explicitly to surface
       // backend-down conditions in the keeper log.
+      // Build sources for this actuation tx — frontend groups our
+      // narrated entry with the indexer's kind:"action" entries by
+      // tx hash so they render as one logical event.
+      const actuationSources = !exec.dryRun ? [
+        { kind: "basescan" as const, label: "rebalance tx", tx: exec.txHash },
+        { kind: "uniswap" as const, label: "Uniswap V3/V4 SDK consult", url: "https://developers.uniswap.org/docs/liquidity/overview" },
+      ] : undefined;
       for (const line of exec.consultations) {
-        void signal(`[uniswap-sdk] ${line}`).then((r) => {
+        const rawConsult = `[uniswap-sdk] ${line}`;
+        void signal(rawConsult, { sources: actuationSources }).then((r) => {
           if (!r.ok) console.warn(`[scan] consultation ingest failed (status=${r.status}): ${r.error}`);
         });
+        // Polished signal-lane rewrite for each consultation.
+        void narrateSignalAsync("uniswap-sdk", line, [
+          ...result.thoughts.map(decisionToSignalText),
+        ], actuationSources);
       }
-      void signal(decisionToSignalText(result.chosen)).then((r) => {
+      void signal(decisionToSignalText(result.chosen), { sources: actuationSources }).then((r) => {
         if (!r.ok) console.warn(`[scan] raw chosen ingest failed (status=${r.status}): ${r.error}`);
       });
-      // Narrator runs in the background; on success it overwrites with the
-      // polished version. /scan doesn't await it. The consultations are
-      // included in the recent-decisions context so the polished output
-      // can quote them.
-      const recentForNarrator = [
+      // Action-lane rewrite for the chosen actuating decision.
+      const recentForAction = [
         ...result.thoughts.map(decisionToSignalText),
         ...exec.consultations.map((l) => `[uniswap-sdk] ${l}`),
         decisionToSignalText(result.chosen),
       ];
-      void narrateAsync(result.chosen, recentForNarrator);
+      void narrateActionAsync(result.chosen, recentForAction, actuationSources);
     }
     }
   } else if (result.chosen.action === "hold") {
@@ -145,6 +156,9 @@ export async function runScan(opts: ScanRunOpts): Promise<ScanResponse> {
       void signal(decisionToSignalText(result.chosen)).catch((e) => {
         console.warn("[scan] hold ingest failed:", (e as Error).message);
       });
+      // Hold reasons (anti-whipsaw cooldowns, error-downgrades) are
+      // signal-lane: name the integration/cause, quote any timestamps.
+      void narrateSignalAsync(result.chosen.policy, result.chosen.reasoning, thoughtRecent);
     }
   }
 
@@ -164,8 +178,20 @@ export async function runScan(opts: ScanRunOpts): Promise<ScanResponse> {
   };
 }
 
-async function narrateAsync(decision: Decision, recent: readonly string[]): Promise<void> {
-  const polished = await rewrite(decision, { recentDecisions: recent });
+async function narrateActionAsync(decision: Decision, recent: readonly string[], sources?: WireSource[]): Promise<void> {
+  const polished = await rewriteAction(decision, { recentDecisions: recent });
   if (!polished) return;
-  await signal(`[${decision.policy}] ${decision.action}: ${polished}`);
+  await signal(`[${decision.policy}] ${polished}`, { sources });
+}
+
+async function narrateThoughtAsync(decision: Decision, recent: readonly string[]): Promise<void> {
+  const polished = await rewriteThought(decision, { recentDecisions: recent });
+  if (!polished) return;
+  await signal(`[${decision.policy}] ${polished}`);
+}
+
+async function narrateSignalAsync(policy: string, rawText: string, recent: readonly string[], sources?: WireSource[]): Promise<void> {
+  const polished = await rewriteSignal(rawText, policy, { recentDecisions: recent });
+  if (!polished) return;
+  await signal(`[${policy}] ${polished}`, { sources });
 }

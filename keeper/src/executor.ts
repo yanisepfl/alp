@@ -228,18 +228,11 @@ async function executeLive(
     amount1Out: removeAmounts.amount1Out,
     bal0,
     bal1,
-    simulateAtBlock: removeReceipt.blockNumber,
   });
-  // Track which receipt's block is the most recent committed state. The
-  // add simulation pins to this so it sees post-remove (and post-swap,
-  // when there was one) vault state regardless of which RPC node serves
-  // the eth_call.
-  let lastBlock = removeReceipt.blockNumber;
   if (swapStep) {
     steps.push(swapStep.step);
     bal0 = swapStep.newBal0;
     bal1 = swapStep.newBal1;
-    lastBlock = swapStep.blockNumber;
   } else {
     steps.push({
       kind: "skipped",
@@ -291,7 +284,7 @@ async function executeLive(
     args: [pool.lpKey, bal0, bal1, 0n, 0n, addExtra],
     label: "executeAddLiquidity",
     gas: 3_000_000n,
-    simulateAtBlock: lastBlock,
+    skipSimulation: true,
   });
   const addAmounts = parseLiquidityAdded(addReceipt.logs, pool.lpKey);
   steps.push({
@@ -319,11 +312,8 @@ async function maybeSwapToBalance(args: {
   amount1Out: bigint;
   bal0: bigint;
   bal1: bigint;
-  /** Pin swap simulation to this block so it sees the post-remove vault
-   *  state regardless of which RPC node serves the eth_call (Fix B). */
-  simulateAtBlock: bigint;
 }): Promise<{ step: ExecutionResult["steps"][number]; newBal0: bigint; newBal1: bigint; blockNumber: bigint } | null> {
-  const { pool, amount0Out, amount1Out, bal0, bal1, simulateAtBlock } = args;
+  const { pool, amount0Out, amount1Out, bal0, bal1 } = args;
 
   let tokenIn: Address;
   let tokenOut: Address;
@@ -392,7 +382,7 @@ async function maybeSwapToBalance(args: {
     args: [pool.urKey, tokenIn, amountIn, amountOutMin, extra],
     label: "executeSwap",
     gas: 2_000_000n,
-    simulateAtBlock,
+    skipSimulation: true,
   });
   const swapped = parseSwapped(swapReceipt.logs, pool.urKey);
   // Derive post-swap balances from the event. amountIn is exact; amountOut
@@ -504,27 +494,28 @@ async function sendVaultCallReceipt(args: {
   args: readonly unknown[];
   label: string;
   gas: bigint;
-  /** Fix B: pin the simulation read to a specific block. State-at-
-   *  block is consensus-deterministic — every node that has block N
-   *  agrees on its state — so even if the RPC is load-balanced behind
-   *  a slightly-behind node, eth_call at block N is correct. Used
-   *  after executeRemoveLiquidity to make the swap/add simulations
-   *  see the post-remove vault state regardless of which node serves
-   *  the call. Pass `undefined` for first-step calls (remove); pass
-   *  `previousReceipt.blockNumber` for downstream steps. */
-  simulateAtBlock?: bigint;
+  /** Skip the pre-flight simulateContract call. We do this for SWAP and
+   *  ADD steps because they run after a write that changed vault state,
+   *  and viem's simulate issues an eth_call against `latest` which on
+   *  any load-balanced or briefly-behind RPC node reads pre-write state
+   *  and false-positive-reverts. The actual writeContract submits to
+   *  the chain mempool which sequences post-write correctly; we surface
+   *  reverts via `receipt.status` after the fact. REMOVE keeps
+   *  simulation (no preceding write, no race, real bugs surface here). */
+  skipSimulation?: boolean;
 }): Promise<{ transactionHash: `0x${string}`; blockNumber: bigint; logs: readonly ReceiptLog[] }> {
-  // Simulate first so reverts surface with a useful message rather than
-  // viem's generic "transaction reverted". The vault has rich custom
-  // errors (e.g. CapBreached, SlippageMinRequired) that show up here.
-  await publicClient.simulateContract({
-    address: env.VAULT_ADDRESS as Address,
-    abi: vaultAbi,
-    functionName: args.functionName,
-    args: args.args as never,
-    account: account.address,
-    ...(args.simulateAtBlock !== undefined ? { blockNumber: args.simulateAtBlock } : {}),
-  });
+  if (!args.skipSimulation) {
+    // Simulate first so reverts surface with a useful message rather than
+    // viem's generic "transaction reverted". The vault has rich custom
+    // errors (e.g. CapBreached, SlippageMinRequired) that show up here.
+    await publicClient.simulateContract({
+      address: env.VAULT_ADDRESS as Address,
+      abi: vaultAbi,
+      functionName: args.functionName,
+      args: args.args as never,
+      account: account.address,
+    });
+  }
   const hash = await walletClient.writeContract({
     address: env.VAULT_ADDRESS as Address,
     abi: vaultAbi,

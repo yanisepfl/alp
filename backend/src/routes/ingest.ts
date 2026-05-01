@@ -51,7 +51,7 @@ export function buildIngestRoutes(): Hono {
     if (!checkAuth(c.req.header("authorization"))) {
       return c.json({ error: "unauthorized" }, 401);
     }
-    let body: { text?: unknown; ts?: unknown };
+    let body: { text?: unknown; ts?: unknown; sources?: unknown };
     try {
       body = await c.req.json();
     } catch {
@@ -63,7 +63,13 @@ export function buildIngestRoutes(): Hono {
     if (body.ts !== undefined && !isValidIsoTs(body.ts)) {
       return c.json({ error: "bad_ts" }, 400);
     }
-    const id = publishIngestSignal(body.text, body.ts as string | undefined);
+    if (body.sources !== undefined && !isWireSourceArray(body.sources)) {
+      return c.json({ error: "bad_sources" }, 400);
+    }
+    const id = publishIngestSignal(body.text, {
+      ts: body.ts as string | undefined,
+      sources: body.sources as WireSource[] | undefined,
+    });
     return c.json({ id });
   });
 

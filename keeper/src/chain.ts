@@ -4,27 +4,19 @@
 // Write path: WalletClient signing with AGENT_PRIVATE_KEY (the prefunded
 // hot wallet that owns vault.agent()).
 
-import { createPublicClient, createWalletClient, fallback, http } from "viem";
+import { createPublicClient, createWalletClient, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { base } from "viem/chains";
 
 import { env } from "./env";
 
-// We deliberately do not annotate with `: PublicClient` / `: WalletClient`.
-// Base's chain definition includes OP-stack-specific types (deposit txs)
-// that don't match the generic-client return type, which surfaces as a
-// "two different types with this name exist" tsc error when the alias is
-// re-applied. Letting viem infer the concrete type keeps things consistent.
-//
-// Transport layering (Fix A): when BASE_RPC_URL_FALLBACK is set, primary
-// is Alchemy (single dedicated endpoint, no LB-routing staleness across
-// consecutive eth_call/getBalance/etc.) and drpc is the fallback. Without
-// fallback, just use the primary. State-at-block reads we issue from
-// the executor are also pinned via simulateAtBlock (Fix B), so even if
-// fallback ever kicks in we read at a deterministic block.
-const transport = env.BASE_RPC_URL_FALLBACK
-  ? fallback([http(env.BASE_RPC_URL), http(env.BASE_RPC_URL_FALLBACK)])
-  : http(env.BASE_RPC_URL);
+// Single-endpoint transport. Earlier we layered Alchemy primary + drpc
+// fallback, but that re-introduced LB-routing staleness whenever Alchemy
+// hiccupped — fallthrough to drpc on a consistency-sensitive workload
+// (read-after-write within a rebalance bundle) is net-negative. If
+// Alchemy ever flakes during the demo we manually swap BASE_RPC_URL and
+// restart; we do not auto-fall.
+const transport = http(env.BASE_RPC_URL);
 
 export const account = privateKeyToAccount(env.AGENT_PRIVATE_KEY as `0x${string}`);
 

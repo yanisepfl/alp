@@ -9,7 +9,7 @@ import { env, DRY_RUN } from "./env";
 import { account } from "./chain";
 import { readVaultAgent } from "./vault";
 import { healthRouter } from "./routes/health";
-import { scanRouter } from "./routes/scan";
+import { scanRouter, runScan } from "./routes/scan";
 import { forceRouter } from "./routes/force";
 
 const app = new Hono();
@@ -45,6 +45,24 @@ async function bootChecks(): Promise<void> {
 
 console.log(`[keeper] DRY_RUN=${DRY_RUN}, port=${env.KEEPER_PORT}, signer=${account.address}`);
 void bootChecks();
+
+// Optional internal /scan ticker. Used for soak testing when no
+// KeeperHub workflow is yet calling /scan externally. Fires the same
+// runScan that the HTTP route does, so anti-whipsaw and DRY_RUN gates
+// behave identically. Errors are logged and swallowed — never crash
+// the process. KH (Phase 4) replaces this with an external schedule;
+// safe to leave both running.
+if (env.KEEPER_INTERNAL_TICK_MS) {
+  const intervalMs = env.KEEPER_INTERNAL_TICK_MS;
+  console.log(`[keeper] internal tick enabled — firing /scan every ${intervalMs}ms`);
+  setInterval(() => {
+    runScan({}).then((r) => {
+      console.log(`[keeper] internal tick → ${r.chosen.action} (${r.chosen.policy}); pools=${r.meta.pools}, actuated=${r.meta.actuated}`);
+    }).catch((e) => {
+      console.warn(`[keeper] internal tick error: ${(e as Error).message}`);
+    });
+  }, intervalMs);
+}
 
 export default {
   port: env.KEEPER_PORT,

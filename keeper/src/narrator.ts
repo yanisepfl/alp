@@ -1,12 +1,13 @@
-// Claude narrator. Mirrors the backend's Sherpa subprocess pattern from
-// ~/alp/backend/src/agent/sherpa.ts: spawn `claude -p` with no tools, pipe
-// the raw policy reasoning + tick context, capture stdout, return the
-// polished text. Hard timeout via setTimeout + proc.kill so a stuck
-// subprocess never blocks /scan responses.
+// Per-kind Claude narrator. Three lanes — action, thought, signal —
+// each with its own system prompt so the user feed reads as a varied,
+// purposeful narrative rather than the same skeleton filled with
+// different numbers.
 //
-// Phase 2b wires this up so /scan first POSTs the raw decision to /ingest/
-// signal (immediate), then fires this in the background and POSTs the
-// polished version on success. /scan does NOT await this.
+// Wiring: scan.ts and the executor's consultation pipeline pick the
+// rewriter to use based on the entry's classification. All calls run
+// fire-and-forget; raw text is emitted immediately and the polished
+// rewrite supersedes it in the feed when it lands. Hard timeout via
+// proc.kill so a stuck subprocess never blocks /scan.
 
 import { spawn } from "bun";
 
@@ -15,44 +16,138 @@ import type { Decision } from "./policies/types";
 
 const MODEL = Bun.env.SHERPA_MODEL ?? "claude-sonnet-4-6";
 
-const NARRATOR_SYSTEM = `You are the inner voice of an automated liquidity \
-provisioner agent on Base mainnet. You polish a single raw policy decision \
-into one or two sentences of plain text suitable for showing to a non-technical \
-user in a chat feed.
+// ---------- system prompts ----------
 
-Style:
-- 1-2 sentences. No more. No markdown, no bullets, no headers, no code blocks.
-- Speak in first person ("I noticed", "I'm holding off") — you ARE the agent.
-- Quote the live numbers from the input verbatim. Don't round, don't reword.
-- No advice. No predictions. No hype words ("crushing", "great", "huge").
-- If the input describes a "thought" (no action taken), the polished output \
-  must also clearly state nothing was done.
+const ACTION_SYSTEM = `You are the inner voice of an automated liquidity-provisioning agent on Base mainnet. \
+The input describes a real on-chain action your code just executed — a rebalance, a deploy, a withdrawal. \
+Your job is to produce an extremely short user-feed entry announcing what happened.
 
-Respond with the polished sentence(s) only — no preamble, no acknowledgement.`;
+Output requirements:
+- Length: 4-5 words. No exceptions.
+- Format: one sentence ending with a period. No markdown, no emoji, no parens, no quotes, no preamble.
+- Voice: past tense. Active verb leading the sentence. Subject is YOU (the agent).
+- Content: action verb + minimal scope. Pool name only if there is one specific pool. Skip NFT ids, tick numbers, basis points, percentages.
 
-export async function rewrite(
+Good examples:
+- "Rebalanced USDC/USDT."
+- "Recentered ETH/USDC range."
+- "Claimed fees on cbBTC."
+- "Topped up reserves."
+
+Bad examples:
+- "I rebalanced USDC/USDT to a new range." (too long, 8 words)
+- "Position #5047843 was burned." (technical NFT id)
+- "Just did a rebalance." (vague, not specific)
+
+Respond with the sentence only — no prefix, no preamble.`;
+
+const THOUGHT_SYSTEM = `You are the inner voice of an automated liquidity-provisioning agent on Base mainnet. \
+The input describes a per-tick observation your code made but DID NOT act on. Your job is to produce a single short sentence summarizing what you noticed, with quoted live numbers.
+
+Output requirements:
+- Length: maximum 15 words. Aim for 8-12. Single sentence only.
+- Format: one sentence ending with a period. No markdown, no lists, no code blocks, no quotes.
+- Voice: first-person ("I see", "I'm watching", "I noticed"). Active voice preferred.
+- Content: quote concrete numbers verbatim from the input (pool names, percentages, tick values). Convey the observation crisply. No advice, no predictions, no hype ("crushing", "great", "huge"), no apologies. Make clear nothing was acted upon. Skip technical jargon that isn't load-bearing (NFT ids, internal struct names, basis-points unless meaningful).
+
+Good examples:
+- "USDC/USDT holding firm at tick 5, deep inside its [-595, 605] band."
+- "Idle reserves at 31% of TAV — enough to deploy if a pool wanted top-up."
+- "ETH/USDC has only flexed 129 ticks this hour, far less than the live ±600 range."
+
+Bad examples:
+- "I will rebalance USDC/USDT soon." (prediction)
+- "USDC/cbBTC at 47.75% of TAV vs 100% cap, 52.25pp headroom; pool is trading near the in-range portion." (over 15 words, debug shape)
+- "Looking good across the board." (vague, hype-adjacent)
+
+Respond with the sentence only — no prefix, no preamble.`;
+
+const SIGNAL_SYSTEM = `You are the inner voice of an automated liquidity-provisioning agent on Base mainnet. \
+The input describes a system-context signal — typically an external integration consultation (Uniswap SDK, KeeperHub, etc.), a cooldown/hold reason, or a status from another component. Your job is to convey it crisply.
+
+Output requirements:
+- Length: 8-15 words. Single sentence.
+- Format: one sentence ending with a period. No markdown, no lists, no code blocks, no parens beyond inline figures.
+- Voice: first-person where natural. Past or present tense as appropriate.
+- Content: quote concrete numbers verbatim from the input. Name the integration explicitly when relevant ("Uniswap V3 SDK", "anti-whipsaw cooldown"). Be specific about the signal's meaning, not just its label.
+
+Good examples:
+- "Consulted the Uniswap V3 SDK — expects 0.148 USDC + 0.148 USDT for the re-mint."
+- "Holding USDC/USDT in cooldown until 07:22 UTC after the last rebalance."
+- "Uniswap V4 SDK confirmed 50,014,182 liquidity units at the new range."
+
+Bad examples:
+- "Uniswap SDK /create returned amount0=1.477139 USDC, amount1=1.478999 USDT, liquidity=50014182." (debug log, not prose)
+- "External integration responded with parameters." (vague, loses content)
+- "Heard from Uniswap." (no information)
+
+Respond with the sentence only — no prefix, no preamble.`;
+
+// ---------- public rewriters ----------
+
+export async function rewriteAction(
   decision: Decision,
   context: { recentDecisions: readonly string[] },
 ): Promise<string | null> {
-  const userPrompt = buildPrompt(decision, context.recentDecisions);
-  return await runClaude(NARRATOR_SYSTEM, userPrompt);
+  const userPrompt = buildPrompt("ACTION", decision.policy, decision.action, decision.pool, decision.payload, decision.reasoning, context.recentDecisions);
+  return await runClaude(ACTION_SYSTEM, userPrompt);
 }
 
-function buildPrompt(decision: Decision, recent: readonly string[]): string {
+export async function rewriteThought(
+  decision: Decision,
+  context: { recentDecisions: readonly string[] },
+): Promise<string | null> {
+  const userPrompt = buildPrompt("THOUGHT", decision.policy, decision.action, decision.pool, decision.payload, decision.reasoning, context.recentDecisions);
+  return await runClaude(THOUGHT_SYSTEM, userPrompt);
+}
+
+export async function rewriteSignal(
+  rawText: string,
+  policy: string,
+  context: { recentDecisions: readonly string[] },
+): Promise<string | null> {
+  const userPrompt = buildSignalPrompt(policy, rawText, context.recentDecisions);
+  return await runClaude(SIGNAL_SYSTEM, userPrompt);
+}
+
+// ---------- shared internals ----------
+
+function buildPrompt(
+  kind: "ACTION" | "THOUGHT",
+  policy: string,
+  action: string,
+  pool: string | undefined,
+  payload: unknown,
+  rawReasoning: string,
+  recent: readonly string[],
+): string {
   const recentBlock = recent.length === 0
     ? "Recent agent feed: (none)."
-    : `Recent agent feed (oldest first):\n${recent.map((l) => `- ${l}`).join("\n")}`;
-  const payload = decision.payload ? JSON.stringify(decision.payload) : "(none)";
-  return `Raw policy decision:
-- Policy: ${decision.policy}
-- Action: ${decision.action}
-- Pool: ${decision.pool ?? "(global)"}
-- Payload: ${payload}
-- Raw reasoning: ${decision.reasoning}
+    : `Recent agent feed (oldest first):\n${recent.slice(-8).map((l) => `- ${l}`).join("\n")}`;
+  const payloadStr = payload ? JSON.stringify(payload) : "(none)";
+  return `[${kind}] entry to polish:
+- Policy: ${policy}
+- Action: ${action}
+- Pool: ${pool ?? "(global)"}
+- Payload: ${payloadStr}
+- Raw reasoning from policy: ${rawReasoning}
 
 ${recentBlock}
 
-Polish the raw reasoning into a 1-2 sentence first-person feed entry.`;
+Polish the raw reasoning per the system rules.`;
+}
+
+function buildSignalPrompt(policy: string, rawText: string, recent: readonly string[]): string {
+  const recentBlock = recent.length === 0
+    ? "Recent agent feed: (none)."
+    : `Recent agent feed (oldest first):\n${recent.slice(-8).map((l) => `- ${l}`).join("\n")}`;
+  return `[SIGNAL] entry to polish:
+- Source: ${policy}
+- Raw text: ${rawText}
+
+${recentBlock}
+
+Polish per the system rules.`;
 }
 
 async function runClaude(systemPrompt: string, userPrompt: string): Promise<string | null> {

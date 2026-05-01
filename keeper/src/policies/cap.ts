@@ -33,43 +33,39 @@ export async function run(pools: readonly TrackedPool[]): Promise<Candidate[]> {
     }];
   }
 
-  // Build a single composite thought with per-pool headroom — easier to
-  // narrate than N separate thoughts when only one is interesting. Each
-  // pool's read is independently try/catched so one bad adapter doesn't
-  // suppress the rest of the narration.
+  // Silent unless at least one pool is approaching its cap (within 10pp)
+  // or already breaching. Removes feed noise when caps are loose, and
+  // surfaces specifically the pool that matters when one tightens.
+  const APPROACHING_HEADROOM_BPS = 1000; // 10pp = "very close"
   const lines: string[] = [];
+  let approaching = false;
   let maxBreachBps = 0;
   for (const p of pools) {
     let value: bigint | null = null;
     try {
       value = await readPoolValueExternal(p.lpKey);
-    } catch (e) {
-      lines.push(`${p.label}: poolValueExternal read failed (${(e as Error).message.slice(0, 40)}); cap ${(p.maxAllocationBps / 100).toFixed(2)}%.`);
+    } catch {
       continue;
     }
-    const capPct = (p.maxAllocationBps / 100).toFixed(2);
-    if (value === 0n) {
-      // Adapter returned zero. Could be legitimate (position drained) or
-      // a pricing-side gap (V4 native-ETH valued at 0). Surface the gap
-      // qualitatively rather than asserting "0% of TAV".
-      lines.push(`${p.label}: poolValueExternal returned 0 (likely V4/native-ETH pricing gap); cap ${capPct}%, qualitative tracking.`);
-      continue;
-    }
+    if (value === 0n) continue;
     const shareBps = Number((value * 10000n) / tav);
     const headroomBps = p.maxAllocationBps - shareBps;
-    const headroomPp = (headroomBps / 100).toFixed(2);
     const sharePct = (shareBps / 100).toFixed(2);
+    const capPct = (p.maxAllocationBps / 100).toFixed(2);
     if (headroomBps < 0) {
       maxBreachBps = Math.max(maxBreachBps, -headroomBps);
       lines.push(`${p.label}: ${sharePct}% > cap ${capPct}% (BREACH ${(-headroomBps / 100).toFixed(2)}pp).`);
-    } else {
-      lines.push(`${p.label}: ${sharePct}% of TAV vs ${capPct}% cap, ${headroomPp}pp headroom.`);
+    } else if (headroomBps < APPROACHING_HEADROOM_BPS) {
+      approaching = true;
+      lines.push(`${p.label}: ${sharePct}% of TAV approaching ${capPct}% cap (${(headroomBps / 100).toFixed(2)}pp headroom).`);
     }
   }
 
+  if (!approaching && maxBreachBps === 0) return [];
+
   const verdict = maxBreachBps > 0
     ? "would redistribute the breaching pool down (deferred to v2 actuator)."
-    : "all pools within cap, no action.";
+    : "narrowing in on its cap.";
 
   return [{
     priority: 60,

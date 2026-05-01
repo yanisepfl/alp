@@ -148,12 +148,16 @@ export function deliverPrivateToWallet(wallet: string, msg: WireMessage): void {
 // B7 — agent ingest publish entrypoints. Mint id, build WireMessage, dispatch
 // through the existing ring + broadcast/private plumbing. Returns the id so
 // the HTTP handler can echo it back.
-export function publishIngestSignal(text: string, ts?: string): string {
+export function publishIngestSignal(
+  text: string,
+  opts: { ts?: string; sources?: WireSource[] } = {},
+): string {
   const msg: WireMessage = {
     id: ulid(),
-    ts: ts ?? new Date().toISOString(),
+    ts: opts.ts ?? new Date().toISOString(),
     kind: "signal",
     text,
+    ...(opts.sources !== undefined ? { sources: opts.sources } : {}),
   };
   broadcastGlobal(msg);
   return msg.id;
