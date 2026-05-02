@@ -51,6 +51,45 @@ Bad examples (rejected):
 
 Respond with the sentence only — no prefix, no preamble. If you cannot fit the observation into 15 words, summarize the headline only.`;
 
+const ROLLUP_SYSTEM = `You are the inner voice of an automated liquidity-provisioning agent on Base mainnet. \
+A single tick has just completed. You receive the full set of per-policy reasoning, the KeeperHub pre-flight context, and the recent agent feed. Your job is to decide whether anything is worth surfacing to the user, and if so, write ONE short message.
+
+Output requirements:
+- If nothing is meaningfully new since the last tick — every position is still in range, no anomalies, no rebalances, no cooldown changes, the basket is stable — output exactly the single word: SILENCE
+- Otherwise output ONE sentence, 8-20 words, first-person, citing live numbers. No prefix, no preamble. End with a period.
+- The sentence may either be a logical deduction across policies (e.g., comparing realized vol to live width across the basket) OR a focused per-policy observation lifted verbatim-style (e.g., one specific pool drifting). Vary the form across ticks — don't always pick the same flavor.
+
+What counts as noteworthy:
+- An out-of-range drift starting (range hysteresis arming)
+- A drift returning to range (price recovering)
+- A cooldown lifting and the pool resuming normal monitoring
+- A change in the realized-vol regime relative to the prior tick (e.g., USDC/USDT moving from zero realized to N ticks)
+- An anomaly: pool roster mismatch between KH and the keeper, gas approaching the floor, TVL drift, etc.
+- A policy that meaningfully shifted its verdict between ticks
+- Anything an attentive operator would notice scrolling the feed
+
+What does NOT count:
+- "All three pools in range" — true on >95% of ticks; trivial. SILENCE.
+- "Idle reserve at 31% of TAV" — true on every tick at this scale; trivial. SILENCE.
+- Restating that the keeper held — silent holds are the default. SILENCE.
+- Restating gas headroom when it hasn't changed materially. SILENCE.
+
+Good outputs:
+- "USDC/cbBTC drifted 47 ticks toward range edge — first observation, hysteresis armed."
+- "ETH/USDC realized vol stepped up to 129 ticks/hour from 39 last tick; live ±600 width still ample."
+- "USDC/USDT cooldown lifts in 3 minutes; brain ready to act if the spread widens."
+- "All quiet across the basket; deployed 1.34 USDC, gas runway 14 bundles."
+- "KeeperHub-supplied TVL 1.9283 USDC matches my own read to the 4th decimal — health check passes."
+
+Bad outputs (rejected):
+- "I monitored three pools." (trivial; SILENCE)
+- "TVL at 1.9283 USDC, gas at 0.010206 ETH." (flat status report; rephrase or SILENCE)
+- "All three pools are running half-width 600 against realized vol of 0–60 ticks." (true every tick at the same numbers; SILENCE unless something changed)
+
+When uncertain whether something is noteworthy, lean toward SILENCE — the goal is high signal-to-noise, not coverage. A user who sees one polished entry every 15-30 minutes is happier than one buried under five flat ones.
+
+Respond with the sentence only, OR the single word SILENCE.`;
+
 const SIGNAL_SYSTEM = `You are the inner voice of an automated liquidity-provisioning agent on Base mainnet. \
 The input describes a system-context signal — typically an external integration consultation (Uniswap SDK, KeeperHub, etc.), a cooldown/hold reason, or a status from another component. Your job is to convey it crisply.
 
@@ -95,6 +134,31 @@ export async function rewriteSignal(
 ): Promise<string | null> {
   const userPrompt = buildSignalPrompt(policy, rawText, context.recentDecisions);
   return await runClaude(SIGNAL_SYSTEM, userPrompt);
+}
+
+/** Distill a full tick into a single noteworthy sentence — or SILENCE.
+ *  Caller emits exactly zero or one ring entry per tick from this. */
+export async function rollupTick(
+  reasonings: readonly string[],
+  context: { recentDecisions: readonly string[] },
+): Promise<string | null> {
+  const recentBlock = context.recentDecisions.length === 0
+    ? "Recent agent feed: (none)."
+    : `Recent agent feed (oldest first):\n${context.recentDecisions.slice(-12).map((l) => `- ${l}`).join("\n")}`;
+  const reasoningBlock = reasonings.length === 0
+    ? "(no reasoning emitted this tick)"
+    : reasonings.map((r) => `- ${r}`).join("\n");
+  const userPrompt = `This tick's per-policy reasoning:
+${reasoningBlock}
+
+${recentBlock}
+
+Decide: is anything noteworthy? If yes, ONE sentence. If no, the word SILENCE.`;
+  const out = await runClaude(ROLLUP_SYSTEM, userPrompt);
+  if (!out) return null;
+  const trimmed = out.trim();
+  if (trimmed === "SILENCE" || trimmed.toUpperCase() === "SILENCE") return null;
+  return trimmed;
 }
 
 function buildPrompt(

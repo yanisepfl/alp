@@ -15,7 +15,7 @@ ALP is a single-deposit USDC vault that runs a diversified basket of concentrate
 Here's how:
 
 1. You deposit USDC — into a single ERC4626 vault on Base. The vault holds CL positions across whitelisted pools (USDC/USDT V3, USDC/cbBTC V3, ETH/USDC V4 with hooks) and accrues fees back to the share price. One token, one decision — you never touch the individual pools.
-2. ALP watches and reasons — the off-chain keeper runs a 5-policy decision engine on every tick (range drift, anti-whipsaw cooldowns, realized volatility, idle reserve, cap pressure). Each policy emits a real-signal narration — quoting actual numbers, not vibes — into a Sherpa chat surface you can ask questions of.
+2. ALP watches and reasons — the off-chain keeper runs a 5-policy decision engine on every tick (range drift, anti-whipsaw cooldowns, realized volatility, idle reserve, cap pressure). Claude narrators curate the keeper's reasoning into a Sherpa chat surface — quoting actual numbers, not vibes — that you can ask questions of.
 3. KeeperHub orchestrates — three KeeperHub workflows drive the loop: a polling workflow hydrates the brain with fresh chain context every 5 minutes and gates rebalances on a dynamic gas floor; a reactive workflow audits every on-chain rebalance with a basket-wide health snapshot; a manual-trigger workflow is the operator override.
 4. The vault actuates — when a rebalance is warranted, the keeper consults Uniswap's V3 + V4 SDKs for optimal mint params, then signs `vault.executeRemoveLiquidity → maybe-swap → executeAddLiquidity` as the vault's `agent` role. The vault routes through whitelisted adapter contracts to the V3 NonfungiblePositionManager and V4 PositionManager.
 
@@ -46,9 +46,9 @@ You deposit once, the basket runs itself.
         │  Keeper (Bun + Hono, TypeScript)                           │
         │                                                            │
         │  • 5-policy decision engine (range / anti-whipsaw /        │
-        │    vol / idle / cap), each emitting real-signal narration  │
-        │  • Per-kind Claude narrator polishes every entry           │
-        │    (4-5 word actions, ≤15 word thoughts, ~10 word signals) │
+        │    vol / idle / cap), actuates or holds each tick          │
+        │  • Claude narrators curate: action on actuate, rollup or   │
+        │    SILENCE on hold, signal for external integrations       │
         │  • Uniswap V3 + V4 SDK consultation for mint sizing        │
         │  • Anti-whipsaw cooldowns (sqlite-persisted)               │
         │  • viem signs as vault.agent()                             │
@@ -92,6 +92,18 @@ The keeper, backend, and KeeperHub workflows are independently deployable but sp
 7. **Audit** — `alp-post-rebalance`'s Blockchain Event trigger detects `vault.LiquidityAdded` within ~8 seconds. It reads `vault.poolValueExternal()` for all three pools in a single Multicall3 call (`web3/batch-read-contract`), sums the deployed total in-workflow (`math/aggregate`), then POSTs the basket-wide audit to the keeper. KeeperHub provides a second pair of eyes on every actuation.
 
 The Uniswap stack is central to this flow: the V3 + V4 SDKs handle all position math, the Trading API handles swap routing and calldata generation, and the V3/V4 PositionManager contracts execute the on-chain mint/burn. The keeper never reimplements any Uniswap logic.
+
+## Agent Feed Narration
+
+A 5-policy engine across three pools produces a lot of raw reasoning per tick — surfacing it unfiltered would bury the user under spam. ALP curates everything into a high-signal feed through three Claude narrator personas, each with its own voice and triggering condition:
+
+| Narrator | Fires when | Output |
+|---|---|---|
+| **Action** | The keeper just submitted a transaction | One past-tense sentence, 4-5 words ("Rebalanced USDC/USDT.") |
+| **Rollup** | A tick finished without actuating (the common case) | Either one 8-20 word sentence — a logical deduction across policies, or a focused observation lifted from one — *or* `SILENCE`, in which case nothing is emitted at all. The rollup sees all five policies' reasoning, the KeeperHub pre-flight context, and the recent feed, and decides whether anything is worth surfacing. |
+| **Signal** | An external integration speaks: KeeperHub post-rebalance audit, inline Uniswap-SDK consult during a rebalance, low-gas alert | One 8-15 word sentence quoting concrete numbers ("Uniswap V3 SDK expects 0.148 USDC + 0.148 USDT for the re-mint.") |
+
+The rollup prompt explicitly leans toward `SILENCE` — a user who sees one polished entry per 15-30 minutes is happier than one buried under five flat status reports. Narration runs in `claude -p` subprocesses after the tx, never blocking on-chain actuation.
 
 ## Security Model
 

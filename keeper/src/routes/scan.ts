@@ -1,11 +1,10 @@
 import { Hono } from "hono";
 
-import { bumpHoldCounter, markCooldown, resetHoldCounter, readHoldCounter } from "../db";
+import { bumpHoldCounter, markCooldown, resetHoldCounter, readHoldCounter, recentRingTexts } from "../db";
 import { tick } from "../engine";
-import { env } from "../env";
 import { execute } from "../executor";
 import { decisionToSignalText, signal, type WireSource } from "../ingest";
-import { rewriteAction, rewriteSignal, rewriteThought } from "../narrator";
+import { rewriteAction, rollupTick } from "../narrator";
 import { ACTUATING, type Decision } from "../policies/types";
 import { readTotalAssets } from "../vault";
 import { requireBearer } from "./auth";
@@ -53,23 +52,25 @@ export interface ScanResponse {
 export async function runScan(opts: ScanRunOpts): Promise<ScanResponse> {
   const result = await tick(opts);
 
+  // Build the KH-context line as part of the rollup input rather than
+  // emitting it as its own ring entry.
+  const khLines: string[] = [];
   if (opts.khContext) {
     const c = opts.khContext;
     let ownTvl: bigint | null = null;
     if (c.tav) {
-      try { ownTvl = await readTotalAssets(); } catch { /* skip cross-check */ }
+      try { ownTvl = await readTotalAssets(); } catch { /* skip */ }
     }
-
     const parts: string[] = [];
     if (c.tav) {
       const khTvl = BigInt(c.tav);
-      parts.push(`TVL ${(Number(khTvl) / 1e6).toFixed(4)} USDC`);
+      parts.push(`KH-supplied TVL ${(Number(khTvl) / 1e6).toFixed(4)} USDC`);
       if (ownTvl !== null) {
         const diff = ownTvl > khTvl ? ownTvl - khTvl : khTvl - ownTvl;
         const diffBps = Number((diff * 10000n) / (khTvl === 0n ? 1n : khTvl));
         parts.push(diffBps <= 1
-          ? `cross-check ✓ matches own read of ${(Number(ownTvl) / 1e6).toFixed(4)} USDC`
-          : `⚠ diverges from own read of ${(Number(ownTvl) / 1e6).toFixed(4)} USDC by ${diffBps}bps`);
+          ? `cross-check ✓ matches keeper's own read`
+          : `⚠ diverges from keeper's own read by ${diffBps}bps`);
       }
     }
     if (c.agentEth) parts.push(`agent gas ${(Number(c.agentEth) / 1e18).toFixed(6)} ETH`);
@@ -77,25 +78,15 @@ export async function runScan(opts: ScanRunOpts): Promise<ScanResponse> {
       const ownCount = result.pools.length;
       const khCount = c.poolKeys.length;
       parts.push(khCount === ownCount
-        ? `pool roster ✓ ${khCount} active`
+        ? `KH-supplied pool roster matches (${khCount})`
         : `⚠ pool roster diverges: KH ${khCount} vs keeper ${ownCount}`);
     }
-    if (parts.length > 0) {
-      const summary = `KeeperHub pre-tick (source=${c.source ?? "kh"}): ${parts.join("; ")}.`;
-      void narrateSignalAsync("kh-context", summary, []);
-    }
+    if (parts.length > 0) khLines.push(`[kh-context] ${parts.join("; ")}.`);
   }
 
   const txs: string[] = [];
   let actuated = false;
   let dryRun = false;
-
-  const thoughtRecent = result.thoughts.map(decisionToSignalText);
-  for (const t of result.thoughts) {
-    if (t.action === "thought") {
-      void narrateThoughtAsync(t, thoughtRecent);
-    }
-  }
 
   if (ACTUATING.has(result.chosen.action)) {
     if (!result.chosenContext) {
@@ -131,27 +122,37 @@ export async function runScan(opts: ScanRunOpts): Promise<ScanResponse> {
         if (result.chosen.pool) markCooldown(result.chosen.pool, result.chosen.action, exec.txHash);
         resetHoldCounter();
 
+        // Actuation gets exactly one feed entry: the action narration. The
+        // tx and Uniswap-SDK consult appear as sources on that single entry
+        // so the integration stays visible without a second debug line.
         const actuationSources = !exec.dryRun ? [
           { kind: "basescan" as const, label: "rebalance tx", tx: exec.txHash },
           { kind: "uniswap" as const, label: "Uniswap V3/V4 SDK consult", url: "https://developers.uniswap.org/docs/liquidity/overview" },
         ] : undefined;
-        for (const line of exec.consultations) {
-          void narrateSignalAsync("uniswap-sdk", line, thoughtRecent, actuationSources);
-        }
         const recentForAction = [
-          ...thoughtRecent,
-          ...exec.consultations.map((l) => `[uniswap-sdk] ${l}`),
+          ...result.thoughts.map(decisionToSignalText),
+          ...exec.consultations,
           decisionToSignalText(result.chosen),
         ];
         void narrateActionAsync(result.chosen, recentForAction, actuationSources);
       }
     }
-  } else if (result.chosen.action === "hold") {
-    const consecutive = bumpHoldCounter();
-    const shouldNarrate = env.SHERPA_NARRATE_HOLDS || consecutive % 5 === 0;
-    if (shouldNarrate) {
-      void narrateSignalAsync(result.chosen.policy, result.chosen.reasoning, thoughtRecent);
-    }
+  } else {
+    // No actuation this tick. Roll up everything the engine reasoned about
+    // (per-policy thoughts, anti-whipsaw holds, KH context) and let the
+    // narrator decide whether anything is worth saying. Returns null →
+    // emit nothing.
+    if (result.chosen.action === "hold") bumpHoldCounter();
+    const reasonings: string[] = [
+      ...khLines,
+      ...result.thoughts.map(decisionToSignalText),
+      decisionToSignalText(result.chosen),
+    ];
+    const recent = recentRingTexts(12);
+    void (async () => {
+      const polished = await rollupTick(reasonings, { recentDecisions: recent });
+      if (polished) await signal(polished);
+    })();
   }
 
   const decisions = [...result.thoughts, result.chosen];
@@ -173,17 +174,5 @@ export async function runScan(opts: ScanRunOpts): Promise<ScanResponse> {
 async function narrateActionAsync(decision: Decision, recent: readonly string[], sources?: WireSource[]): Promise<void> {
   const polished = await rewriteAction(decision, { recentDecisions: recent });
   const text = polished ? `[${decision.policy}] ${polished}` : decisionToSignalText(decision);
-  await signal(text, { sources });
-}
-
-async function narrateThoughtAsync(decision: Decision, recent: readonly string[]): Promise<void> {
-  const polished = await rewriteThought(decision, { recentDecisions: recent });
-  const text = polished ? `[${decision.policy}] ${polished}` : decisionToSignalText(decision);
-  await signal(text);
-}
-
-async function narrateSignalAsync(policy: string, rawText: string, recent: readonly string[], sources?: WireSource[]): Promise<void> {
-  const polished = await rewriteSignal(rawText, policy, { recentDecisions: recent });
-  const text = polished ? `[${policy}] ${polished}` : `[${policy}] ${rawText}`;
   await signal(text, { sources });
 }

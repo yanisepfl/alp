@@ -34,17 +34,31 @@ postRebalanceRouter.post("/", async (c) => {
   const eventName = body.event?.eventName ?? "rebalance event";
 
   let verified = false;
+  let receiptError: string | null = null;
   if (tx && /^0x[0-9a-fA-F]{64}$/.test(tx)) {
     try {
       const receipt = await publicClient.getTransactionReceipt({ hash: tx as `0x${string}` });
       verified = receipt.status === "success";
+      if (!verified) receiptError = `receipt status=${receipt.status}`;
     } catch (e) {
-      console.warn(`[post-rebalance] receipt lookup failed for ${tx}: ${(e as Error).message}`);
+      receiptError = (e as Error).message;
+      console.warn(`[post-rebalance] receipt lookup failed for ${tx}: ${receiptError}`);
     }
   }
 
+  // Default: KH workflow ran cleanly, receipt confirmed → return 200
+  // silently. The rebalance itself already produced an action narration
+  // and the on-chain LiquidityAdded/Removed entries via the indexer; a
+  // second [kh-event] line saying "audit confirmed" is pure noise.
+  // We only surface a feed entry when the audit actually caught
+  // something the user should know about: a failed receipt, or anomaly
+  // in the basket-state snapshot.
+  const noteworthy = !verified && tx !== undefined;
+  if (!noteworthy) return c.json({ ok: true, verified, narrated: false });
+
   const parts: string[] = [];
-  parts.push(`Audit on vault.${eventName}`);
+  parts.push(`Audit flagged vault.${eventName}`);
+  if (receiptError) parts.push(`receipt issue: ${receiptError}`);
   if (poolKey) parts.push(`triggered by pool ${poolKey.slice(0, 12)}…`);
   if (body.event?.positionId) parts.push(`new position #${body.event.positionId}`);
   const bs = body.basketState;

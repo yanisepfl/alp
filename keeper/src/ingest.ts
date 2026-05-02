@@ -1,3 +1,4 @@
+import { pushRecentRingText } from "./db";
 import { env } from "./env";
 import type { Decision } from "./policies/types";
 
@@ -38,6 +39,7 @@ export async function signal(text: string, opts: SignalOpts = {}): Promise<Inges
       return { ok: false, status, error: errBody };
     }
     const respBody = (await res.json()) as { id?: string };
+    pushRecentRingText(text);
     return { ok: true, status, id: respBody.id };
   } catch (e) {
     return { ok: false, status: 0, error: (e as Error).message };

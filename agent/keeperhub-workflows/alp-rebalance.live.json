@@ -3,7 +3,7 @@
   "exportedAt": "2026-05-02T21:15:35.014Z",
   "workflow": {
     "name": "alp-rebalance",
-    "description": "Polling workflow. Every 5 minutes KeeperHub freshly hydrates the brain with chain context: TVL via vault.totalAssets(), the active pool roster via vault.getActivePools(), the agent's ETH balance, and the current L2 gas price from Base's gas oracle. A Condition node short-circuits to a log-only branch when the agent's gas can't cover ≥ 2 rebalance bundles at the live gas price (dynamic floor — scales with L2 congestion). Otherwise the workflow POSTs the chain reads to the keeper's /scan endpoint as pre-flight context, where they're cross-checked against the keeper's own observation. A second Condition branches on whether the keeper actuated, posting the outcome (\"fired\" or \"held\") back to /log-tick for narration. KeeperHub is the data plane and the safety gate, not just a cron."
+    "description": "Runs every 5 minutes. KeeperHub reads vault TVL, the active pool list, the agent ETH balance, and the current Base gas price, then sends them to the keeper's /scan endpoint. A Condition node skips the call when the agent does not have enough gas for 2 rebalance bundles. The outcome (fired or held) is posted back to /log-tick."
   },
   "nodes": [
     {

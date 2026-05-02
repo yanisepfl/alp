@@ -44,7 +44,7 @@ function tokenSymbol(addr: Address): string {
 function defaultProfile(token0: Address, token1: Address): VolatilityProfile {
   const stables = new Set(["USDC", "USDT", "DAI"]);
   if (stables.has(tokenSymbol(token0)) && stables.has(tokenSymbol(token1))) return "stable";
-  return "mid";
+  return "low";
 }
 
 const V4_ADAPTER: Address = "0xB6871C8cd995fF015DBa7373b371426E80cBBCF0";

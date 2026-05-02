@@ -3,7 +3,7 @@
   "exportedAt": "2026-05-02T21:15:35.326Z",
   "workflow": {
     "name": "alp-demo-rebalance",
-    "description": "Operator-triggered force rebalance for demo recordings and on-call interventions. Manual trigger fires immediately when the dashboard's Run now button is pressed, hitting the keeper's /force?pool=<key> endpoint which bypasses anti-whipsaw cooldown and synthesizes an immediate rebalance Decision for the targeted pool. Used in the demo recording's scene 4 to land a fresh on-chain rebalance live in the agent feed during recording. Targets V3 USDC/USDT by default — the lowest-blast-radius stable-pair pool."
+    "description": "Manual trigger that lets us force a rebalance from the KeeperHub dashboard. Pressing Run now hits the keeper's /force?pool=<key> endpoint, which skips the cooldown gate and rebalances the chosen pool right away. Used to record the demo and as an on-call lever if we need to step in by hand. Defaults to V3 USDC/USDT, the safest pool to touch."
   },
   "nodes": [
     {

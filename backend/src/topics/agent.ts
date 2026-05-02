@@ -368,23 +368,13 @@ function buildActionMessage(evt: AgentActionEvent): WireMessage | null {
  text: `Collected ${a0} ${token0Sym} + ${a1} ${token1Sym} from ${pairLabel}`,
  };
  }
- if (evt.kind === "position_tracked") {
- return {
- id, ts, kind: "action",
- title: "Tracked position",
- category: "edit_position",
- chip, tx,
- text: `Started tracking position #${evt.positionId.toString()} in ${pairLabel}`,
- };
- }
- if (evt.kind === "position_untracked") {
- return {
- id, ts, kind: "action",
- title: "Untracked position",
- category: "edit_position",
- chip, tx,
- text: `Stopped tracking position #${evt.positionId.toString()} in ${pairLabel}`,
- };
+ // PositionTracked / PositionUntracked are pure bookkeeping — every
+ // rebalance fires both, but they tell the user nothing the paired
+ // liquidity_added / liquidity_removed entry doesn't already convey. The
+ // indexer still records them in its cursor + agent ring for audit; we
+ // just don't surface them as feed cards.
+ if (evt.kind === "position_tracked" || evt.kind === "position_untracked") {
+ return null;
  }
  return null;
 }

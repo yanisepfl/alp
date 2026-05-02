@@ -109,3 +109,20 @@ export function resetHoldCounter(): void {
 export function readHoldCounter(): number {
   return (stmtReadHold.get() as { consecutive: number }).consecutive;
 }
+
+// In-memory rolling buffer of texts the keeper has shipped to the backend
+// via signal() / action narrations. Feeds the rollup narrator so it knows
+// what's already been said and can avoid repeating itself across ticks.
+const recentRing: string[] = [];
+const RECENT_RING_MAX = 64;
+
+export function pushRecentRingText(text: string): void {
+  recentRing.push(text);
+  if (recentRing.length > RECENT_RING_MAX) {
+    recentRing.splice(0, recentRing.length - RECENT_RING_MAX);
+  }
+}
+
+export function recentRingTexts(limit = 12): string[] {
+  return recentRing.slice(-limit);
+}

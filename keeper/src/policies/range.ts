@@ -96,23 +96,20 @@ export function run(observations: readonly PositionObservation[]): Candidate[] {
   return out;
 }
 
-/** Re-center on current tick using the existing position's width.
+/** Re-center on current tick using the pool's configured profile width.
  *  Used when /force?pool=<key> targets a pool that the policies didn't
  *  flag for rebalance — synthesizes a Decision so the actuation pipeline
- *  still fires. */
+ *  still fires, and uses the same width formula as a natural rebalance so
+ *  the forced position lands at the configured tightness. */
 export function forceSynthesisCandidate(o: PositionObservation): Candidate {
-  const halfWidth = Math.max(o.pool.tickSpacing, Math.floor((o.tickUpper - o.tickLower) / 2));
-  const roundedHalf = Math.ceil(halfWidth / o.pool.tickSpacing) * o.pool.tickSpacing;
-  const centre = Math.round(o.currentTick / o.pool.tickSpacing) * o.pool.tickSpacing;
-  const lower = centre - roundedHalf;
-  const upper = centre + roundedHalf;
+  const { lower, upper } = computeNewRange(o.pool.profile, o.pool.tickSpacing, o.currentTick);
   return {
     priority: 999,
     decision: {
       action: "rebalance",
       pool: o.pool.lpKey,
       payload: { newRange: { lower, upper } },
-      reasoning: `forced rebalance on ${o.pool.label} pos#${o.positionId}: recentering [${lower}, ${upper}] around tick ${o.currentTick} (width preserved from prior [${o.tickLower}, ${o.tickUpper}]).`,
+      reasoning: `forced rebalance on ${o.pool.label} pos#${o.positionId}: recentering [${lower}, ${upper}] around tick ${o.currentTick} at profile width (was [${o.tickLower}, ${o.tickUpper}]).`,
       policy: "range",
     },
   };
@@ -121,9 +118,9 @@ export function forceSynthesisCandidate(o: PositionObservation): Candidate {
 function widthForProfile(p: VolatilityProfile): { kind: "ticks"; halfWidthTicks: number } | { kind: "pct"; halfWidthPct: number } {
   switch (p) {
     case "stable": return { kind: "ticks", halfWidthTicks: 2 };
-    case "low":    return { kind: "pct", halfWidthPct: 0.05 };
-    case "mid":    return { kind: "pct", halfWidthPct: 0.10 };
-    case "high":   return { kind: "pct", halfWidthPct: 0.20 };
+    case "low":    return { kind: "pct", halfWidthPct: 0.01 };
+    case "mid":    return { kind: "pct", halfWidthPct: 0.05 };
+    case "high":   return { kind: "pct", halfWidthPct: 0.10 };
   }
 }
 
