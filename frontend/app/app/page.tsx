@@ -1800,21 +1800,80 @@ function UserActivityCard() {
 
 /* ---------- Agent chat sidebar ---------- */
 
-// Stylised alps mark for the thinking indicator — triangular peak +
-// 5 streaks above; streaks fade in one-by-one via the
-// `thinking-streak` keyframe in the inline <style>.
+// Frame-by-frame thinking indicator. Cycles /public/thinking/0..5.png
+// then fades+blurs out and holds invisible for a short beat before
+// looping. All 6 frames are rendered stacked (absolute) so the
+// browser preloads them and per-frame swaps are pure opacity flips —
+// no src-swap flash. The wrapper carries the blur/opacity
+// transition that animates the gap between frame 5 and frame 0.
+const THINKING_FRAME_COUNT = 6;
+const THINKING_FRAME_MS = 200;
+const THINKING_BLUR_MS = 320;
+const THINKING_REST_MS = 200;
+
 function ThinkingMark({ size = 22 }: { size?: number }) {
-  const mountain = "rgba(255,255,255,0.18)";
-  const streak = "rgba(255,255,255,0.55)";
+  // 0..5 = visible frame index; 6 = blur-out beat (last frame fades);
+  // 7 = invisible rest beat. Then wraps back to 0.
+  const [step, setStep] = useState(0);
+
+  useEffect(() => {
+    let mounted = true;
+    let timer: number | undefined;
+    const advance = (current: number) => {
+      const next = current >= 7 ? 0 : current + 1;
+      const delay =
+        current === 6 ? THINKING_BLUR_MS :
+        current === 7 ? THINKING_REST_MS :
+        THINKING_FRAME_MS;
+      timer = window.setTimeout(() => {
+        if (!mounted) return;
+        setStep(next);
+        advance(next);
+      }, delay);
+    };
+    advance(0);
+    return () => {
+      mounted = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, []);
+
+  // During the blur+rest beats the wrapper hides; the underlying
+  // image stays on the last visible frame so the blur reads as the
+  // icon dissolving rather than a different frame fading.
+  const hidden = step >= 6;
+  const visibleFrame = step >= 6 ? THINKING_FRAME_COUNT - 1 : step;
+
   return (
-    <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden style={{ display: "block" }}>
-      <line className="thinking-streak streak-1" x1="11.5" y1="4"  x2="13.5" y2="4"  stroke={streak} strokeWidth="1.4" strokeLinecap="round" />
-      <line className="thinking-streak streak-2" x1="14"   y1="6"  x2="16"   y2="6"  stroke={streak} strokeWidth="1.4" strokeLinecap="round" />
-      <line className="thinking-streak streak-3" x1="16.5" y1="4"  x2="18.5" y2="4"  stroke={streak} strokeWidth="1.4" strokeLinecap="round" />
-      <line className="thinking-streak streak-4" x1="13"   y1="8"  x2="15"   y2="8"  stroke={streak} strokeWidth="1.4" strokeLinecap="round" />
-      <line className="thinking-streak streak-5" x1="17"   y1="8"  x2="19"   y2="8"  stroke={streak} strokeWidth="1.4" strokeLinecap="round" />
-      <path d="M5 27 L16 11 L27 27 Z" fill={mountain} />
-    </svg>
+    <div
+      aria-hidden
+      style={{
+        width: size,
+        height: size,
+        position: "relative",
+        display: "inline-block",
+        opacity: hidden ? 0 : 1,
+        filter: hidden ? "blur(6px)" : "blur(0px)",
+        transition: "opacity 240ms ease, filter 240ms ease",
+      }}
+    >
+      {Array.from({ length: THINKING_FRAME_COUNT }, (_, i) => (
+        <img
+          key={i}
+          src={`/thinking/${i}.png`}
+          alt=""
+          draggable={false}
+          style={{
+            position: "absolute",
+            inset: 0,
+            width: "100%",
+            height: "100%",
+            display: "block",
+            opacity: i === visibleFrame ? 1 : 0,
+          }}
+        />
+      ))}
+    </div>
   );
 }
 
@@ -3458,19 +3517,6 @@ export default function AppPage() {
           to   { opacity: 0; transform: translateY(-8px); }
         }
         .app-footer-exit { animation: app-footer-exit 280ms cubic-bezier(0.4, 0, 1, 1) forwards; }
-
-        /* Streaks fade in one-by-one then together fade out. */
-        @keyframes thinking-streak {
-          0%, 8%   { opacity: 0; }
-          30%, 80% { opacity: 1; }
-          100%     { opacity: 0; }
-        }
-        .thinking-streak { opacity: 0; animation: thinking-streak 2.4s ease-in-out infinite; }
-        .thinking-streak.streak-1 { animation-delay: 0ms; }
-        .thinking-streak.streak-2 { animation-delay: 140ms; }
-        .thinking-streak.streak-3 { animation-delay: 280ms; }
-        .thinking-streak.streak-4 { animation-delay: 420ms; }
-        .thinking-streak.streak-5 { animation-delay: 560ms; }
 
         /* Message hover affordances. Copy button + time fade in on
            .chat-msg:hover; the bottom margin grows so the timestamp
