@@ -1,8 +1,4 @@
-// TypeScript port of Uniswap's TickMath + LiquidityAmounts. Bit-for-bit
-// copy of ~/alp/agent/src/liquidityMath.ts — kept under our own tree so
-// the keeper has no implicit cross-module dependency on the Cloudflare
-// Worker package layout. Yanis tested this against v4-core; if his
-// reference changes we re-sync.
+// TypeScript port of Uniswap's TickMath + LiquidityAmounts.
 
 const Q96 = 1n << 96n;
 const MAX_TICK = 887272;

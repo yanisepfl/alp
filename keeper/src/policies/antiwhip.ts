@@ -1,22 +1,10 @@
-// Anti-whipsaw plays two roles:
-//
-// 1. `gate(chosen, bypass)` — applied AFTER the engine picks the highest-
-//    priority Candidate. If the chosen pool has fired within
-//    KEEPER_COOLDOWN_SECONDS, we downgrade the actuating Decision to a
-//    hold with reasoning about the cooldown. /force bypasses this.
-//
-// 2. `runPerPool(pools)` — emits one Candidate per pool that's in
-//    cooldown (priority 65). This makes the cooldown visible in /scan
-//    responses regardless of what range/idle/cap/vol said for that
-//    pool. Demo flow: fire /force on X → cooldown set → next /scan
-//    narrates "anti-whipsaw: pool X cooled until {ts}" alongside the
-//    other pools' normal commentary.
-
 import { isInCooldown } from "../db";
 import { env } from "../env";
 import type { TrackedPool } from "../vault";
 import type { Candidate, Decision } from "./types";
 
+/** Applied after the engine picks. If the chosen pool fired within
+ *  KEEPER_COOLDOWN_SECONDS, downgrade to hold. /force bypasses. */
 export function gate(chosen: Candidate, bypass: boolean): Decision {
   if (bypass) return chosen.decision;
   const pool = chosen.decision.pool;
@@ -35,6 +23,8 @@ export function gate(chosen: Candidate, bypass: boolean): Decision {
   };
 }
 
+/** Emit one hold Candidate per pool currently in cooldown so the
+ *  cooldown is visible in the /scan response alongside other policies. */
 export function runPerPool(pools: readonly TrackedPool[]): Candidate[] {
   const out: Candidate[] = [];
   for (const p of pools) {
@@ -42,11 +32,6 @@ export function runPerPool(pools: readonly TrackedPool[]): Candidate[] {
     if (!cd.blocked) continue;
     const cooledUntilIso = cd.cooledUntil ? new Date(cd.cooledUntil).toISOString() : "(unknown)";
     out.push({
-      // Above cap (60), idle (50), vol (40), and range thoughts (10), so
-      // when a pool is cooled the principal /scan narration is the
-      // cooldown rather than an unrelated idle/cap thought. Below the
-      // actuating priority (70) so a real rebalance Candidate would still
-      // be picked first — the gate then downgrades it.
       priority: 65,
       decision: {
         action: "hold",

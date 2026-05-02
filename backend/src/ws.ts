@@ -28,14 +28,14 @@ const DEBUG = (Bun.env.DEBUG_FRAMES ?? "1") === "1";
 const PING_MS = 30_000;
 const VALID_TOPICS: ReadonlySet<Topic> = new Set(["agent", "vault", "user"]);
 
-// B7 — per-WS-connection token bucket on user_message frames only.
+// per-WS-connection token bucket on user_message frames only.
 // Capacity 20, refill 1 token / 3s ⇒ 20-burst, ~20/min sustained. Subscribe /
 // unsubscribe / ping are not bucketed (cheap, part of the lifecycle).
 const USER_MSG_BUCKET_CAPACITY = 20;
 const USER_MSG_REFILL_MS = 3_000;
 
-// B7 — `kind` discriminator added so Bun.serve's single websocket handler
-// can dispatch public /stream conns vs /ingest/stream agent conns.
+// `kind` discriminator lets Bun.serve's single websocket handler dispatch
+// public /stream conns vs /ingest/stream agent conns.
 export type WsData = { kind: "public"; cid: string };
 type Conn = ServerWebSocket<WsData>;
 
@@ -46,7 +46,7 @@ type ConnState = {
   wallet: string | null;
   lastAgentCursor: string | null;
   pingTimer: ReturnType<typeof setInterval> | null;
-  // B7 — token bucket: tokens are floats so the refill math is monotonic and
+  // token bucket: tokens are floats so the refill math is monotonic and
   // doesn't need a separate timer.
   userMsgTokens: number;
   userMsgLastRefillMs: number;
@@ -58,7 +58,7 @@ export function connectionCount(): number {
   return conns.size;
 }
 
-// B7 — best-effort ping to every public subscriber. Used by the graceful
+// best-effort ping to every public subscriber. Used by the graceful
 // shutdown path to nudge clients toward reconnect before the process exits.
 export function broadcastShutdownPing(): void {
   for (const state of conns.values()) {
@@ -147,7 +147,7 @@ export async function handleMessage(ws: Conn, raw: string | Buffer): Promise<voi
   }
   if (frame === null) {
     if (DEBUG) console.log(`[ws cid=${cid} dir=in] dropped (v!==1)`);
-    return; // silent drop per contract §7
+    return; // silent drop on unsupported version
   }
 
   if (DEBUG) console.log(`[ws cid=${cid} dir=in] ${summarize(frame)}`);
@@ -258,7 +258,6 @@ function handleUnsubscribe(
       detach(state, t);
     }
   }
-  // No ack on unsubscribe — see README "Conventions chosen…"
 }
 
 function handleUserMsg(
@@ -277,16 +276,15 @@ function handleUserMsg(
     sendError(state, "bad_frame", "user_message missing text or clientId");
     return;
   }
-  // B7 — rate-limit AFTER auth/sub/shape checks so a misbehaving client
-  // can't probe auth state through bucket exhaustion behaviour. Bucket
-  // exhaustion emits a recoverable error; the connection stays open.
+  // rate-limit AFTER auth/sub/shape checks so a misbehaving client
+  // can't probe auth state through bucket exhaustion. Bucket exhaustion
+  // emits a recoverable error; the connection stays open.
   if (!consumeUserMsgToken(state)) {
     sendError(state, "rate_limited", "user_message rate limit exceeded; retry shortly");
     return;
   }
-  // B7 — fan out to any connected agent on /ingest/stream BEFORE the
-  // canned-reply path so an agent server (when present) sees the message
-  // exactly once per accepted user_message.
+  // fan out to any connected agent on /ingest/stream so an agent server,
+  // when present, sees the message exactly once per accepted user_message.
   notifyForwardSubscribers({
     wallet: state.wallet,
     clientId: frame.clientId,

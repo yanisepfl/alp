@@ -125,8 +125,7 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
     /// pool". The first pool tracked that contains the token wins; any later
     /// pool that also contains it is skipped during idle-non-base accounting
     /// to avoid double-counting. Cleared in `_untrackPool` if the orphaned
-    /// pool was the valuation source. O(1) lookup — replaces an earlier
-    /// O(N²) scan.
+    /// pool was the valuation source.
     mapping(address => bytes32) internal _valuationPoolByToken;
 
     event AgentUpdated(address indexed previous, address indexed current);
@@ -378,9 +377,9 @@ contract ALPVault is ERC4626, Ownable2Step, Pausable, ReentrancyGuard, IERC721Re
 
         uint160 sqrtPriceX96 = adapter_.getSpotSqrtPriceX96(pool);
 
-        // O(1) attribution: only the designated valuation pool for `nonBase`
-        // attributes idle non-base. Matches the historic semantics of
-        // _alreadyCounted but without the per-call O(N) scan.
+        // Only the designated valuation pool for `nonBase` attributes idle
+        // non-base, so a token paired with multiple pools is never
+        // double-counted in TAV.
         if (_valuationPoolByToken[nonBase] == key) {
             uint256 idleNonBase = _balanceOf(nonBase, address(this));
             if (idleNonBase > 0) {

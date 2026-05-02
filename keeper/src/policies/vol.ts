@@ -1,14 +1,3 @@
-// Volatility policy. Real-signal narrating-only: each tick we record the
-// per-pool current tick into pool_tick_history, then compute the
-// realized tick range over the last 12 observations. That range maps to
-// a recommended position width — narrated against the live position's
-// configured width. v1 never actuates; v2 would advisorily widen/narrow
-// on rebalance.
-//
-// "Warming up" is a true state: until 12 observations are accumulated,
-// the policy says so explicitly rather than emitting a misleading
-// recommendation.
-
 import { appendTick, recentTicks } from "../db";
 import type { PositionObservation } from "../monitor";
 import type { Candidate } from "./types";
@@ -18,8 +7,6 @@ const WINDOW = 12;
 export function run(observations: readonly PositionObservation[]): Candidate[] {
   if (observations.length === 0) return [];
 
-  // De-dupe per-pool: append the current tick once even if there are
-  // multiple positions in the same pool. Pool tick is global to the pool.
   const seenPools = new Set<string>();
   const lines: string[] = [];
 
@@ -44,9 +31,6 @@ export function run(observations: readonly PositionObservation[]): Candidate[] {
       if (t > max) max = t;
     }
     const realized = max - min;
-    // Recommended half-width = realized * 1.0 (covers the observed window
-    // with no margin). Configured half-width approximated from the live
-    // position bounds (assumes symmetric range around current tick).
     const liveHalfWidth = Math.round(((o.tickUpper - o.tickLower) / 2));
     const recommendedHalf = Math.max(o.pool.tickSpacing, realized);
     const drift = liveHalfWidth - recommendedHalf;

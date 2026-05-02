@@ -1,29 +1,3 @@
-// Uniswap SDK consultation — read-side brain layer that informs the
-// keeper's amount/range/slippage math without touching the write path.
-// Replaces the REST Liquidity API wrapper (uniswapApi.ts) after the
-// gateway returned 403/400 even with a valid dashboard key. The SDK
-// computes all Position math locally — no API auth needed.
-//
-// Surface mirrors the prior wrapper so executor.ts plumbing is
-// unchanged: consultDecrease, consultCreate, summariseConsultation,
-// and the LiquidityApiResult shape.
-//
-// What the SDK gives us:
-//   - V3:  Pool + Position from on-chain state, Position.fromAmounts
-//          for optimal mint params, mintAmountsWithSlippage for min
-//          amounts after slippage, burnAmountsWithSlippage for
-//          expected decrease outputs.
-//   - V4:  Same Position shape with hookAddress + tickSpacing.
-//
-// The actuator (vault adapters) still owns the write path. Consultation
-// surfaces in the agent feed and informs narration; v2 will use the
-// recommended amounts as input to vault.executeAddLiquidity sizing.
-//
-// Failure mode: any SDK throw is caught and surfaced as
-// `{ ok: false, error }`. Callers degrade gracefully — narration says
-// "unavailable (sdk error: ...)" and the rebalance proceeds with our
-// hand-rolled local math.
-
 import { Ether, Percent, Token, type Currency } from "@uniswap/sdk-core";
 import { Pool as V3Pool, Position as V3Position, TickMath } from "@uniswap/v3-sdk";
 import { Pool as V4Pool, Position as V4Position } from "@uniswap/v4-sdk";
@@ -41,8 +15,6 @@ export interface LiquidityApiResult<T> {
   data?: T;
   error?: string;
   latencyMs: number;
-  /** 0 for SDK paths (no HTTP). Kept for API parity with the old
-   *  REST wrapper so executor + scan plumbing didn't need to change. */
   status: number;
 }
 
@@ -79,9 +51,6 @@ export interface ConsultationResponse {
   protocol?: "v3" | "v4";
 }
 
-/** ERC20 decimals cache. Each token decimals() read is a single
- *  view call; cached at module level so repeated consultations don't
- *  hit the RPC again. Native-ETH (V4 sentinel 0x0) is hard-coded to 18. */
 const decimalsCache = new Map<string, number>();
 
 async function getDecimals(token: Address): Promise<number> {
@@ -98,9 +67,6 @@ async function getDecimals(token: Address): Promise<number> {
   return decimals;
 }
 
-/** Build a sdk-core `Currency` for a token address. ERC20s become
- *  `Token`; the V4 native-ETH sentinel becomes `Ether.onChain(8453)`
- *  so the V4 SDK accepts it as currency0. */
 async function toCurrency(token: Address, symbol: string): Promise<Currency> {
   if (token === "0x0000000000000000000000000000000000000000") {
     return Ether.onChain(CHAIN_ID);
@@ -120,10 +86,6 @@ function sym(addr: Address): string {
   return SYMBOL[addr.toLowerCase()] ?? addr.slice(0, 8);
 }
 
-/** Read V3 pool spot state needed to construct the SDK Pool entity.
- *  Single composite call: get the pool address from the factory, then
- *  read slot0 + liquidity off the pool contract.
- */
 async function readV3PoolState(pool: TrackedPool): Promise<{
   sqrtPriceX96: bigint;
   tick: number;
@@ -152,9 +114,6 @@ async function readV3PoolState(pool: TrackedPool): Promise<{
   return { sqrtPriceX96: slot0[0], tick: slot0[1], liquidity, poolAddress };
 }
 
-/** Read V4 pool spot state via PoolManager.extsload. Mirrors the
- *  pattern in monitor.ts — same poolId/slot0 derivation, plus an
- *  extra read for liquidity (offset 3 of the pool struct). */
 async function readV4PoolState(pool: TrackedPool): Promise<{ sqrtPriceX96: bigint; tick: number; liquidity: bigint }> {
   const { encodeAbiParameters, keccak256 } = await import("viem");
   const poolId = keccak256(
@@ -177,9 +136,8 @@ async function readV4PoolState(pool: TrackedPool): Promise<{ sqrtPriceX96: bigin
   const sqrtPriceX96 = slot0Big & ((1n << 160n) - 1n);
   const tickRaw = (slot0Big >> 160n) & tickMask;
   const tick = Number(tickRaw >= 1n << 23n ? tickRaw - (1n << 24n) : tickRaw);
-  // Pool liquidity sits at slot offset 3 (Slot0 packed at 0, fee growth
-  // globals at 1+2, then liquidity uint128). PoolManager stores the
-  // pool struct hashed at keccak(poolId, slot 6); add 3 for liquidity.
+  // Liquidity uint128 sits at slot offset +3 of the Pool struct
+  // (slot0 packed at 0, fee growth globals at 1+2, liquidity at 3).
   const liquiditySlot = (BigInt(slot0Slot) + 3n).toString(16).padStart(64, "0");
   const liquidityRaw = (await publicClient.readContract({
     address: V4_POOL_MANAGER, abi: v4PoolManagerAbi, functionName: "extsload",
@@ -196,8 +154,6 @@ async function buildV3Pool(pool: TrackedPool): Promise<{ pool: V3Pool; tick: num
   const sdkPool = new V3Pool(
     t0, t1, pool.fee,
     state.sqrtPriceX96.toString(),
-    // Pool needs a non-zero liquidity to validate price/tick bounds in
-    // some paths; on-chain liquidity is what we read.
     state.liquidity === 0n ? "1" : state.liquidity.toString(),
     state.tick,
   );
@@ -222,15 +178,13 @@ const slippageTolerance = (): Percent =>
 
 export interface ConsultDecreaseArgs {
   pool: TrackedPool;
-  /** Position's tickLower / tickUpper / liquidity at observation time. */
   tickLower: number;
   tickUpper: number;
   liquidity: bigint;
 }
 
-/** Compute expected (amount0, amount1) returned when burning the
- *  position. Wraps Position.burnAmountsWithSlippage for the min path
- *  and Position.amount0/.amount1 for the expected midpoint. */
+/** Expected (amount0, amount1) returned when burning the position,
+ *  with slippage-floor amounts. */
 export async function consultDecrease(args: ConsultDecreaseArgs): Promise<LiquidityApiResult<ConsultationResponse>> {
   const start = performance.now();
   try {
@@ -247,8 +201,6 @@ export async function consultDecrease(args: ConsultDecreaseArgs): Promise<Liquid
     });
 
     const slippage = slippageTolerance();
-    // burnAmountsWithSlippage: minimum out after slippage (the floor we'd pass
-    // as amount0Min/amount1Min). expected midpoint is position.amount0/1.
     const burn = position.burnAmountsWithSlippage(slippage);
     const data: ConsultationResponse = {
       amount0: position.amount0.quotient.toString(),
@@ -280,20 +232,14 @@ export async function consultDecrease(args: ConsultDecreaseArgs): Promise<Liquid
 
 export interface ConsultCreateArgs {
   pool: TrackedPool;
-  /** Target range — what we're rebalancing INTO. */
   tickLower: number;
   tickUpper: number;
-  /** Maximum amounts the keeper has available to commit. The SDK picks
-   *  the optimal split at current spot and returns the amounts that
-   *  ratio-match the new range. */
   maxAmount0: bigint;
   maxAmount1: bigint;
 }
 
-/** Compute optimal mint amounts at the new range given available
- *  balances. Wraps Position.fromAmounts → mintAmountsWithSlippage.
- *  The recommended (amount0, amount1) is what V3/V4 mint will actually
- *  consume; the rest is refunded by V3 (V4 needs exact). */
+/** Optimal mint amounts at the new range given available balances.
+ *  The SDK picks the spot-ratio split; surplus is refunded by V3. */
 export async function consultCreate(args: ConsultCreateArgs): Promise<LiquidityApiResult<ConsultationResponse>> {
   const start = performance.now();
   try {
@@ -341,9 +287,7 @@ export async function consultCreate(args: ConsultCreateArgs): Promise<LiquidityA
   }
 }
 
-/** Render a one-line consultation summary suitable for the agent feed.
- *  Always TRUE — never fabricates numbers. On error, surfaces the
- *  message verbatim so the failure mode is visible to Sherpa users. */
+/** One-line consultation summary suitable for the agent feed. */
 export function summariseConsultation(label: string, r: LiquidityApiResult<ConsultationResponse>): string {
   if (!r.ok) {
     return `Uniswap SDK /${label}: unavailable (${r.error}) — falling back to local math.`;
@@ -357,8 +301,6 @@ export function summariseConsultation(label: string, r: LiquidityApiResult<Consu
     const frac = (big % div).toString().padStart(decimals, "0").slice(0, Math.min(6, decimals));
     return `${whole.toString()}.${frac} ${suffix}`;
   };
-  // We don't know exact decimals here without re-reading; rely on the
-  // symbol map (USDC/USDT=6, cbBTC=8, ETH=18). Fallback to 18.
   const decimalsFor = (s: string | undefined): number =>
     s === "USDC" || s === "USDT" ? 6 : s === "cbBTC" ? 8 : 18;
   const dec0 = decimalsFor(d.symbol0);
@@ -369,9 +311,6 @@ export function summariseConsultation(label: string, r: LiquidityApiResult<Consu
   const min1 = fmt(d.amount1Min, dec1, d.symbol1 ?? "tok1");
   const range = `[${d.tickLower}, ${d.tickUpper}]`;
   const slip = d.slippageBps !== undefined ? `${d.slippageBps}bps slippage` : "";
-  // Spot price reads as "token1 per 1 token0" by SDK convention. Surface
-  // it both ways so narrator can pick the natural direction (e.g. "ETH at
-  // 2547 USDC" rather than "USDC at 0.000392 ETH").
   const priceLine = d.token0Price && d.token1Price && d.symbol0 && d.symbol1
     ? `, spot=${d.token0Price} ${d.symbol1}/${d.symbol0} (${d.token1Price} ${d.symbol0}/${d.symbol1})`
     : "";

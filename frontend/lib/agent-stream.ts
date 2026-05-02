@@ -1,12 +1,6 @@
 // Sherpa chat wire protocol — presentation-free types shared with
-// the backend.
-//
-// Wire is presentation-free: ISO-8601 timestamps, token symbols,
-// tx hashes (no explorer URLs). View layer adapts.
-//
-// Auth: SIWE on connect → session JWT → first WSS frame is
-// `subscribe` with `auth: <jwt>`. Server binds wallet to connection
-// and ignores any client-supplied `wallet` field on user messages.
+// the backend. ISO-8601 timestamps, token symbols, tx hashes (no
+// explorer URLs); the view layer adapts.
 
 export type TokenSymbol = "USDC" | "ETH" | "BTC" | "USDT" | "UNI";
 
@@ -25,8 +19,6 @@ export type WireSource =
 // MUST persist user_message frames with id === clientId so the
 // echoed event reconciles with the optimistic local row by id.
 // `ts` is ISO-8601.
-// `wallet` deliberately omitted from `user` — the server binds the
-// wallet to the connection from the SIWE-bound JWT, not from the body.
 // Action `category` lets surfaces show short, kind-aware titles
 // (e.g. "Swap", "Claim fees") without parsing the body text.
 export type ActionCategory = "swap" | "edit_position" | "claim_fees";

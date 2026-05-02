@@ -6,8 +6,8 @@
 import type { ServerWebSocket, WebSocketHandler } from "bun";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-// B6 — import db FIRST so the sqlite file is created and migrations run before
-// any other module pulls in helpers from "./db".
+// import db FIRST so the sqlite file is created and migrations run before
+// any other module pulls in helpers.
 import { db } from "./db";
 import {
   handleClose, handleMessage, handleOpen, newCid,
@@ -29,14 +29,38 @@ import {
 
 assertIngestSecretConfigured();
 
-// B6 — rehydrate state that doesn't depend on the chain client. The indexer
-// load runs inside startIndexer() in chain mode; mock mode skips it (mock
-// state is meaningless to persist). Agent ring loads regardless so prior
-// scripted signals + chain actions replay correctly.
+// rehydrate state that doesn't depend on the chain client. Indexer state
+// is loaded inside startIndexer() in chain mode; the agent ring loads
+// regardless so prior signals + chain actions replay correctly.
 loadAgentRingState();
 
 const PORT = Number(Bun.env.PORT ?? 8787);
 const CORS_ORIGIN = Bun.env.CORS_ALLOW_ORIGIN ?? "http://localhost:3000";
+
+// Allowlist for the WS upgrade Origin header. Comma-separated patterns;
+// each pattern is matched as either an exact origin or a wildcard
+// hostname suffix when prefixed with "*.". An empty / unset env var
+// disables the check (any origin accepted) — useful in dev.
+const WS_ALLOWED_ORIGINS = (Bun.env.WS_ALLOWED_ORIGINS ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+function originAllowed(origin: string | null): boolean {
+  if (WS_ALLOWED_ORIGINS.length === 0) return true;
+  if (!origin) return false;
+  for (const pat of WS_ALLOWED_ORIGINS) {
+    if (pat === origin) return true;
+    if (pat.startsWith("*.")) {
+      const suffix = pat.slice(1);
+      try {
+        const host = new URL(origin).host;
+        if (host.endsWith(suffix.slice(1))) return true;
+      } catch { /* malformed origin */ }
+    }
+  }
+  return false;
+}
 const VAULT_MODE: "chain" | "mock" =
   vaultAddress() && Bun.env.BASE_RPC_URL ? "chain" : "mock";
 const BOOT_TS = Date.now();
@@ -66,7 +90,7 @@ app.get("/health", (c) => {
 });
 app.route("/ingest", buildIngestRoutes());
 
-// B7 — WS data is a discriminated union: public stream cids vs ingest agents.
+// WS data is a discriminated union: public stream cids vs ingest agents.
 // The single Bun.serve websocket handler dispatches by `kind`.
 type AnyWsData = WsData | IngestWsData;
 
@@ -110,6 +134,10 @@ const server = Bun.serve<AnyWsData, never>({
     const url = new URL(req.url);
     if (url.pathname === "/stream") {
       if (shuttingDown) return new Response("server shutting down", { status: 503 });
+      const origin = req.headers.get("origin");
+      if (!originAllowed(origin)) {
+        return new Response("origin not allowed", { status: 403 });
+      }
       const data: WsData = { kind: "public", cid: newCid() };
       const upgraded = server.upgrade(req, { data });
       if (upgraded) return undefined;
@@ -136,10 +164,9 @@ const server = Bun.serve<AnyWsData, never>({
 if (VAULT_MODE === "chain") {
   const addr = vaultAddress()!;
   console.log(`[vault] chain mode: ${addr} via ${Bun.env.BASE_RPC_URL}`);
-  // B3b: backfill the event indexer first so the FIRST vault.snapshot
-  // served already includes chain-derived users / basketEarned30d /
-  // basketApr / apr30d. Falls back gracefully on indexer failure — the B3
-  // headlines (sharePrice, tvl) still come up.
+  // Backfill the event indexer first so the FIRST vault.snapshot served
+  // already includes chain-derived users / basketEarned30d / basketApr /
+  // apr30d. Falls back to chain headlines only on indexer failure.
   void (async () => {
     const client = getPublicClient();
     let indexerOk = false;
@@ -152,14 +179,11 @@ if (VAULT_MODE === "chain") {
       }
     }
     setIndexerEnabled(indexerOk);
-    // B5 — register the chain-action bridge AFTER startIndexer() returns.
-    // The backfill itself is intentionally not bridged (would flood the
-    // priming ring on boot); the bridge picks up incremental events from
-    // every subsequent indexUpToHead tick.
+    // register the chain-action bridge AFTER startIndexer() returns; the
+    // backfill itself is not bridged (would flood the priming ring on
+    // boot). The composition reader subscribes to the same action stream
+    // for cache invalidation, so it must come up after the bridge.
     if (indexerOk) startAgentActionBridge();
-    // B3c — composition reader (allocations + pools). Subscribes to the
-    // same agent-action stream for cache invalidation, so it must come up
-    // after the indexer (and hence after the action-bridge) is wired.
     if (client && indexerOk) startComposition(client, addr);
     await startVaultChainReader();
   })();
@@ -175,11 +199,9 @@ console.log(`  ws://localhost:${server.port}/ingest/stream`);
 console.log(`  http://localhost:${server.port}/health`);
 console.log(`  http://localhost:${server.port}/ingest/{signal,reply}`);
 
-// B7 — graceful shutdown. SIGTERM is what systemd sends on `systemctl stop`;
-// SIGINT is Ctrl-C. On signal: stop accepting new upgrades, send a final
-// ping best-effort, close the db (flushes WAL), exit 0 after a 2s drain
-// (or immediately if no connections). systemd's Restart=on-failure won't
-// re-trigger on exit 0.
+// graceful shutdown: stop accepting new upgrades, send a final ping
+// best-effort, close the db (flushes WAL), exit 0 after a 2s drain
+// (or immediately if no connections).
 function shutdown(signal: string): void {
   if (shuttingDown) return;
   shuttingDown = true;

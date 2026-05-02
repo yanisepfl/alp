@@ -1,14 +1,9 @@
-// Cap-pressure policy. Real-signal narrating-only: every tick we compare
-// each pool's actual share of TAV against its on-chain maxAllocationBps
-// from PoolRegistry. Output is a thought Decision per pool flagging
-// headroom / breach. v1 doesn't actuate — v2 would emit a redistribute
-// Candidate when a pool exceeds its cap.
-
 import type { Candidate } from "./types";
 import { readPoolValueExternal, readTotalAssets, type TrackedPool } from "../vault";
 
+const APPROACHING_HEADROOM_BPS = 1000;
+
 export async function run(pools: readonly TrackedPool[]): Promise<Candidate[]> {
-  const candidates: Candidate[] = [];
   let tav: bigint;
   try {
     tav = await readTotalAssets();
@@ -33,10 +28,6 @@ export async function run(pools: readonly TrackedPool[]): Promise<Candidate[]> {
     }];
   }
 
-  // Silent unless at least one pool is approaching its cap (within 10pp)
-  // or already breaching. Removes feed noise when caps are loose, and
-  // surfaces specifically the pool that matters when one tightens.
-  const APPROACHING_HEADROOM_BPS = 1000; // 10pp = "very close"
   const lines: string[] = [];
   let approaching = false;
   let maxBreachBps = 0;
@@ -64,7 +55,7 @@ export async function run(pools: readonly TrackedPool[]): Promise<Candidate[]> {
   if (!approaching && maxBreachBps === 0) return [];
 
   const verdict = maxBreachBps > 0
-    ? "would redistribute the breaching pool down (deferred to v2 actuator)."
+    ? "would redistribute the breaching pool down (deferred)."
     : "narrowing in on its cap.";
 
   return [{

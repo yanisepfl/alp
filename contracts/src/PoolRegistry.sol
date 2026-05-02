@@ -46,9 +46,10 @@ contract PoolRegistry is Ownable2Step {
 
     address public guardian;
     /// @notice Optional position guard the registry consults before letting
-    /// the guardian remove a pool. Owner-set; default unset preserves the
-    /// original "operational discipline" semantics. When set, `removePool`
-    /// reverts unless the guard reports zero positions for the pool key.
+    /// the guardian remove a pool. Owner-set; when set, `removePool` reverts
+    /// unless the guard reports zero positions for the pool key. When unset
+    /// the guardian is trusted to verify off-chain before calling
+    /// `removePool`.
     address public positionGuard;
 
     mapping(bytes32 => Pool) internal _pools;
@@ -59,7 +60,7 @@ contract PoolRegistry is Ownable2Step {
     /// willing to interact with. Pools whose `hooks` field is non-zero may
     /// only be registered when their hook address is in this set, and the
     /// vault's runtime checks consult the same mapping. The default empty
-    /// set preserves the original "no hooks at all" posture.
+    /// set means hookless pools only.
     mapping(address => bool) public hookAllowed;
 
     event GuardianUpdated(address indexed previous, address indexed current);
@@ -150,8 +151,8 @@ contract PoolRegistry is Ownable2Step {
         if (idx == 0) revert UnknownPool(key);
 
         // If a position guard is registered, refuse removal while it still
-        // sees positions in this pool. Guard is optional — when unset the
-        // historic operational-discipline semantics apply.
+        // sees positions in this pool. Guard is optional — when unset
+        // operational discipline (off-chain checks) is required.
         address guard = positionGuard;
         if (guard != address(0)) {
             uint256 count = IPositionGuard(guard).positionCount(key);
@@ -224,7 +225,7 @@ contract PoolRegistry is Ownable2Step {
         return _poolKeyIndex[key] != 0;
     }
 
-    /// @dev Backwards-compatible alias for `isAddAllowed`.
+    /// @notice Alias for `isAddAllowed`.
     function isWhitelisted(bytes32 key) external view returns (bool) {
         return _poolKeyIndex[key] != 0 && _pools[key].enabled;
     }

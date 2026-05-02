@@ -31,9 +31,9 @@ import {IUniversalRouter} from "../src/interfaces/external/IUniversalRouter.sol"
 ///   Uniswap UniversalRouter (V4-capable)  0x6fF5693b99212Da76ad316178A184AB56D299b43
 ///   Permit2 (canonical)                   0x000000000022D473030F116dDEE9F6B43aC78BA3
 ///
-/// V4 adapter is intentionally omitted from this script: hackathon scope is
-/// V3 liquidity + UR-routed swaps. Add `UniV4Adapter` here once V4 pools on
-/// Base mainnet have meaningful depth.
+/// Mainnet scope is V3 liquidity + UR-routed swaps; the V4 adapter is
+/// covered by the testnet `Deploy.s.sol` script and the local Anvil
+/// bootstrap.
 contract DeployBase is Script {
     address constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
 

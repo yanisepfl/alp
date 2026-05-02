@@ -6,15 +6,13 @@
 // the same data share state without an extra context layer.
 //
 // Snapshot data flows through component-local state (useState +
-// useEffect): the contract is purely push-driven, so there's no HTTP
-// fetch for react-query to manage. Quote/preview endpoints, when
-// added, are the natural home for useQuery.
+// useEffect): the contract is push-driven, so there's no HTTP fetch
+// for react-query to manage.
 //
-// Auth: `useApiWallet` wires wagmi → ApiClient. The connected
-// wallet's lower-cased address is sent on the subscribe frame
-// (trust-on-claim, no SIWE). Disconnects/swaps trigger a forced
-// reconnect so the new principal binds cleanly. See client.ts for
-// the rationale.
+// `useApiWallet` wires wagmi → ApiClient. The connected wallet's
+// lower-cased address is sent on the subscribe frame (trust-on-claim).
+// Disconnects/swaps trigger a forced reconnect so the new principal
+// binds cleanly.
 
 "use client";
 
@@ -43,11 +41,10 @@ const wssUrl = process.env.NEXT_PUBLIC_SHERPA_WSS_URL;
 let _client: ApiClient | null = null;
 
 // Park the wallet here if `setApiWallet` is called before the first
-// hook mounts (rare but possible on fast cookie-rehydration). Drained
-// into createApiClient on first getClient() call.
+// hook mounts. Drained into createApiClient on first getClient() call.
 let _pendingWallet: string | undefined;
 
-export function forceApiReconnect(): void {
+function forceApiReconnect(): void {
   if (typeof window === "undefined") return;
   _client?.forceReconnect();
 }
@@ -188,7 +185,7 @@ export function useApiWallet(): void {
   const prevRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
-    if (!wssUrl) return; // stub mode dormant
+    if (!wssUrl) return;
     const prev = prevRef.current;
     if (prev === cur) return;
     prevRef.current = cur;

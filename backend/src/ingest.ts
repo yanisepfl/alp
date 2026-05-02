@@ -1,21 +1,16 @@
-// B7 — agent ingest seam.
-//
-// The agent server (separate, future track) lives on a private host and
-// connects to this backend over a shared-secret-authenticated channel:
+// Agent ingest seam. The agent server lives on a private host and connects
+// to this backend over a shared-secret-authenticated channel:
 //
 //   - POST /ingest/signal — publish a vault-global signal WireMessage.
 //   - POST /ingest/reply  — publish a private reply WireMessage to a wallet.
 //   - WSS  /ingest/stream — register as a forward subscriber; every accepted
 //                           public user_message is forwarded as a frame.
 //
-// Action WireMessages are NOT publishable here — they continue to come from
-// the chain via the indexer (FE clarification 4: action.tx must be a real
-// on-chain hash). The seam is for signals + replies + user_message forwarding.
+// Action WireMessages are NOT publishable here — they come from the chain
+// via the indexer; action.tx must be a real on-chain hash.
 //
-// Auth: a single shared secret in INGEST_SECRET. Constant-time compare via
-// crypto.timingSafeEqual. No multi-agent role separation; one secret, any
-// number of agent clients (multiple agent processes can subscribe to the
-// forward stream simultaneously).
+// Auth: a single shared secret in INGEST_SECRET, constant-time compared.
+// Multiple agent processes may subscribe to the forward stream concurrently.
 
 import type { ServerWebSocket } from "bun";
 import { timingSafeEqual } from "node:crypto";
@@ -25,8 +20,7 @@ const INGEST_SECRET_RAW = Bun.env.INGEST_SECRET ?? "";
 // `authed` is determined at upgrade time from the ?secret= query param. The
 // ws handler closes the socket with 4001 on `authed: false` immediately
 // after open — accepting then closing surfaces the failure cleanly across
-// all WS clients (some don't expose 401-on-upgrade), and prevents the
-// race that a pending-reject side channel would create.
+// all WS clients (some don't expose 401-on-upgrade).
 export type IngestWsData = { kind: "ingest"; authed: boolean };
 type IngestWs = ServerWebSocket<IngestWsData>;
 
@@ -41,9 +35,8 @@ type ForwardFrame = {
 
 const forwardSubs = new Set<IngestWs>();
 
-// Constant-time compare. Length mismatch short-circuits to false (we still
-// run timingSafeEqual on equal-length buffers to keep the timing profile
-// flat once length is verified).
+// Constant-time compare. Length mismatch short-circuits to false; equal
+// lengths still go through timingSafeEqual to keep the timing flat.
 export function verifyIngestSecret(presented: string): boolean {
   if (typeof presented !== "string" || presented.length === 0) return false;
   if (INGEST_SECRET_RAW.length === 0) return false;
@@ -64,7 +57,6 @@ export function unregisterForwardSubscriber(ws: IngestWs): void {
 // Fan out every accepted public user_message to every connected agent.
 // If no agent is connected, this is a no-op — the user_message still gets
 // the canned-reply fallback from topics/agent.ts:handleUserMessage.
-// No queueing for offline agents (out of scope).
 export function notifyForwardSubscribers(args: {
   wallet: string;
   clientId: string;
@@ -88,7 +80,7 @@ export function notifyForwardSubscribers(args: {
   }
 }
 
-// Boot guard. Required at start, ≥32 chars. Called from index.ts before
+// Boot guard. Required at start, >= 32 chars. Called from index.ts before
 // the server binds.
 export function assertIngestSecretConfigured(): void {
   if (!INGEST_SECRET_RAW || INGEST_SECRET_RAW.length < 32) {

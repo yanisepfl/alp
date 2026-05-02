@@ -1,12 +1,3 @@
-// Bearer-token middleware for /scan and /force. Accepts the token via
-// either Authorization: Bearer <tok> header OR ?token=<tok> query param.
-// The query-param fallback exists for orchestrators (KeeperHub) whose
-// REST API stores headers under a runtime-unreadable schema — putting
-// the token in the URL works around that without weakening auth (still
-// requires constant-time compare against KEEPER_INBOUND_BEARER).
-//
-// Constant-time compare so length-leak-from-string-equality isn't a thing.
-
 import type { Context, Next } from "hono";
 import { timingSafeEqual } from "node:crypto";
 
@@ -18,6 +9,8 @@ function constantTimeMatch(presented: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+/** Accepts the token via Authorization: Bearer <tok> or ?token=<tok>.
+ *  Constant-time compare on both paths. */
 export async function requireBearer(c: Context, next: Next): Promise<Response | void> {
   const authz = c.req.header("authorization");
   if (typeof authz === "string") {

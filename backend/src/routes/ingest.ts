@@ -1,4 +1,4 @@
-// B7 — agent ingest HTTP routes.
+// agent ingest HTTP routes.
 //
 //   POST /ingest/signal  — { text, ts? }              → { id }
 //   POST /ingest/reply   — { wallet, text, replyTo?, sources?, ts? } → { id }

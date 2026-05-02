@@ -1,10 +1,3 @@
-// Position observer. Ports the V3/V4 read patterns from
-// ~/alp/agent/src/monitor.ts onto the keeper's TrackedPool shape.
-//
-// Per-tick output: one PositionObservation per tracked position across all
-// active pools. Range policies consume the in-range/distance fields; vol
-// policies consume the currentTick.
-
 import { encodeAbiParameters, keccak256, type Address } from "viem";
 
 import { npmAbi, v3FactoryAbi, v3PoolAbi, v4PoolManagerAbi, v4PositionManagerAbi } from "./abi";

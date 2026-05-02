@@ -7,11 +7,9 @@ import { createAppKit } from "@reown/appkit/react";
 import { networks, projectId, wagmiAdapter, wagmiConfig } from "@/lib/wagmi";
 
 // Singleton AppKit instance. Created lazily on first client-side
-// mount so the module body is safe to evaluate during SSR (the
-// "use client" boundary still runs server-side once when Next
-// renders the initial HTML, and createAppKit reaches for `window`
-// internally). The `typeof window` guard is the load-bearing
-// piece — `_appKit` itself just dedupes across remounts.
+// mount so the module body is safe to evaluate during SSR — the
+// `typeof window` guard in initializeAppKit is load-bearing because
+// createAppKit reaches for `window` internally.
 let _appKit: ReturnType<typeof createAppKit> | null = null;
 
 export function getAppKit() {

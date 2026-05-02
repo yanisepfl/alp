@@ -1,22 +1,9 @@
-// Per-kind Claude narrator. Three lanes — action, thought, signal —
-// each with its own system prompt so the user feed reads as a varied,
-// purposeful narrative rather than the same skeleton filled with
-// different numbers.
-//
-// Wiring: scan.ts and the executor's consultation pipeline pick the
-// rewriter to use based on the entry's classification. All calls run
-// fire-and-forget; raw text is emitted immediately and the polished
-// rewrite supersedes it in the feed when it lands. Hard timeout via
-// proc.kill so a stuck subprocess never blocks /scan.
-
 import { spawn } from "bun";
 
 import { env } from "./env";
 import type { Decision } from "./policies/types";
 
 const MODEL = Bun.env.SHERPA_MODEL ?? "claude-sonnet-4-6";
-
-// ---------- system prompts ----------
 
 const ACTION_SYSTEM = `You are the inner voice of an automated liquidity-provisioning agent on Base mainnet. \
 The input describes a real on-chain action your code just executed — a rebalance, a deploy, a withdrawal. \
@@ -85,8 +72,6 @@ Bad examples:
 
 Respond with the sentence only — no prefix, no preamble.`;
 
-// ---------- public rewriters ----------
-
 export async function rewriteAction(
   decision: Decision,
   context: { recentDecisions: readonly string[] },
@@ -111,8 +96,6 @@ export async function rewriteSignal(
   const userPrompt = buildSignalPrompt(policy, rawText, context.recentDecisions);
   return await runClaude(SIGNAL_SYSTEM, userPrompt);
 }
-
-// ---------- shared internals ----------
 
 function buildPrompt(
   kind: "ACTION" | "THOUGHT",
@@ -152,11 +135,8 @@ ${recentBlock}
 Polish per the system rules.`;
 }
 
-// Concurrency limiter: each `claude -p` subprocess is ~250MB RSS. With
-// 5+ thoughts + 2 consultations + 1 action per /scan, unbounded concurrency
-// peaks at ~2GB which OOM'd the VM during the soak. Cap at 2 concurrent
-// narrators; the rest queue. Total per-tick narrator wallclock rises (~50s
-// at 5x serial) but stays well inside the 5-min cron window.
+// Cap parallel claude subprocesses; remainder queue. Bounds memory
+// footprint when a /scan tick spawns many narrator calls in parallel.
 const MAX_CONCURRENT_NARRATORS = 2;
 let activeNarrators = 0;
 const narratorQueue: Array<() => void> = [];

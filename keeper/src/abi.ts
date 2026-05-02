@@ -1,6 +1,3 @@
-// Minimal ABIs for the contracts the keeper reads/writes. Trimmed down from
-// ~/alp/agent/src/abi.ts to only the fragments the keeper engine needs.
-
 export const vaultAbi = [
   {
     type: "function", name: "agent", stateMutability: "view",
@@ -111,10 +108,6 @@ export const registryAbi = [
   },
 ] as const;
 
-// Vault event ABIs we parse from receipt logs. Bug 3 fix: trust the
-// event-emitted amounts post-remove/post-swap instead of re-reading
-// vault balances (drpc's load-balanced reads can return stale state
-// across consecutive calls).
 export const vaultEventsAbi = [
   {
     type: "event", name: "LiquidityRemoved",

@@ -1,11 +1,3 @@
-// SQLite via Bun's built-in driver. Schema is created on first open. The DB
-// file lives under ./data/ which is gitignored.
-//
-// Tables:
-//   pool_cooldowns       — anti-whipsaw: when did we last actuate on this pool?
-//   pool_tick_history    — vol policy: rolling tick observations (Phase 2b).
-//   hold_counter         — narration cadence: every Nth consecutive hold posts.
-
 import { Database } from "bun:sqlite";
 import { dirname } from "node:path";
 import { mkdirSync } from "node:fs";

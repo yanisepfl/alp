@@ -37,12 +37,10 @@ import { toast } from "@/lib/toast";
 import { LearnMoreContent, SummaryText } from "@/components/landing-face";
 
 // Sniff wagmi/viem's UserRejectedRequestError — the user clicked
-// reject in their wallet popup. We treat that as silent (no toast)
-// per Phase 7d "user rejection silent". Wagmi/viem wraps the
-// underlying provider error 2-3 levels deep depending on the call
-// path (writeContract → executeContract → request), so walk the
-// `cause` chain rather than checking just one level. Plus a regex
-// on the message catches wallet vendors whose error name varies.
+// reject in their wallet popup. Wagmi/viem wraps the underlying
+// provider error 2-3 levels deep depending on the call path, so walk
+// the `cause` chain rather than checking just one level. The regex
+// fallback catches wallet vendors whose error name varies.
 function isUserRejection(err: unknown): boolean {
   let cur: unknown = err;
   for (let depth = 0; depth < 10 && cur && typeof cur === "object"; depth++) {
@@ -55,10 +53,9 @@ function isUserRejection(err: unknown): boolean {
   return false;
 }
 
-// Pretty-print a wallet address as 0x1234…abcd. Connection is not
-// guaranteed when this runs (wagmi state can transition through
-// "connecting"/"reconnecting" with address undefined), so callers
-// should branch on `isConnected` first.
+// Pretty-print a wallet address as 0x1234…abcd. Callers should
+// branch on `isConnected` first since wagmi can hand back undefined
+// during connecting/reconnecting transitions.
 function shortAddress(addr: string) {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
@@ -72,21 +69,16 @@ function shortAddress(addr: string) {
 // footer below, bento inside) positions against (0, 0, PANEL_W,
 // PANEL_H) and rides the same outer transform.
 //
-// A single right-side sidebar (Sherpa agent OR vault stats, toggled
-// by the tab pill above it) lives in raw viewport space — no
-// transform. It stretches from the panel's right edge plus a gap to
-// the viewport's right edge minus a margin, so on wider screens the
-// sidebar gets more room. CSS clamps width at 0 on narrow viewports
-// (negative calc result), letting the sidebar collapse without a JS
-// breakpoint.
+// The right-side sidebar (Sherpa agent OR vault stats) lives in raw
+// viewport space — no transform — and stretches from the panel's
+// right edge to the viewport's right edge.
 const PANEL_W = 1380;
 const PANEL_H = 780;
 
 // Floating nav design height — measured from the FloatingNav pill
-// (8 + max(button=29, logo=22) + 8 inner padding + 1+1 border).
-// Pulled out as a constant because the sidebar tab pill scales its
-// height to this value via --shell-scale, so the two chrome strips
-// share a baseline + height at every viewport.
+// (8 + max(button=29, logo=22) + 8 inner padding + 1+1 border). The
+// sidebar tab pill scales its height to this value so the two chrome
+// strips share a baseline at every viewport.
 const NAV_DESIGN_HEIGHT = 47;
 
 type PanelLayout = { left: number; top: number; width: number; height: number; scale: number };
@@ -96,13 +88,11 @@ type SidebarTab = "agent" | "stats";
 // FloatingNav / FooterStrip so they can position relative to it.
 const MAIN_PANEL: PanelLayout = { left: 0, top: 0, width: PANEL_W, height: PANEL_H, scale: 1 };
 
-// Landscape filter — colour-preserving, just slightly desaturated and dimmed.
-// Used on the main panel + nav pill so the colour reads through.
+// Landscape filter — colour-preserving, slightly desaturated and dimmed.
 const LANDSCAPE_FILTER = "saturate(0.85) brightness(0.7)";
 
-// LMC-style muted filter — exact match to landing's Scenery muted state
-// (when learnMore = true). Applied to the agent chat sidebar so it
-// reads as a recessed, greyscaled surface vs the colourful main panel.
+// Muted variant — applied to the agent chat sidebar so it reads as a
+// recessed, greyscaled surface vs the colourful main panel.
 const LANDSCAPE_FILTER_MUTED = "grayscale(0.85) saturate(0.35) contrast(0.85) brightness(0.55)";
 
 /* ---------- Static reference (assets, masks, formatters) ---------- */
@@ -133,9 +123,6 @@ const ICONS: Record<string, React.ReactNode> = {
   external: (<><path d="M14 4h6v6" /><path d="M20 4l-9 9" /><path d="M19 13v6H5V5h6" /></>),
 };
 
-// Copy + check icons — user-supplied artwork on a 20×20 viewBox. Both
-// stroke-only so they swap cleanly on `copied`. `currentColor` lets
-// the surrounding button drive the fill.
 function CopyIcon({ size = 14 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 20 20" fill="none" aria-hidden style={{ display: "inline-block", flexShrink: 0 }}>
@@ -153,9 +140,6 @@ function CheckIcon({ size = 14 }: { size?: number }) {
   );
 }
 
-// "New context" icon — user-supplied artwork for the signal card.
-// Document-with-lines mark; opacity-0.4 body + solid corner fold and
-// solid lines so it reads at small sizes against a dark grey panel.
 function NewContextIcon({ size = 13 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden style={{ display: "inline-block", flexShrink: 0 }}>
@@ -168,10 +152,9 @@ function NewContextIcon({ size = 13 }: { size?: number }) {
   );
 }
 
-// Source icons — three rendered styles for the three source kinds.
-// `vault` uses the alps logo (mask), `uniswap` is the unicorn glyph,
-// `basescan` is the stylized B. All grayscale to match the chat. The
-// `vault` kind reuses MASK_STYLE so it tracks logo.png changes.
+// Source icons for the three source kinds. `vault` reuses the alps
+// logo mask, `uniswap` is the unicorn glyph, `basescan` is a
+// stylized B.
 type SourceKind = "vault" | "uniswap" | "basescan";
 
 function SourceIcon({ kind, size = 12 }: { kind: SourceKind; size?: number }) {
@@ -205,11 +188,8 @@ function StrokeIcon({ kind, size = 11 }: { kind: keyof typeof ICONS | string; si
   );
 }
 
-// Filled-icon set used by `CardLabel` pills. Each path uses
-// currentColor (inherited from the SVG `fill="currentColor"` wrapper
-// in `<FilledIcon>`); `fillOpacity` introduces the soft tint passes.
+// Filled-icon set used by `CardLabel` pills.
 const FILLED_ICONS: Record<string, React.ReactNode> = {
-  // Deposit — filled card with a deposit-arrow / lines and chip dots.
   vault: (
     <>
       <path d="M4.75 2C3.23079 2 2 3.23079 2 4.75V13.25C2 14.7692 3.23079 16 4.75 16H13.25C14.7692 16 16 14.7692 16 13.25V4.75C16 3.23079 14.7692 2 13.25 2H4.75Z" fillOpacity="0.4" />
@@ -221,8 +201,6 @@ const FILLED_ICONS: Record<string, React.ReactNode> = {
       <path d="M12.5 16H13.25C13.51 16 13.7616 15.9639 14 15.8965V16.75C14 17.1642 13.6642 17.5 13.25 17.5C12.8358 17.5 12.5 17.1642 12.5 16.75V16Z" />
     </>
   ),
-  // Position — three dim circles + a bright "add" circle (the user
-  // adding a position to the basket).
   position: (
     <>
       <path d="M15.5001 12H13.7501V10.25C13.7501 9.8359 13.4142 9.5 13.0001 9.5C12.586 9.5 12.2501 9.8359 12.2501 10.25V12H10.5001C10.086 12 9.75012 12.3359 9.75012 12.75C9.75012 13.1641 10.086 13.5 10.5001 13.5H12.2501V15.25C12.2501 15.6641 12.586 16 13.0001 16C13.4142 16 13.7501 15.6641 13.7501 15.25V13.5H15.5001C15.9142 13.5 16.2501 13.1641 16.2501 12.75C16.2501 12.3359 15.9142 12 15.5001 12Z" />
@@ -238,8 +216,6 @@ const FILLED_ICONS: Record<string, React.ReactNode> = {
       <path d="M9.00012 12.5H3.75012C3.33612 12.5 3.00012 12.164 3.00012 11.75C3.00012 11.336 3.33612 11 3.75012 11H9.00012C9.41412 11 9.75012 11.336 9.75012 11.75C9.75012 12.164 9.41412 12.5 9.00012 12.5Z" />
     </>
   ),
-  // Performance — chart card: a dim card with a sparkline-style line
-  // crossing it and two dot markers.
   sparkles: (
     <>
       <path d="M3.75 2C2.23079 2 1 3.23079 1 4.75V13.25C1 14.7692 2.23079 16 3.75 16H14.25C15.7692 16 17 14.7692 17 13.25V4.75C17 3.23079 15.7692 2 14.25 2H3.75Z" fillOpacity="0.4" />
@@ -248,7 +224,6 @@ const FILLED_ICONS: Record<string, React.ReactNode> = {
       <path d="M6.75 6C7.164 6 7.5 5.664 7.5 5.25C7.5 4.836 7.164 4.5 6.75 4.5C6.336 4.5 6 4.836 6 5.25C6 5.664 6.336 6 6.75 6Z" />
     </>
   ),
-  // Activity — calendar card with dotted entries.
   stack: (
     <>
       <path fillRule="evenodd" clipRule="evenodd" d="M1.5 4.75C1.5 3.23069 2.73128 2 4.25 2H13.75C15.2687 2 16.5 3.23069 16.5 4.75V13.25C16.5 14.7693 15.2687 16 13.75 16H4.25C2.73128 16 1.5 14.7693 1.5 13.25V4.75Z" fillOpacity="0.4" />
@@ -270,8 +245,6 @@ function FilledIcon({ kind, size = 12 }: { kind: keyof typeof FILLED_ICONS | str
   );
 }
 
-// User-supplied wallet artwork — stays in sync with the connect-wallet
-// nav button on the floating top nav.
 function WalletIcon({ size = 14 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden style={{ display: "inline-block", flexShrink: 0 }}>
@@ -305,9 +278,7 @@ function TokenChip({ entry, size = 18, radius }: { entry: TokenEntry; size?: num
   const r = radius ?? Math.max(3, Math.round(size * 0.26));
   const withMoon = entry.kind === "png" && entry.src.endsWith("/uni.svg");
   // Inner mask sized as a percentage (not rounded px) so the padding
-  // ring stays symmetric at every chip size — at 14px or 16px the
-  // rounded-px version produced uneven sub-pixel offsets that read
-  // as "icon shifted up-right".
+  // ring stays symmetric at every chip size.
   return (
     <span aria-hidden style={{
       width: size, height: size, borderRadius: r, background: entry.color,
@@ -344,8 +315,6 @@ function AlpChip({ size = 18 }: { size?: number }) {
       display: "inline-flex", alignItems: "center", justifyContent: "center",
       flexShrink: 0, lineHeight: 0, verticalAlign: "middle",
     }}>
-      {/* Percentage-sized inner so the mask padding stays exactly
-          symmetric at any chip size — same fix as TokenChip. */}
       <span style={{
         display: "block", width: "65%", height: "65%",
         ...MASK_STYLE,
@@ -370,8 +339,6 @@ function PoolPairChip({ left, right, size = 18 }: { left: TokenEntry; right: Tok
 }
 
 function Card({ children, style, className }: { children: React.ReactNode; style?: React.CSSProperties; className?: string }) {
-  // Mirrors landing-face's Card 1:1 — no backdrop blur, so segments
-  // sit on a flat rgba surface like the How-it-works bento.
   return (
     <div className={className} style={{
       background: "rgba(255,255,255,0.04)",
@@ -397,10 +364,7 @@ function CardLabel({ icon, children }: { icon: keyof typeof ICONS | keyof typeof
       letterSpacing: "0.02em", lineHeight: 1, width: "max-content",
     }}>
       {isFilled ? <FilledIcon kind={icon} size={12} /> : <StrokeIcon kind={icon} size={11} />}
-      {/* Inter at this size has its x-height-center below its
-          line-box-center, so flex-center-aligned text reads as a
-          touch low. A 1px upward nudge lines the visual mid-mark of
-          the lowercase letters with the icon's pixel center. */}
+      {/* 1px upward nudge centres lowercase x-height against the icon. */}
       <span style={{ display: "inline-block", transform: "translateY(-1px)" }}>{children}</span>
     </span>
   );
@@ -512,12 +476,11 @@ function sortPositions(pools: PoolEntry[]): PoolEntry[] {
 const shortenTx = (tx: string) => `${tx.slice(0, 6)}…${tx.slice(-4)}`;
 
 // Agent message feed:
-//   signal  — raw incoming data (price/vol move, fee accrual, etc.).
-//             Standalone: a signal may or may not get acted on.
-//   action  — onchain tx (hash + chip + title). Carries an optional
-//             `thought` lead-in; thoughts only exist tethered to the
-//             action they triggered, never standalone.
-// Plus user/reply for live chat.
+//   signal  — raw incoming data (price/vol move, fee accrual, etc.);
+//             may or may not get acted on.
+//   action  — onchain tx (hash + chip + title). Optional `thought`
+//             lead-in is always tethered to its action.
+//   user/reply — live chat.
 type ActionChip =
   | { type: "single"; token: TokenEntry }
   | { type: "pair"; left: TokenEntry; right: TokenEntry };
@@ -531,7 +494,6 @@ type AgentMessage =
   | { id: string; kind: "reply";  iso: string; text: string; sources?: SourceRef[]; replyTo?: string };
 
 // Pulls the hour-of-day (0–23) from an iso label like "Apr 28 · 14:23".
-// Returns null if the format is unexpected.
 function parseHour(iso: string): number | null {
   const time = iso.split(" · ")[1];
   if (!time) return null;
@@ -540,9 +502,8 @@ function parseHour(iso: string): number | null {
 }
 
 // Builds 24 hour buckets ending at the latest message's hour. Each
-// bucket counts `signal` and `action` messages and dedupes the tokens
-// touched by actions in that hour (used by the tooltip's chip row).
-// User/reply chat is ignored — this is agent-side cadence.
+// bucket counts signal/action messages and dedupes tokens touched by
+// actions. User/reply chat is ignored — this is agent-side cadence.
 type HourBucket = { signals: number; actions: number; tokens: TokenEntry[] };
 function buildHourlyActivity(messages: AgentMessage[]): HourBucket[] {
   const buckets: HourBucket[] = Array.from({ length: 24 }, () => ({ signals: 0, actions: 0, tokens: [] }));
@@ -558,8 +519,8 @@ function buildHourlyActivity(messages: AgentMessage[]): HourBucket[] {
     if (m.kind !== "signal" && m.kind !== "action") continue;
     const h = parseHour(m.iso);
     if (h === null) continue;
-    // Distance backward from lastHour, wrapping mod 24. Bucket index
-    // is (23 - distance) so the latest hour sits at the right edge.
+    // Distance backward from lastHour, wrapping mod 24; latest hour
+    // ends up at index 23 (right edge).
     const dist = (lastHour - h + 24) % 24;
     if (dist > 23) continue;
     const idx = 23 - dist;
@@ -577,15 +538,13 @@ function buildHourlyActivity(messages: AgentMessage[]): HourBucket[] {
   return buckets;
 }
 
-// "MMM D · HH:MM" — what the chat row + hover time render.
+// "MMM D · HH:MM" format used by the chat row + hover time.
 function formatDisplayIso(d: Date): string {
   const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
   const hh = String(d.getHours()).padStart(2, "0");
   const mm = String(d.getMinutes()).padStart(2, "0");
   return `${months[d.getMonth()]} ${d.getDate()} · ${hh}:${mm}`;
 }
-
-function nowIso(): string { return formatDisplayIso(new Date()); }
 
 // Falls back to USDC if the backend ever sends an unknown symbol —
 // keeps the chip from rendering undefined and crashing TokenChip.
@@ -628,10 +587,8 @@ function toAgentMessage(w: WireMessage): AgentMessage {
 /* ---------- Backdrop ---------- */
 
 function PanelLandscape({ muted = false }: { muted?: boolean }) {
-  // zIndex: -1 (stays inside the section's `isolation: isolate`
-  // context) so the panel-scroll above doesn't need its own stacking
-  // context to layer over it — keeps backdrop-filter on cards inside
-  // the scroll area free to sample this image as their backdrop.
+  // zIndex: -1 keeps this inside the section's isolate context so
+  // backdrop-filter on cards inside the scroll area can sample it.
   return (
     <div aria-hidden style={{ position: "absolute", inset: 0, zIndex: -1 }}>
       <Image src="/landscape.png" alt="" fill priority sizes="100vw" style={{
@@ -652,8 +609,8 @@ function FloatingNav({ layout, exiting, muted = false, onBack }: { layout: Panel
       left: layout.left,
       width: layout.width,
       top: layout.top - 14,
-      // Below the main panel's z-index so the panel covers the nav
-      // initially — the slide-up reveals the nav from behind it.
+      // Below the main panel so the slide-up reveals the nav from
+      // behind it.
       zIndex: 1,
     }}>
       <div style={{
@@ -721,8 +678,6 @@ function FloatingNav({ layout, exiting, muted = false, onBack }: { layout: Panel
 
 /* ---------- User cards ---------- */
 
-// Filled "i" — user-supplied artwork. Outer disc at 40% opacity,
-// the glyph at full opacity, both via currentColor.
 function InfoIcon({ size = 12 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden style={{ display: "block", flexShrink: 0, verticalAlign: "middle" }}>
@@ -732,10 +687,9 @@ function InfoIcon({ size = 12 }: { size?: number }) {
   );
 }
 
-// Hover tooltip wrapper. Renders the popover via `createPortal` to
-// `document.body` so it escapes any ancestor `overflow: hidden` (the
-// deposit sub-card has it for the dot-grid clip) and isn't cut off
-// when expanding upward over the input area.
+// Tooltip rendered via portal to document.body so it escapes any
+// ancestor overflow:hidden (the deposit sub-card has it for the
+// dot-grid clip).
 function InfoTip({ label, children }: { label: string; children: React.ReactNode }) {
   const [hover, setHover] = useState(false);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
@@ -791,8 +745,6 @@ function InfoTip({ label, children }: { label: string; children: React.ReactNode
   );
 }
 
-// User-supplied chevron-pair (up + down). Uses currentColor so it
-// inherits the surrounding muted-text shade.
 function SwapVerticalIcon({ size = 12 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden style={{ display: "inline-block", flexShrink: 0, opacity: 0.85 }}>
@@ -814,12 +766,10 @@ function VaultCard() {
   const tvl = vault?.tvl ?? 0;
   const basketApr = vault?.basketApr ?? 0;
 
-  // Live USDC balance for the connected wallet. wagmi's `useBalance`
-  // dropped the ERC20 `token` shortcut in v2, so we read balanceOf
+  // Live USDC balance for the connected wallet. wagmi v2 dropped the
+  // ERC20 `token` shortcut on useBalance, so we read balanceOf
   // directly. Disabled when disconnected so we don't fire RPC reads
-  // against an undefined address. The cached `data` survives the
-  // first refetch so the balance row doesn't flicker between "—" and
-  // the real value.
+  // against an undefined address.
   const balanceQuery = useReadContract({
     address: USDC_ADDRESS,
     abi: usdcAbi,
@@ -840,9 +790,8 @@ function VaultCard() {
     ? formatUnits(balanceQuery.data, USDC_DECIMALS)
     : "0";
 
-  // Parse the input to its on-chain bigint form once. parseUnits
-  // throws on malformed strings; catching keeps the disabled-state
-  // gating clean rather than letting the input crash a render.
+  // parseUnits throws on malformed strings; catching keeps the
+  // disabled-state gating clean rather than crashing the render.
   const parsedAssets: bigint | null = (() => {
     if (num <= 0) return null;
     try {
@@ -853,8 +802,7 @@ function VaultCard() {
   })();
 
   // Allowance read drives the approve-vs-deposit gating below.
-  // Re-runs after `approve` confirms via the receipt watcher's
-  // refetch wired further down.
+  // Refetched by the approve-receipt effect once the tx confirms.
   const allowanceQuery = useReadContract({
     address: USDC_ADDRESS,
     abi: usdcAbi,
@@ -865,9 +813,8 @@ function VaultCard() {
   const allowance: bigint = allowanceQuery.data ?? 0n;
   const needsApprove = parsedAssets !== null && allowance < parsedAssets;
 
-  // Two write hooks — keeps approve and deposit lifecycles
-  // independent so the deposit button can flip cleanly between
-  // "Approve USDC" and "Deposit" as allowance updates.
+  // Two write hooks keep approve and deposit lifecycles independent
+  // so the button can flip cleanly between them as allowance updates.
   const approveTx = useWriteContract();
   const depositTx = useWriteContract();
   const approveReceipt = useWaitForTransactionReceipt({ hash: approveTx.data });
@@ -876,13 +823,10 @@ function VaultCard() {
   // After approve confirms → refetch allowance so the button flips
   // to "Deposit" on its own. After deposit confirms → clear amount;
   // backend pushes the new user.snapshot via its event listener.
-  // Toasts give the user feedback that the tx landed.
   //
   // Dedupe by tx hash: wagmi v2 returns a fresh query-object identity
-  // every render, so listing the query in deps fires the effect on
-  // every re-render where isSuccess is true → spammed toasts. We
-  // toast/refetch only when the receipt's hash differs from the last
-  // one we acted on. refetch is captured by closure and stable.
+  // every render, so we toast/refetch only when the receipt's hash
+  // differs from the last one we acted on.
   const toastedApproveHash = useRef<`0x${string}` | null>(null);
   useEffect(() => {
     if (approveReceipt.isSuccess && approveTx.data && toastedApproveHash.current !== approveTx.data) {
@@ -891,8 +835,6 @@ function VaultCard() {
       void allowanceQuery.refetch();
       void balanceQuery.refetch();
     }
-    // wagmi v2 query objects get fresh identity each render; deps
-    // intentionally exclude allowanceQuery/balanceQuery.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [approveReceipt.isSuccess, approveTx.data]);
   const toastedDepositHash = useRef<`0x${string}` | null>(null);
@@ -940,9 +882,8 @@ function VaultCard() {
     }
   };
 
-  // Exposure chips — leftmost on top, each subsequent chip steps right
-  // with a lower z-index. Hovered chip lifts + scales + reveals its
-  // slug; neighbours stay put. Driven by vault.allocations.
+  // Exposure chips — leftmost on top, each subsequent chip steps
+  // right with a lower z-index. Driven by vault.allocations.
   const exposureTokens: TokenEntry[] = (vault?.allocations ?? []).map((a) => resolveToken(a.token));
   const TOK_SIZE = 16;
   const TOK_OFFSET = 10;
@@ -962,10 +903,7 @@ function VaultCard() {
         <H3>Start earning fees from onchain volume!</H3>
       </div>
 
-      {/* Sub-card 1 — amount input + APY readout. The deposit area
-          (top portion above the divider) carries the dot-grid bg
-          that matches Sherpa's action-summary bubble. The APY row
-          below the divider stays on a flat surface. */}
+      {/* Amount input + APY readout. */}
       <div style={{
         marginTop: 18,
         border: "1px solid rgba(255,255,255,0.06)",
@@ -973,9 +911,8 @@ function VaultCard() {
         overflow: "hidden",
         background: "rgba(255,255,255,0.03)",
       }}>
-        {/* Whole grid segment is a click-target for the input — any
-            blank area focuses it. The USDC chip + Max + input itself
-            still handle their own events first via bubbling. */}
+        {/* Whole grid is a click-target for the input — blank area
+            focuses it; chip/Max/input handle their own events first. */}
         <div
           onClick={() => inputRef.current?.focus()}
           style={{
@@ -1005,10 +942,8 @@ function VaultCard() {
                 fontVariantNumeric: "tabular-nums",
               }}
             />
-            {/* Opaque bg ≈ Vault card #0c0c10 + 0.06 white tint, so
-                the pill matches the Connect wallet button visually
-                without the dot-grid behind sub-card 1 bleeding
-                through a translucent rgba bg. */}
+            {/* Opaque bg matches Connect wallet button without the
+                dot-grid behind sub-card 1 bleeding through. */}
             <span style={{
               display: "inline-flex", alignItems: "center", gap: 7,
               padding: "4px 11px 4px 4px",
@@ -1073,7 +1008,7 @@ function VaultCard() {
         </div>
       </div>
 
-      {/* Sub-card 2 — vault details. Flat bg, no dot grid. */}
+      {/* Vault details. */}
       <div style={{
         marginTop: 10,
         padding: "10px 14px",
@@ -1083,8 +1018,8 @@ function VaultCard() {
         display: "flex", flexDirection: "column", gap: 8,
         fontFamily: "var(--sans-stack)", fontSize: 12,
       }}>
-        {/* Exposure — overlapping token chips. Hovered chip lifts +
-            scales up, neighbours fan outward, tooltip reveals slug. */}
+        {/* Exposure — overlapping token chips; hover lifts the chip
+            and reveals its slug. */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "rgba(255,255,255,0.55)" }}>
             Exposure
@@ -1170,15 +1105,10 @@ function VaultCard() {
         </div>
       </div>
 
-      {/* Full-width primary CTA. Disconnected: triggers the AppKit
-          connect flow. Connected: flips through "Enter an amount"
-          → "Approve USDC" → "Deposit" based on `parsedAssets` and
-          live allowance, with pending labels during in-flight tx. */}
+      {/* Primary CTA. Disconnected → opens AppKit. Connected: flips
+          through Enter amount → Approve USDC → Deposit based on the
+          parsed amount and live allowance. */}
       {(() => {
-        // Phase 7d gating: when disconnected, the original
-        // connect-wallet behaviour stays exactly as before. When
-        // connected, the button label and onClick depend on the
-        // amount/allowance/tx state.
         const ctaLabel = !isConnected
           ? "Connect wallet"
           : approving
@@ -1227,10 +1157,10 @@ function VaultCard() {
   );
 }
 
-// 2 decimals always; scales to K/M/B based on magnitude. Input is
-// raw USD — caller is responsible for unit conversion (e.g. multiply
-// vault.tvl by 1e6 since backend ships it in millions). `signed=true`
-// forces a leading "+" on non-negatives; negatives always carry "−".
+// 2 decimals; scales to K/M/B based on magnitude. Input is raw USD —
+// caller is responsible for unit conversion (e.g. multiply vault.tvl
+// by 1e6 since backend ships it in millions). `signed=true` forces a
+// leading "+" on non-negatives.
 function fmtUsdAdaptive(n: number, signed = false): string {
   const sign = signed ? (n >= 0 ? "+" : "−") : (n < 0 ? "−" : "");
   const abs = Math.abs(n);
@@ -1240,7 +1170,6 @@ function fmtUsdAdaptive(n: number, signed = false): string {
   return `${sign}$${abs.toFixed(2)}`;
 }
 
-// Compact key/value row used in the user-side cards.
 function KvRow({ label, value, valueColor }: { label: string; value: string; valueColor?: string }) {
   return (
     <div style={{
@@ -1253,16 +1182,10 @@ function KvRow({ label, value, valueColor }: { label: string; value: string; val
   );
 }
 
-// Position: current value + ALP shares in a rounded dot-grid sub-
-// card (mirrors the Deposit input field's surface), Deposited /
-// Yield pinned to the card floor on plain dark surface. Outer
-// frame matches VaultCard (dark + 0.08 border) so the segments
-// read as one family.
 // Shares wei → display number. ALPVault uses 12-decimal shares
 // (USDC asset 6 + `_decimalsOffset()` 6). Narrow precision to 1e6
-// via BigInt math before crossing to Number so we don't lose the
-// trailing wei on large balances. If vault decimals ever change,
-// update `ALP_DECIMALS` in lib/contracts.ts and the divisor here.
+// via BigInt before crossing to Number to avoid losing the trailing
+// wei on large balances.
 function sharesToNumber(weiStr: string): number {
   return Number(BigInt(weiStr) / 10n ** 6n) / 1e6;
 }
@@ -1287,11 +1210,6 @@ function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
     }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
         <CardLabel icon="position">Position</CardLabel>
-        {/* Withdraw button always visible; backend's user.snapshot
-            populates the value/shares on connect, and the modal
-            itself carries the disconnected-state CTA via its own
-            "Connect wallet" pill. Position card never prompts for
-            connection — the nav and Deposit card already do. */}
         <button
           type="button"
           onClick={onWithdraw}
@@ -1322,10 +1240,8 @@ function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
         </button>
       </div>
 
-      {/* $ value + ALP chip, sitting directly on the dark Card
-          surface — no wrapping container chrome. Renders zeros when
-          disconnected; the populated values flow in once the user
-          snapshot lands. */}
+      {/* $ value + ALP chip on the dark Card surface. Zeros when
+          disconnected; populates when the user snapshot lands. */}
       <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
         <span style={{
           color: "#fff", fontFamily: "var(--sans-stack)",
@@ -1346,8 +1262,6 @@ function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
         </span>
       </div>
 
-      {/* KvRows pinned to the card floor; Performance is the taller
-          sibling so this just absorbs the height difference. */}
       <div style={{ marginTop: "auto", paddingTop: 14, display: "flex", flexDirection: "column", gap: 6 }}>
         <KvRow label="Deposited" value={fmtUsdAdaptive(totalDeposited)} />
         <KvRow label="PnL" value={fmtUsdAdaptive(pnl, true)} valueColor={accent} />
@@ -1356,23 +1270,15 @@ function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
   );
 }
 
-// Performance: realized APY (Inter), hover-trackable sparkline. Date
-// in top-right swaps to the hovered day so the value/header heights
-// stay constant — no layout shift on hover.
+// Performance: realized APY + hover-trackable sparkline.
 function UserAprCard() {
   const { isConnected } = useAccount();
   const { snapshot: vault } = useVault();
   const { snapshot: user } = useUser();
   const data = vault?.apr30d ?? [];
   const realizedApy = isConnected ? (user?.position?.realizedApyPct ?? 0) : 0;
-  // Wallet disconnected → dashes (no CTA — the Position card next to
-  // us carries the bento row's CTA). When connected, server-side
-  // auth_required indicates a transient backend issue, not a "show
-  // dashes" case for the user.
-  // Same-day deposit → dashes too: realized APY annualized over a
-  // sub-day window is noise (typically rounds to 0.0%), and rendering
-  // it as a number makes the card look broken before there's anything
-  // meaningful to display.
+  // Disconnected → dashes. Same-day deposit → dashes too: realized
+  // APY annualized over a sub-day window is noise.
   const daysHeld = user?.position?.firstDepositTs
     ? (Date.now() - new Date(user.position.firstDepositTs).getTime()) / 86_400_000
     : 0;
@@ -1389,9 +1295,7 @@ function UserAprCard() {
     setHoverIdx(Math.round(ratio * (data.length - 1)));
   };
 
-  // Day index → "MMM D". Last index is today; we walk backward by
-  // (data.length - 1 - i) days from today. Today derives from the
-  // current wall-clock; the date axis rolls forward each day.
+  // Day index → "MMM D"; last index is today, walking backward.
   const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
   const today = new Date();
   const dateForIdx = (i: number) => {
@@ -1407,12 +1311,6 @@ function UserAprCard() {
   const dateLabel = dateForIdx(hoverIdx === null ? Math.max(0, data.length - 1) : hoverIdx);
 
   return (
-    // Same dark family as the sibling cards, but tinted up to the
-    // shade that an rgba(255,255,255,0.03) sub-card creates on top
-    // of #0c0c10 (= rgb(19,19,23) ≈ #131317). Keeps Performance one
-    // step lighter than its neighbours, like a "lifted" tile, while
-    // the dot-grid wash tiles edge-to-edge over the whole surface
-    // without touching any of the card's internal structure.
     <Card style={{
       height: "100%", display: "flex", flexDirection: "column",
       backgroundColor: "rgba(19, 19, 23, 0.65)",
@@ -1442,11 +1340,8 @@ function UserAprCard() {
           {showDash ? "—" : `${value.toFixed(1)}%`}
         </span>
       </div>
-      {/* marginTop matches the gap from the value to the KvRows in
-          Position (chip + gap + KvRow padding) so both cards' second
-          block starts at the same Y. Rounded corners on the chart
-          container so the sparkline's fill area doesn't end with a
-          hard rectangular bottom-right. */}
+      {/* marginTop aligns with Position's second block; rounded
+          corners hide the sparkline fill's bottom-right edge. */}
       <div
         ref={containerRef}
         onMouseMove={handleMove}
@@ -1473,14 +1368,9 @@ function UserAprCard() {
   );
 }
 
-// Withdraw modal — overlays the main panel only (rendered as an
-// absolute child of the panel <section>). backdrop-filter blurs
-// just the panel content underneath, leaving the sidebar/tabs/nav
-// unaffected. Structure mirrors the Deposit (VaultCard) segment 1:1
-// — same outer dark frame, same sub-card with dot-grid input area
-// + divider + summary row, same vault-details sub-card, same grey
-// CTA — only the chip (ALP), the labels, and the math (shares →
-// USDC) flip to withdraw semantics.
+// Withdraw modal — overlays the main panel only (rendered inside
+// the panel section). backdrop-filter blurs just the panel content
+// underneath, leaving the sidebar/tabs/nav sharp.
 function WithdrawModal({ onClose }: { onClose: () => void }) {
   const [amount, setAmount] = useState("");
   const num = Number.parseFloat(amount.replace(/,/g, "")) || 0;
@@ -1493,15 +1383,10 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
   const userShares = user?.position ? sharesToNumber(user.position.shares) : 0; // display only
   const usdcOut = num * sharePrice;
 
-  // Parse the input to wei once and gate the CTA on a wei-to-wei
-  // comparison against user.position.shares. Comparing the parsed
-  // float `num` to a Number-converted balance breaks two ways: (1)
-  // Balance click formerly used toFixed(2) which rounds up, so e.g.
-  // 0.0999 shares → "0.10" → num > userShares → !valid; (2) even
-  // with exact decimals, num and Number(BigInt)/1e12 can drift by
-  // an epsilon. parseUnits throws on malformed strings ("1e9",
-  // "1.2.3") — catch keeps the disabled-state gate honest instead
-  // of crashing the click handler.
+  // Gate the CTA on a wei-to-wei comparison against
+  // user.position.shares — comparing the parsed float to a Number-
+  // converted balance can drift by an epsilon. parseUnits throws on
+  // malformed strings; catch keeps the disabled-state gate honest.
   const parsedShares: bigint | null = (() => {
     if (num <= 0) return null;
     try {
@@ -1519,10 +1404,8 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
   const redeeming = redeemTx.isPending || redeemReceipt.isLoading;
 
   // Backend pushes a fresh user.snapshot once the on-chain Withdraw
-  // event lands; we close the modal and let the position card update
-  // through its existing subscription. Toast confirms the redemption
-  // landed since the modal disappears immediately. Dedupe by hash so
-  // the effect doesn't fire repeatedly on re-renders (see VaultCard).
+  // event lands. The toast confirms the redemption since the modal
+  // disappears immediately. Dedupe by hash (see VaultCard).
   const toastedRedeemHash = useRef<`0x${string}` | null>(null);
   useEffect(() => {
     if (redeemReceipt.isSuccess && redeemTx.data && toastedRedeemHash.current !== redeemTx.data) {
@@ -1587,8 +1470,6 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
           animation: "withdraw-pop 180ms ease-out",
         }}
       >
-        {/* Header — CardLabel on the left (mirrors VaultCard's
-            "Deposit" label) + a quiet close button on the right. */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
           <CardLabel icon="vault">Withdraw</CardLabel>
           <button
@@ -1615,10 +1496,8 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
           <H3>We&rsquo;re sad to see you go.</H3>
         </div>
 
-        {/* Sub-card 1 — withdraw amount + grid bg, mirroring the
-            Deposit input field 1:1. ALP chip replaces USDC, balance
-            is in shares, and the bottom row is "You receive" (USDC
-            equivalent) instead of "Deposit APY". */}
+        {/* Withdraw amount input. ALP chip replaces USDC; balance is
+            in shares; bottom row is "You receive" in USDC. */}
         <div style={{
           marginTop: 18,
           border: "1px solid rgba(255,255,255,0.06)",
@@ -1655,9 +1534,6 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
                   fontVariantNumeric: "tabular-nums",
                 }}
               />
-              {/* ALP chip — mirrors VaultCard's USDC chip exactly:
-                  same opaque #1a1c20 bg, 0.10 border, padding,
-                  radius, font sizing. */}
               <span style={{
                 display: "inline-flex", alignItems: "center", gap: 7,
                 padding: "4px 11px 4px 4px",
@@ -1690,8 +1566,7 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
                 onClick={() => {
                   if (!user?.position) return;
                   // formatUnits → canonical exact decimal that
-                  // parseUnits inverts cleanly. Avoids toFixed
-                  // rounding that produced values > userShares.
+                  // parseUnits inverts cleanly without rounding drift.
                   setAmount(formatUnits(BigInt(user.position.shares), ALP_DECIMALS));
                 }}
                 onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "#fff"; }}
@@ -1727,10 +1602,7 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
           </div>
         </div>
 
-        {/* Sub-card 2 — vault details. Mirrors VaultCard's second
-            sub-card minus the Exposure row (Withdraw doesn't need
-            to surface the vault's basket composition; the Share
-            price + delay + TVL are the relevant context here). */}
+        {/* Vault details — Share price + delay + TVL. */}
         <div style={{
           marginTop: 10,
           padding: "10px 14px",
@@ -1769,11 +1641,8 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
           </div>
         </div>
 
-        {/* CTA — same pill as VaultCard's. When disconnected the
-            label flips to "Connect wallet" + WalletIcon and clicking
-            opens AppKit, identical to the Deposit CTA's
-            disconnected state. Connected: cycles "Enter an amount"
-            → "Withdraw $X.XX" → "Withdrawing…". */}
+        {/* CTA — disconnected opens AppKit; connected cycles
+            Enter amount → Withdraw $X.XX → Withdrawing…. */}
         {(() => {
           const ctaLabel = !isConnected
             ? "Connect wallet"
@@ -1820,18 +1689,13 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
 
 // Full-width log of the user's own deposits/withdrawals.
 function UserActivityCard() {
-  // Gate the rows on isConnected — same shape as VaultCard's USDC
-  // balance, which goes to zero when wagmi reports disconnected.
-  // The cached useUser snapshot can hold whatever it wants; the
-  // render layer simply ignores it when the wallet isn't connected.
+  // Gate on isConnected — the cached snapshot can persist across
+  // disconnects; we ignore it when the wallet isn't connected.
   const { isConnected } = useAccount();
   const { snapshot } = useUser();
   const rows = isConnected ? (snapshot?.activity ?? []) : [];
   const empty = rows.length === 0;
   return (
-    // Dark frame matching VaultCard / Position. Each item gets its
-    // own dot-grid surface (matching the Deposit input field); the
-    // Card bg behind them stays plain dark.
     <Card style={{
       height: "100%", display: "flex", flexDirection: "column",
       background: "rgba(12, 12, 16, 0.65)",
@@ -1839,11 +1703,6 @@ function UserActivityCard() {
       backdropFilter: "none",
       WebkitBackdropFilter: "none",
     }}>
-      {/* Header: CardLabel left, "No activity yet" muted right when
-          empty. The right-side label replaces the previous centered
-          "Connect your wallet to see your activity" message — moves
-          out of the body so the body can carry skeleton rows that
-          mirror the populated layout. */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
         <CardLabel icon="stack">Activity</CardLabel>
         {empty && (
@@ -1859,10 +1718,7 @@ function UserActivityCard() {
       </div>
       <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 4 }}>
         {empty ? (
-          // Skeleton placeholder rows — same shape as a populated
-          // activity row (token chip + label + date + tx) but
-          // rendered as muted bars. Three rows, fading out, so the
-          // card body has visual weight without lying about content.
+          // Skeleton rows — same shape as a populated row, fading out.
           [0.40, 0.25, 0.15].map((opacity, i) => (
             <div
               key={i}
@@ -1909,9 +1765,6 @@ function UserActivityCard() {
                 borderRadius: 10,
                 textDecoration: "none",
                 color: "rgba(255,255,255,0.85)",
-                // Dot-grid surface on each item — matches the Deposit
-                // input sub-card. Border keeps the row's frame
-                // legible against the dark Card background.
                 backgroundColor: "rgba(255,255,255,0.03)",
                 backgroundImage: "radial-gradient(circle, rgba(255,255,255,0.10) 0.7px, transparent 1.1px)",
                 backgroundSize: "9px 9px",
@@ -1947,9 +1800,9 @@ function UserActivityCard() {
 
 /* ---------- Agent chat sidebar ---------- */
 
-// Stylised alps mark for the thinking indicator — a triangular peak with
-// 5 streaks above. Mountain stays muted; streaks fade in one-by-one in a
-// looping cycle (`thinking-streak` keyframe in the inline <style>).
+// Stylised alps mark for the thinking indicator — triangular peak +
+// 5 streaks above; streaks fade in one-by-one via the
+// `thinking-streak` keyframe in the inline <style>.
 function ThinkingMark({ size = 22 }: { size?: number }) {
   const mountain = "rgba(255,255,255,0.18)";
   const streak = "rgba(255,255,255,0.55)";
@@ -1975,10 +1828,8 @@ function formatHoverIso(iso: string, todayLabel: string): string {
   return date === todayLabel ? (time ?? iso) : (date ?? iso);
 }
 
-// Solid grey rounded-square copy button overlaid on a bubble's
-// top-right corner. Positioned absolute so it sits ON TOP of body text.
-// Reveals on `.chat-msg:hover`. Click → write to clipboard, brief flash
-// of brighter bg (no svg color change).
+// Copy button overlaid on a bubble's top-right corner. Reveals on
+// `.chat-msg:hover`; click writes to clipboard with a brief flash.
 function BubbleCopy({ copyText }: { copyText: string }) {
   const [copied, setCopied] = useState(false);
   const onCopy = (e: React.MouseEvent) => {
@@ -1988,12 +1839,6 @@ function BubbleCopy({ copyText }: { copyText: string }) {
       window.setTimeout(() => setCopied(false), 1200);
     }).catch(() => {});
   };
-  // Sized to match the inner content height of a single-line bubble
-  // (≈line-height 19.4 + a bit of breathing room → 28×28). Stays the
-  // same constant size on multi-line bubbles so it doesn't grow.
-  // backdropFilter blurs whatever's behind the square (dot grid, body
-  // text, etc.) so the icon stays readable on every surface — same
-  // technique the main panel `Card`s use.
   return (
     <button
       type="button"
@@ -2019,8 +1864,7 @@ function BubbleCopy({ copyText }: { copyText: string }) {
   );
 }
 
-// Inline timestamp shown below the bubble on hover only. Renders
-// absolutely so it doesn't reserve vertical space when hidden.
+// Inline timestamp shown below the bubble on hover only.
 function BubbleTime({ iso, todayLabel }: { iso: string; todayLabel: string }) {
   return (
     <time className="chat-msg-time" style={{
@@ -2039,13 +1883,9 @@ function BubbleTime({ iso, todayLabel }: { iso: string; todayLabel: string }) {
   );
 }
 
-// 24h micro-histogram of agent activity — one bar per hour, latest on
-// the right. Each bar is two stacked sub-bars: actions at the bottom
-// (dim) + signals on top (bright white). Tokens in the tooltip line
-// up with the bottom (actions) row, matching the dim color. Empty
-// hours render as a faint floor pin so the timeline reads even when
-// sparse. The rightmost "now" bar gets a slow pulse. Hovering a bar
-// reveals a small tooltip card above the histogram.
+// 24h micro-histogram of agent activity. Each bar stacks actions
+// (dim) below signals (bright). Empty hours show as a faint floor
+// pin; the rightmost "now" bar pulses. Hover for a tooltip.
 function ActivityHistogram({ messages, onSelectHour }: { messages: AgentMessage[]; onSelectHour: (hour: number) => void }) {
   const buckets = React.useMemo(() => buildHourlyActivity(messages), [messages]);
   const lastHour = React.useMemo(() => {
@@ -2069,9 +1909,8 @@ function ActivityHistogram({ messages, onSelectHour }: { messages: AgentMessage[
     : null;
   const hovered = hoverIdx !== null ? buckets[hoverIdx] : null;
 
-  // Capture the histogram's bounding rect on hover so the portalled
-  // tooltip can position itself in viewport space (escapes the chat
-  // panel's `overflow: hidden`).
+  // Capture rect on hover so the portalled tooltip positions in
+  // viewport space (escapes the chat panel's overflow:hidden).
   const onEnterHisto = () => {
     const el = containerRef.current;
     if (!el) return;
@@ -2153,9 +1992,6 @@ function ActivityHistogram({ messages, onSelectHour }: { messages: AgentMessage[
         );
       })}
 
-      {/* Tooltip is portalled to <body> with position: fixed so it
-          escapes the chat panel's `overflow: hidden` clipping when it
-          renders above the header. */}
       {hovered !== null && hoveredHour !== null && tipPos && typeof document !== "undefined" && createPortal(
         <div style={{
           position: "fixed",
@@ -2175,7 +2011,6 @@ function ActivityHistogram({ messages, onSelectHour }: { messages: AgentMessage[
           pointerEvents: "none",
           zIndex: 1000,
         }}>
-          {/* Top row: signals (bright square) + count, hour pill on right. */}
           <div style={{ display: "flex", alignItems: "center", gap: 8, color: "rgba(255,255,255,0.92)", fontSize: 11, fontWeight: 500 }}>
             <span aria-hidden style={{ width: 8, height: 8, borderRadius: 2, background: "rgba(255,255,255,0.85)", flexShrink: 0 }} />
             <span style={{ flex: 1 }}>{hovered.signals} signal{hovered.signals === 1 ? "" : "s"}</span>
@@ -2188,9 +2023,6 @@ function ActivityHistogram({ messages, onSelectHour }: { messages: AgentMessage[
               {String(hoveredHour).padStart(2, "0")}:00
             </span>
           </div>
-          {/* Bottom row: actions (dim square) + count, token chips + "+N"
-              right-aligned. Tokens come from actions, so they align
-              semantically with the action row's dim color. */}
           <div style={{ display: "flex", alignItems: "center", gap: 8, color: "rgba(255,255,255,0.92)", fontSize: 11, fontWeight: 500 }}>
             <span aria-hidden style={{ width: 8, height: 8, borderRadius: 2, background: "rgba(255,255,255,0.30)", flexShrink: 0 }} />
             <span style={{ flex: 1 }}>{hovered.actions} action{hovered.actions === 1 ? "" : "s"}</span>
@@ -2209,9 +2041,6 @@ function ActivityHistogram({ messages, onSelectHour }: { messages: AgentMessage[
   );
 }
 
-// Small grey rounded square used as a glyph holder for non-action
-// message kinds (signal, etc.) — visually sibling to the agent header
-// avatar but smaller/inline.
 function GlyphSquare({ children, size = 22 }: { children: React.ReactNode; size?: number }) {
   return (
     <span aria-hidden style={{
@@ -2229,8 +2058,6 @@ function GlyphSquare({ children, size = 22 }: { children: React.ReactNode; size?
 function MessageView({ m, todayLabel, flash }: { m: AgentMessage; todayLabel: string; flash: boolean }) {
   const wrapperClass = `chat-msg${flash ? " chat-msg-flash" : ""}`;
   if (m.kind === "signal") {
-    // Same chassis as an action bubble (dark card, no dot grid). Header
-    // is a "New context" label with a glyph square — no chip/no hash.
     return (
       <div className={wrapperClass} data-msg-id={m.id} style={{ display: "flex", flexDirection: "column", gap: 7 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -2268,8 +2095,7 @@ function MessageView({ m, todayLabel, flash }: { m: AgentMessage; todayLabel: st
   if (m.kind === "action") {
     return (
       <div className={wrapperClass} data-msg-id={m.id} style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-        {/* Optional thought lead-in — italic Radley framed by curly
-            quotes and a left divider. Always tethered to its action. */}
+        {/* Optional thought lead-in. Always tethered to its action. */}
         {m.thought && (
           <div style={{
             color: "rgba(255,255,255,0.62)",
@@ -2283,7 +2109,6 @@ function MessageView({ m, todayLabel, flash }: { m: AgentMessage; todayLabel: st
             <span aria-hidden style={{ marginLeft: 2, color: "rgba(255,255,255,0.45)" }}>{"\u201D"}</span>
           </div>
         )}
-        {/* Header: chip + generic "Action submitted" title + tx hash. */}
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {m.chip.type === "pair" ? (
             <PoolPairChip left={m.chip.left} right={m.chip.right} size={14} />
@@ -2319,7 +2144,6 @@ function MessageView({ m, todayLabel, flash }: { m: AgentMessage; todayLabel: st
             <StrokeIcon kind="external" size={10} />
           </a>
         </div>
-        {/* Body — static dot grid only on action bubbles */}
         <div style={{
           position: "relative",
           color: "rgba(255,255,255,0.92)",
@@ -2391,7 +2215,7 @@ function MessageView({ m, todayLabel, flash }: { m: AgentMessage; todayLabel: st
           </div>
           {m.sources.map((s, i) => {
             // basescan tx → explorer URL; everything else uses an
-            // explicit href (Uniswap pool page, vault detail, etc.)
+            // explicit href.
             const href = s.tx ? `${TX_BASE_URL}${s.tx}` : (s.href ?? "#");
             return (
               <a
@@ -2429,9 +2253,8 @@ const CATEGORY_LABEL: Record<ActionCategory, string> = {
   claim_fees: "Claim fees",
 };
 
-// Hover-interactive mini sparkline. Tooltip is portalled to <body>
-// so it escapes the sidebar's overflow:hidden when it sits near the
-// edge.
+// Hover-interactive mini sparkline; tooltip is portalled to body
+// to escape the sidebar's overflow:hidden.
 function MiniSparkline({ data, width = 60, height = 18, stroke = "rgba(255,255,255,0.85)", label, formatValue }: {
   data: number[]; width?: number; height?: number; stroke?: string;
   label?: string;
@@ -2483,10 +2306,9 @@ function MiniSparkline({ data, width = 60, height = 18, stroke = "rgba(255,255,2
           position: "fixed",
           left: tipPos.left,
           top: tipPos.top - 8,
-          // translateZ forces a GPU compositor layer → integer-pixel
-          // edges. The border becomes an inset box-shadow because
-          // border + backdrop-filter on a translucent bg doubles up
-          // antialiasing along the top edge.
+          // translateZ forces a GPU compositor layer for integer-pixel
+          // edges; the border is an inset box-shadow to avoid
+          // antialiasing doubling along the top edge.
           transform: "translate(-50%, -100%) translateZ(0)",
           background: "#15161b",
           boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.08)",
@@ -2515,8 +2337,8 @@ function PoolChip({ p, size = 16 }: { p: PoolEntry; size?: number }) {
   return null;
 }
 
-// Compact 3/4-circle gauge sized to fit a row of 5 across the
-// dashboard sidebar. Smaller cousin of <Gauge>.
+// Compact 3/4-circle gauge for the dashboard sidebar — smaller
+// cousin of <Gauge>.
 function DashGauge({ pct, color, chip }: { pct: number; color: string; chip: React.ReactNode }) {
   const SIZE = 44;
   const STROKE = 4;
@@ -2582,8 +2404,8 @@ function ExposureRow({ p, dimmed }: { p: PoolEntry; dimmed: boolean }) {
   );
 }
 
-// True if the pool has the given token slug somewhere in its make-up.
-// USDC is in every pool, so hovering USDC's gauge keeps all rows lit.
+// True if the pool contains the given token slug. USDC sits in
+// every pool, so hovering USDC's gauge keeps all rows lit.
 function poolContainsToken(p: PoolEntry, slug: string | null): boolean {
   if (slug === null) return true;
   if (p.single) return p.single.slug === slug;
@@ -2591,8 +2413,7 @@ function poolContainsToken(p: PoolEntry, slug: string | null): boolean {
   return false;
 }
 
-// Compact action log — title + chip + tx + time. No body / thought /
-// sources. Just the audit trail.
+// Compact action log row — chip + label + time, links to BaseScan.
 function ActionLogRow({ m }: { m: AgentMessage & { kind: "action" } }) {
   return (
     <a
@@ -2635,8 +2456,6 @@ function ActionLogRow({ m }: { m: AgentMessage & { kind: "action" } }) {
   );
 }
 
-// Inline value + label, same font size — `value` white-bold, `label`
-// muted. Used for the TVL block's bottom row stats.
 function DashStat({ value, label }: { value: string; label: string }) {
   return (
     <div style={{
@@ -2658,8 +2477,6 @@ function DashStat({ value, label }: { value: string; label: string }) {
   );
 }
 
-// Section heading row used between blocks. Lives inline with content,
-// not a chrome bar — same family as the Exposure header row.
 function SectionTitle({ children }: { children: React.ReactNode }) {
   return (
     <div style={{
@@ -2707,8 +2524,7 @@ function DashboardPanel() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      {/* Fixed top — everything but the Recent actions list itself.
-          Mirrors Sherpa: only the bottom feed scrolls. */}
+      {/* Fixed top — only the Recent actions list scrolls. */}
       <div style={{
         flexShrink: 0,
         padding: "16px 14px 0",
@@ -2733,8 +2549,6 @@ function DashboardPanel() {
             </div>
             <MiniSparkline data={tvl30d} width={80} height={24} label="TVL" formatValue={(v) => fmtUsdAdaptive(v * 1_000_000)} />
           </div>
-          {/* Bottom row: 3 stats inline with equal gaps between them
-              via space-between. */}
           <div style={{
             display: "flex",
             justifyContent: "space-between",
@@ -2790,8 +2604,7 @@ function DashboardPanel() {
           <div style={{ padding: "0 10px", marginBottom: 8 }}>
             <SectionTitle>Exposure</SectionTitle>
           </div>
-          {/* Gauges by TOKEN. No container chrome; tighter spacing.
-              Hovering a gauge lights its token's exposure rows. */}
+          {/* Hovering a gauge lights its token's exposure rows. */}
           <div style={{
             display: "flex", alignItems: "center", gap: 16,
             padding: "4px 6px 12px",
@@ -2855,9 +2668,6 @@ function DashboardPanel() {
         </div>
       </div>
 
-      {/* Only the action log scrolls. Equal top + bottom padding so
-          the first/last item never touches the scroll edge regardless
-          of scroll position. */}
       <div className="panel-scroll" style={{
         flex: 1, minHeight: 0,
         overflowY: "auto", overflowX: "hidden",
@@ -2865,11 +2675,7 @@ function DashboardPanel() {
         display: "flex", flexDirection: "column", gap: 4,
       }}>
         {recentActions.length === 0 ? (
-          // Skeleton placeholder rows — same 3-column grid as
-          // ActionLogRow (chip + label + time) but rendered as muted
-          // bars. Four rows fading out so the empty feed has visual
-          // weight without lying about content. Mirrors the Activity
-          // card's empty-state pattern.
+          // Skeleton rows fading out — same 3-column grid as ActionLogRow.
           [0.45, 0.30, 0.18, 0.10].map((opacity, i) => (
             <div
               key={i}
@@ -2899,9 +2705,8 @@ function DashboardPanel() {
   );
 }
 
-// Translate a transport error code into the toast copy shown when a
-// send fails. Server-side errors flow through useAgentStream's error
-// field; local "disconnected" comes from the send result.
+// Toast copy for send-failure codes. Server-side errors flow through
+// useAgentStream's error field; "disconnected" comes from sendResult.
 function sendErrorCopy(code: "disconnected" | "rate_limited" | "not_subscribed" | "auth_required"): string {
   switch (code) {
     case "rate_limited":  return "Sending too quickly, retry shortly";
@@ -2912,9 +2717,8 @@ function sendErrorCopy(code: "disconnected" | "rate_limited" | "not_subscribed" 
 }
 
 // Sherpa daily-cap mirror of the backend. Persisted to localStorage
-// so refresh-within-day preserves the counter; date rollover clears
-// it. Server is the truth on rate_limited; local state is best-effort
-// optics.
+// so refresh-within-day preserves the counter. Server is truth on
+// rate_limited; local state is best-effort optics.
 const SHERPA_DAILY_CAP = 5;
 const SHERPA_COOLDOWN_MS = 20_000;
 const SHERPA_USAGE_KEY = "alp:sherpa-usage";
@@ -2966,8 +2770,7 @@ function AgentChatPanel() {
   const didInitialScroll = useRef(false);
   const seenWireCount = useRef(0);
 
-  // First content arrival: instant scroll to bottom. Subsequent
-  // updates: smooth scroll via the effect below.
+  // First content arrival: instant scroll. Subsequent updates: smooth.
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el || didInitialScroll.current || messages.length === 0) return;
@@ -2981,9 +2784,8 @@ function AgentChatPanel() {
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [messages, thinking]);
 
-  // Clear the thinking indicator when a reply event lands. Tracks
-  // wire-feed length so the priming history doesn't accidentally
-  // unset thinking on first mount.
+  // Clear thinking when a reply event lands. Tracks wire-feed length
+  // so the priming history doesn't accidentally clear it on mount.
   useEffect(() => {
     if (wire.length > seenWireCount.current) {
       const fresh = wire.slice(seenWireCount.current);
@@ -2992,10 +2794,8 @@ function AgentChatPanel() {
     }
   }, [wire]);
 
-  // Safety timeout: sonnet calls return in ~5-10s typically, but the
-  // subprocess has a 25s server-side cap. 30s here keeps the spinner
-  // honest. Cleared by the reply-arrival effect above when a reply
-  // actually lands.
+  // Safety timeout — backend caps subprocess calls at 25s; 30s here
+  // keeps the spinner honest if a reply never arrives.
   useEffect(() => {
     if (!thinking) return;
     const timer = window.setTimeout(() => setThinking(false), 30_000);
@@ -3003,7 +2803,7 @@ function AgentChatPanel() {
   }, [thinking]);
 
   // Tick `now` every 250ms while in cooldown so the countdown UI
-  // re-renders. Clears the cooldown when the deadline passes.
+  // re-renders. Clears when the deadline passes.
   useEffect(() => {
     if (!cooldownEndsAt) return;
     const tick = window.setInterval(() => {
@@ -3014,8 +2814,8 @@ function AgentChatPanel() {
     return () => window.clearInterval(tick);
   }, [cooldownEndsAt]);
 
-  // Date rollover: clear the daily counter at midnight UTC so the
-  // user gets a fresh 5 messages without a refresh.
+  // Reset daily counter at midnight UTC — user gets fresh quota
+  // without a refresh.
   useEffect(() => {
     const i = window.setInterval(() => {
       const today = todayKey();
@@ -3029,11 +2829,9 @@ function AgentChatPanel() {
     return () => window.clearInterval(i);
   }, []);
 
-  // Pick up server-side errors. `rate_limited` is the new sherpa
-  // limit (cooldown or daily cap) — surface it as a toast AND, if the
-  // message indicates "daily", bump local usage to the cap so the UI
-  // converges with the server's view. `not_subscribed`/`auth_required`
-  // remain plain toasts.
+  // Server-side errors: `rate_limited` toasts AND, if the message
+  // mentions "daily", bumps local usage to the cap so the UI
+  // converges with the server. Other codes are plain toasts.
   useEffect(() => {
     if (!agentError) return;
     const code = agentError.code;
@@ -3079,9 +2877,8 @@ function AgentChatPanel() {
       toast("error", sendErrorCopy(result.reason));
       return;
     }
-    // Optimistic local accounting: bump count + start cooldown. If the
-    // server rejects (rate_limited daily), the effect above syncs us
-    // back up to the cap.
+    // Optimistic accounting; the rate_limited effect above re-syncs
+    // us if the server rejects.
     const next: SherpaUsage = { date: todayKey(), count: usage.count + 1 };
     setUsage(next);
     saveSherpaUsage(next);
@@ -3092,8 +2889,7 @@ function AgentChatPanel() {
   };
 
   // Bar-click → scroll to the first signal/action message in that
-  // hour and flash for 2s. Tracks by message id so live events
-  // arriving mid-flash don't shift the highlight.
+  // hour and flash for 2s.
   const [flashId, setFlashId] = useState<string | null>(null);
   const flashTimerRef = useRef<number | null>(null);
   const flashStartRef = useRef<number | null>(null);
@@ -3120,8 +2916,7 @@ function AgentChatPanel() {
     }, 250);
   };
 
-  // Date shown at the top of the feed — the date of the most recent
-  // (last) message. Re-derives whenever the feed updates.
+  // Date shown at the top of the feed — date of the most recent message.
   const topDate = messages.length > 0 ? messages[messages.length - 1].iso.split(" · ")[0] : "Today";
 
   return (
@@ -3145,10 +2940,6 @@ function AgentChatPanel() {
           <div style={{ color: "#fff", fontFamily: "var(--sans-stack)", fontSize: 13, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1 }}>
             Sherpa
           </div>
-          {/* Histogram floats free in the header — no chrome around
-              it, so the bars sit directly on the panel background.
-              Keeps the same 32px height + horizontal padding for
-              vertical alignment with the avatar on the left. */}
           <div style={{
             marginLeft: "auto",
             height: 32,
@@ -3161,14 +2952,12 @@ function AgentChatPanel() {
         </div>
       </div>
 
-      {/* Messages feed */}
       <div ref={scrollRef} className="panel-scroll" style={{
         flex: 1, minHeight: 0,
         overflowY: "auto", overflowX: "hidden",
         padding: "14px 14px 12px",
         display: "flex", flexDirection: "column", gap: 16,
       }}>
-        {/* Date label — date of the latest message in the feed */}
         <div style={{
           color: "rgba(255,255,255,0.40)",
           fontFamily: "var(--sans-stack)",
@@ -3193,7 +2982,6 @@ function AgentChatPanel() {
         )}
       </div>
 
-      {/* Input */}
       <form
         onSubmit={handleSend}
         style={{
@@ -3248,10 +3036,8 @@ function AgentChatPanel() {
             <StrokeIcon kind="arrow" size={12} />
           </button>
         </div>
-        {/* Status row — cooldown countdown OR remaining-messages
-            counter OR daily-exhausted notice. Priority: daily cap >
-            cooldown > counter (>= 3 sent). Hidden when disconnected
-            (the placeholder copy already covers it) or fresh state. */}
+        {/* Daily-exhausted > cooldown > counter (≤3 left). Hidden
+            when disconnected (placeholder covers it) or fresh state. */}
         {isConnected && (dailyExhausted || inCooldown || messagesLeft <= 3) && (
           <div style={{
             marginTop: 8, paddingLeft: 14,
@@ -3279,17 +3065,10 @@ function AgentChatPanel() {
 
 /* ---------- Sidebar tab switcher ---------- */
 
-// Pill that sits above the right sidebar, inline with the floating
-// nav above the main panel. Two tabs swap the sidebar content
-// between Sherpa (agent chat) and the vault stats dashboard.
-//
-// Positioned in viewport space (matches the sidebar below it).
-// Height + every interior dimension scale with --shell-scale so
-// the pill stays visually identical to the nav (which scales
-// because it lives inside the canvas) at every viewport. Bottom
-// edge sits 14*scale px above the panel — the same offset the nav
-// uses on the other side — so the two chrome strips share both a
-// baseline AND a height at every scale.
+// Pill above the right sidebar that swaps between Sherpa (agent
+// chat) and the vault stats dashboard. Positioned in viewport space
+// (matches the sidebar below it); every interior dimension scales
+// with --shell-scale so the pill stays visually paired with the nav.
 function SidebarTabs({
   tab, onChange, exiting, agentUnread,
 }: {
@@ -3306,8 +3085,7 @@ function SidebarTabs({
       width: "var(--sidebar-w)",
       top: `calc(var(--panel-top) - 14px * var(--shell-scale) - ${NAV_DESIGN_HEIGHT}px * var(--shell-scale))`,
       height: `calc(${NAV_DESIGN_HEIGHT}px * var(--shell-scale))`,
-      // zIndex: 1 keeps the tabs behind the canvas (z=2) so the
-      // slide-in animation reads as "unrolling from behind the panel".
+      // Behind the canvas so the slide-in unrolls from behind the panel.
       zIndex: 1,
     }}>
       <div style={{
@@ -3319,10 +3097,7 @@ function SidebarTabs({
         background: "#0c0c10",
         display: "flex",
         alignItems: "stretch",
-        // Inset matches the FloatingNav's vertical padding (8px) so
-        // the active button bg has the same breathing room from the
-        // pill border that the Connect-wallet button has from the
-        // nav border. Tab-button gap stays small for tight pairing.
+        // Matches FloatingNav's vertical padding (8px).
         padding: "calc(8px * var(--shell-scale))",
         gap: "calc(4px * var(--shell-scale))",
         isolation: "isolate",
@@ -3377,10 +3152,7 @@ function SidebarTabButton({
   );
 }
 
-// Unread-message indicator on the Agent tab. A small red dot —
-// no count, no chrome. Sits inline in the SidebarTabButton flex
-// row (alignItems:center) so it center-aligns with the "Agent"
-// text glyph cap-height naturally, no transform tweaks.
+// Unread-message dot on the Agent tab.
 function UnreadBadge({ count }: { count: number }) {
   return (
     <span
@@ -3399,11 +3171,8 @@ function UnreadBadge({ count }: { count: number }) {
 
 /* ---------- Footer ---------- */
 
-// Slim strip rendered BELOW the main panel (outside its rounded
-// borders). Left button is a 1:1 copy of landing-face's HowItWorks
-// chip (text + 16×16 white-10 square wrapping a 10px arrow). Right
-// edge holds the vault link + version, same chip style as landing's
-// BuiltWith.
+// Strip below the main panel. Left chip toggles How-it-works; right
+// chip links the vault on BaseScan + a version label.
 function FooterStrip({
   left, top, width, showHowItWorks, onToggleHowItWorks,
 }: {
@@ -3523,31 +3292,23 @@ function FooterStrip({
 /* ---------- Page ---------- */
 
 export default function AppPage() {
-  // Bridges wagmi's connected address into the api client. Dormant
-  // in stub mode. Must run on every /app render so connect/disconnect
-  // events route through it.
+  // Bridges wagmi's connected address into the api client. Must run
+  // on every /app render so connect/disconnect events route through it.
   useApiWallet();
   const router = useRouter();
   const [withdrawOpen, setWithdrawOpen] = useState(false);
   const [showHowItWorks, setShowHowItWorks] = useState(false);
   const [exiting, setExiting] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("stats");
-  // Mock unread count for the Agent tab. Real backend: bump on
-  // incoming WireMessage, but always after we know the user isn't
-  // already on the Agent tab. Cleared the moment the user opens the
-  // Agent panel so the badge feels reactive instead of sticky.
+  // Cleared the moment the user opens the Agent panel.
   const [agentUnread, setAgentUnread] = useState(3);
   useEffect(() => {
     if (sidebarTab === "agent" && agentUnread !== 0) setAgentUnread(0);
   }, [sidebarTab, agentUnread]);
 
-  // When the user clicks the alps logo in the floating nav, kick the
-  // exit animation off (canvas/sidebar/tab pull back first, then the
-  // nav drops 420ms later — mirror of the entry stagger) and delay
-  // router.push so the staggered choreography actually plays out
-  // instead of getting cut by a fast cached route swap. 760ms gives
-  // the first beat room to settle before the route changes; the nav
-  // drop continues into the landing's lockup-enter, blending the two.
+  // Run the exit animation, then push to / after the first beat
+  // settles. The nav drop continues into landing's lockup-enter,
+  // blending the two routes together.
   const handleBack = () => {
     if (exiting) return;
     setExiting(true);
@@ -3566,32 +3327,23 @@ export default function AppPage() {
         background: "transparent",
         color: "#fff",
         isolation: "isolate",
-        // Override the global --panel-left/right (which centers the
-        // panel on landing) so /app centers the panel + sidebar
-        // combo instead. The override only propagates to descendants
-        // of this <main>, so PersistentBackdrop (sibling in
-        // layout.tsx) keeps the centered panel position on landing.
+        // Override --panel-left/right so /app centers the panel +
+        // sidebar combo. The override is scoped to this <main>, so
+        // PersistentBackdrop (sibling in layout.tsx) keeps landing's
+        // centered position.
         ["--panel-left" as string]: "calc((100vw - var(--combo-w)) / 2)",
         ["--panel-right" as string]: "calc(var(--panel-left) + var(--panel-w))",
         ["--sidebar-left" as string]: "calc(var(--panel-right) + var(--sidebar-gap))",
       } as React.CSSProperties}
     >
-      {/* Scaled canvas == the main panel rect itself, sized to match
-          the landing page's panel exactly. Nav above and footer
-          below ride this same transform; sidebars deliberately do
-          NOT (they live in viewport space, see below). z-index keeps
-          this canvas (with the opaque main panel inside) layered
-          above the sidebars so the sidebar enter/exit animations
-          read as "unrolling from behind the panel".
-
-          Position-wise the canvas is anchored at the combo-centered
-          --panel-left/--panel-top (top-left transform origin so the
-          scaled box lands exactly on those vars). On entry the canvas
-          slides leftward from landing's centered position to its
-          combo-centered resting spot — the same easing/duration as
-          the sidebar emerging from behind it, so the two reads as
-          one motion: the panel makes room while the sidebar fills
-          it. */}
+      {/* Scaled canvas == the main panel rect, matching landing's
+          panel exactly. Nav and footer ride this same transform;
+          sidebars live in viewport space (below). zIndex layers the
+          canvas above the sidebars so their enter/exit animations
+          read as "unrolling from behind the panel". On entry the
+          canvas slides leftward from landing's centered position to
+          its combo-centered resting spot, paired with the sidebar
+          emerging from behind it — one composite motion. */}
       <div className={canvasClass} style={{
         width: PANEL_W,
         height: PANEL_H,
@@ -3610,11 +3362,10 @@ export default function AppPage() {
         .panel-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.18); }
         .panel-scroll::-webkit-scrollbar-track { background: transparent; }
 
-        /* Nav slides up from BEHIND the main panel (covered by the
-           panel's higher z-index) to its resting spot 14px above.
-           Entry is the FIRST beat (no delay); exit is the SECOND
-           beat (420ms delay) so the choreography mirrors. Total
-           per-direction duration: 1180ms (420 delay + 760 anim). */
+        /* Nav slides up from BEHIND the main panel to its resting
+           spot 14px above. Entry is the FIRST beat (no delay); exit
+           is the SECOND beat (420ms delay), so the choreography
+           mirrors. Total per-direction: 1180ms. */
         @keyframes app-nav-enter {
           from { transform: translateY(34px); opacity: 1; }
           to   { transform: translateY(-100%); opacity: 1; }
@@ -3626,23 +3377,14 @@ export default function AppPage() {
           to   { transform: translateY(34px); opacity: 1; }
         }
         /* 'both' (not 'forwards') so the keyframe's "from" state
-           holds through the 420ms delay — without it, the moment
-           the class swaps from app-nav-enter the nav reverts to its
-           base translateY(0) position (partially behind the panel)
-           for the duration of the delay, then snaps back up to the
-           keyframe's "from" translateY(-100%) when the animation
-           actually starts. That was the disappear-reappear flicker. */
+           holds through the 420ms delay; otherwise the nav snaps
+           between resting and "from" during the delay. */
         .app-nav-exit { animation: app-nav-exit 760ms cubic-bezier(0.16, 1, 0.3, 1) 420ms both; }
 
-        /* Right sidebar — slides out from behind the main panel on
-           entry (translated INTO the main-panel area initially, then
-           rightward to resting). Entry has the SECOND-beat 420ms
-           delay so it pairs with the canvas slide; exit fires in the
-           FIRST beat with no delay, so the symmetric reverse plays:
-           sidebar/canvas first, nav second. The sidebar's resting
-           position is exactly the panel's vertical extent, so the
-           panel (z=2 inside canvas) hides it during the delay even
-           without an opacity fade — pure z-stacking handles it. */
+        /* Right sidebar slides out from behind the main panel.
+           Entry has the second-beat 420ms delay (pairs with canvas);
+           exit fires on the first beat. z-stacking hides it during
+           the delay; no opacity fade needed. */
         @keyframes app-sidebar-right-enter {
           from { transform: translateX(calc(-100% - 14px)); }
           to   { transform: translateX(0); }
@@ -3655,15 +3397,10 @@ export default function AppPage() {
         }
         .app-sidebar-right-exit { animation: app-sidebar-right-exit 760ms cubic-bezier(0.16, 1, 0.3, 1) forwards; }
 
-        /* Sidebar TAB pill — same horizontal slide as the sidebar
-           below it, but the tab sits ABOVE the panel (at the nav's
-           y) so z-stacking can't hide it the way it hides the
-           sidebar. We add an opacity fade to the keyframes: tab is
-           invisible during the nav-only first beat, then fades in as
-           it slides out from behind the panel. Without this, the tab
-           would flash at its resting spot during the delay (the user
-           caught this on entry; same fix prevents it from lingering
-           after the panel slides back on exit). */
+        /* Sidebar tab pill — same horizontal slide as the sidebar
+           below, but the tab sits at the nav's y so z-stacking can't
+           hide it. Opacity fade prevents it from flashing during the
+           delay. */
         @keyframes app-sidebar-tab-enter {
           from { transform: translateX(calc(-100% - 14px)); opacity: 0; }
           to   { transform: translateX(0); opacity: 1; }
@@ -3676,21 +3413,13 @@ export default function AppPage() {
         }
         .app-sidebar-tab-exit { animation: app-sidebar-tab-exit 760ms cubic-bezier(0.16, 1, 0.3, 1) forwards; }
 
-        /* Canvas slide. The canvas's resting position is combo-centered
-           (panel left of viewport center to make room for the sidebar);
-           landing leaves the panel screen-centered. On entry we start
-           the canvas at +canvas-shift (= landing's centered position)
-           and glide it back to 0 (= combo-centered) in lockstep with
-           the sidebar emerging from behind it. The composite read is:
-           panel makes room, sidebar fills it, as a single motion.
-           Same 420ms entry delay as the sidebar so the two paired
-           movements fire as one beat after the nav has settled. On
-           exit no delay — canvas + sidebar move together first,
-           then the nav drops, mirroring the entry sequence in
-           reverse. Scale is repeated in both keyframes since
-           transform is one property — interpolating translate alone
-           requires the scale component to be present at both
-           endpoints. */
+        /* Canvas slide. Resting position is combo-centered; landing
+           leaves the panel screen-centered. Entry starts at
+           +canvas-shift and glides back to 0 in lockstep with the
+           sidebar emerging from behind it — panel makes room, sidebar
+           fills it. Scale is repeated in both keyframes since
+           transform is one property; interpolating translate alone
+           requires scale at both endpoints. */
         @keyframes app-canvas-enter {
           from { transform: translateX(var(--canvas-shift)) scale(var(--shell-scale)); }
           to   { transform: translateX(0) scale(var(--shell-scale)); }
@@ -3703,9 +3432,8 @@ export default function AppPage() {
         }
         .app-canvas-exit { animation: app-canvas-exit 760ms cubic-bezier(0.16, 1, 0.3, 1) forwards; }
 
-        /* Snappy staggered fade for bento items. Pure opacity (no
-           transform) so the wrapper doesn't create a stacking
-           context that swallows backdrop-filter on inner Cards. */
+        /* Pure opacity (no transform) so the wrapper doesn't create
+           a stacking context that swallows inner Cards' backdrop-filter. */
         @keyframes app-bento-enter {
           from { opacity: 0; }
           to   { opacity: 1; }
@@ -3718,8 +3446,7 @@ export default function AppPage() {
         }
         .app-bento-exit { animation: app-bento-exit 280ms cubic-bezier(0.4, 0, 1, 1) forwards; }
 
-        /* Footer strip — fades in/out behind the main panel just
-           like the nav, only vertical instead. */
+        /* Footer strip — vertical fade, paired with the nav. */
         @keyframes app-footer-enter {
           from { opacity: 0; transform: translateY(-8px); }
           to   { opacity: 1; transform: translateY(0); }
@@ -3732,8 +3459,7 @@ export default function AppPage() {
         }
         .app-footer-exit { animation: app-footer-exit 280ms cubic-bezier(0.4, 0, 1, 1) forwards; }
 
-        /* Agent thinking indicator — 5 streaks above the alps mountain
-           fade in one-by-one then together fade out, looping. */
+        /* Streaks fade in one-by-one then together fade out. */
         @keyframes thinking-streak {
           0%, 8%   { opacity: 0; }
           30%, 80% { opacity: 1; }
@@ -3746,14 +3472,9 @@ export default function AppPage() {
         .thinking-streak.streak-4 { animation-delay: 420ms; }
         .thinking-streak.streak-5 { animation-delay: 560ms; }
 
-        /* Message hover affordances. Copy button sits absolute inside
-           the body bubble's top-right; time sits absolute just below
-           the bubble. Both are hidden by default with no reserved
-           space, and just fade in on .chat-msg:hover.
-           On hover we also add an adaptive bottom margin (transition
-           in concert with the time fade) so the timestamp doesn't
-           crowd the next message. The transition makes neighbours
-           glide rather than jump. */
+        /* Message hover affordances. Copy button + time fade in on
+           .chat-msg:hover; the bottom margin grows so the timestamp
+           doesn't crowd the next message. */
         .chat-msg { position: relative; transition: margin-bottom 200ms ease; }
         .chat-msg:hover { margin-bottom: 14px; }
         .chat-msg-copy { opacity: 0; transition: opacity 160ms ease, background 180ms ease; }
@@ -3762,28 +3483,21 @@ export default function AppPage() {
         .chat-msg:hover .chat-msg-time { opacity: 1; }
         .chat-msg-copy:hover { background: rgba(255,255,255,0.18) !important; }
 
-        /* Tx hash link in the action header — brighten both text and
-           the trailing arrow icon together on hover. */
         .chat-tx-link:hover { color: rgba(255,255,255,0.95) !important; }
 
-        /* Activity rows are also clickable links to BaseScan; on hover
-           lift the bg one notch so the affordance is legible. Scoped
-           via .activity-row so inline tx-links inside chat bubbles
-           keep their text-only hover. */
+        /* Activity rows link to BaseScan; lift bg one notch on hover. */
         .activity-row { transition: background-color 180ms ease; }
         .activity-row:hover { background-color: rgba(255,255,255,0.06) !important; }
 
-        /* "Now" bar in the activity histogram — slow opacity pulse so
-           the rightmost (current hour) bar reads as live. */
+        /* "Now" bar in the activity histogram pulses to read as live. */
         @keyframes histo-now {
           0%, 100% { opacity: 1; }
           50%      { opacity: 0.55; }
         }
         .histo-now { animation: histo-now 2.2s ease-in-out infinite; }
 
-        /* Flash highlight applied to a chat-msg when its hour is
-           clicked in the histogram. Quick fade-in to a soft white
-           wash, then 2s decay back to transparent. */
+        /* Flash highlight when a chat-msg's hour is clicked in the
+           histogram. */
         @keyframes chat-msg-flash {
           0%   { background-color: rgba(255,255,255,0.00); }
           12%  { background-color: rgba(255,255,255,0.07); }
@@ -3807,7 +3521,6 @@ export default function AppPage() {
 
       <FloatingNav layout={MAIN_PANEL} exiting={exiting} muted={showHowItWorks} onBack={handleBack} />
 
-      {/* Main panel — fills the canvas exactly. */}
       <section style={{
           position: "absolute",
           left: 0, top: 0, width: PANEL_W, height: PANEL_H,
@@ -3826,12 +3539,8 @@ export default function AppPage() {
               {showHowItWorks ? (
                 <LearnMoreContent open={true} inline />
               ) : (
-                // 4-row × 3-col bento, sized to fill the panel:
-                //   row 1: Vault (col 1, spans rows 1-3)   | Position    | Performance
-                //   row 2: Vault (continues)               | Activity (cols 2-3, spans rows 2-4)
-                //   row 3: Vault (continues)               | Activity (continues)
-                //   row 4: Summary text (col 1)            | Activity (continues)
-                // Col 1 is wider so the Summary's prose fits comfortably.
+                // 4-row × 3-col bento. Col 1 (Vault, Summary) is
+                // wider so the Summary prose fits comfortably.
                 <div style={{
                   display: "grid",
                   gridTemplateColumns: "1.45fr 1fr 1fr",
@@ -3852,17 +3561,12 @@ export default function AppPage() {
                   <div className={enterClass} style={{ animationDelay: exiting ? "60ms" : "360ms", gridColumn: "2 / 4", gridRow: "2 / 4", display: "flex", flexDirection: "column" }}>
                     <UserActivityCard />
                   </div>
-                  {/* No entry animation on this segment — animating
-                      opacity on the Card or any ancestor leaves a
-                      compositor layer that prevents backdrop-filter
-                      from sampling the panel landscape. Static is
-                      the price for the blur to stay live.
-                      Exit, however, uses a binary visibility flip
-                      (no transition) so the segment disappears with
-                      the rest of the bento — no slow fade required,
-                      and no compositor layer because there's no
-                      animation, so the blur stays intact while
-                      visible. */}
+                  {/* No entry animation — animating opacity on the
+                      Card or any ancestor leaves a compositor layer
+                      that prevents backdrop-filter from sampling the
+                      panel landscape. Exit uses a binary visibility
+                      flip (no transition) so the blur stays intact
+                      while visible. */}
                   <div style={{
                     gridColumn: "1", gridRow: "4",
                     display: "flex", flexDirection: "column",
@@ -3881,16 +3585,12 @@ export default function AppPage() {
             </div>
           </div>
 
-          {/* Withdraw modal lives INSIDE the panel section so its
-              backdrop-filter only blurs the panel's own contents —
-              the sidebar/tabs/nav (siblings outside the section)
-              stay sharp. The section already has overflow:hidden,
-              so the modal is naturally clipped to the panel rect. */}
+          {/* Modal lives inside the panel section so its backdrop-
+              filter only blurs the panel's contents; siblings stay
+              sharp. */}
           {withdrawOpen && <WithdrawModal onClose={() => setWithdrawOpen(false)} />}
         </section>
 
-      {/* Bottom strip — sits 12 design-px below the panel, inside the
-          scaled canvas so it tracks the panel's width and scale. */}
       <div className={footerClass}>
         <FooterStrip
           left={0}
@@ -3904,12 +3604,10 @@ export default function AppPage() {
       </div>
 
       {/* Right sidebar + its tab switcher above. Both live in
-          viewport space (NOT scaled by --shell-scale) but anchor to
-          --sidebar-left / --sidebar-w, so they sit one fixed gap
-          right of the (combo-centered) panel and hold a stable
-          design width. zIndex: 1 keeps them behind the canvas (z=2),
-          which is what the slide-in animation expects — they
-          "unroll from behind the panel". */}
+          viewport space and anchor to --sidebar-left / --sidebar-w,
+          one fixed gap right of the (combo-centered) panel.
+          zIndex: 1 keeps them behind the canvas so the slide-in
+          unrolls from behind the panel. */}
       <SidebarTabs tab={sidebarTab} onChange={setSidebarTab} exiting={exiting} agentUnread={agentUnread} />
 
       <section style={{
@@ -3925,12 +3623,8 @@ export default function AppPage() {
         background: "#0c0c10",
         border: "1px solid rgba(255,255,255,0.08)",
       }} className={rightSidebarClass}>
-        {/* Scaled inner: the section above sizes itself in viewport
-            units (sidebar-w × panel-h, both already scaled), but its
-            children are written in design px. This wrapper renders
-            the children at design dimensions (450 × 780) and
-            applies the same shell-scale transform the main canvas
-            uses, so font sizes, padding, and icons inside the
+        {/* Inner is written in design px (450 × 780) and rides the
+            same shell-scale transform as the main canvas, so the
             agent/stats panels scale in lockstep with the panel. */}
         <div style={{
           width: 450,

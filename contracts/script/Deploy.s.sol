@@ -22,7 +22,7 @@ import {IUniswapV3Factory} from "../src/interfaces/external/IUniswapV3Factory.so
 ///
 /// Required env vars:
 ///   PRIVATE_KEY            deployer key
-///   BASE_ASSET             base ERC20 (default: a Sepolia USDC mock — TBD)
+///   BASE_ASSET             base ERC20 (Sepolia USDC mock or equivalent)
 ///   OWNER                  vault + registry owner address
 ///   GUARDIAN               vault + registry guardian (pause + whitelist)
 ///   AGENT                  hot key the agent service signs with

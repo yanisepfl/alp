@@ -1,17 +1,12 @@
 // Sherpa — chat surface of the ALP agent.
 //
-// Subprocess to the locally-installed `claude` CLI in print mode.
-// Each user_message synthesises a one-shot prompt with live vault +
-// user context and pipes it through claude, returning the model's
-// reply as plain text. No API key — the VM has a logged-in Claude
-// session for whichever unix user runs the bun process.
+// Subprocess to the locally-installed `claude` CLI in print mode. Each
+// user_message synthesises a one-shot prompt with live vault + user context
+// and pipes it through claude, returning the model's reply as plain text.
+// No API key — the VM has a logged-in Claude session for whichever unix
+// user runs the bun process.
 //
-// Why subprocess and not the SDK: the operator is using their
-// existing Claude Code seat (no separate Anthropic API key plumbing)
-// and the latency budget for chat replies is forgiving (~5-10s).
-// When this evolves into a richer agent loop, swap to the SDK.
-//
-// Tools are disabled — Sherpa only writes plain text replies.
+// Tools are disabled; Sherpa only writes plain text replies.
 
 import { spawn } from "bun";
 
@@ -128,10 +123,8 @@ function formatUserBlock(wallet: string): string {
 }
 
 async function runClaude(systemPrompt: string, userPrompt: string): Promise<string> {
-  // claude -p <user> --system-prompt <sys> ... — subprocess prints the model's
-  // reply to stdout in plain text. Tools are disabled via --allowed-tools "" so
-  // Sherpa can't read files or run bash on the VM regardless of what the user
-  // types.
+  // claude -p prints the model's reply to stdout. --allowed-tools "" stops
+  // Sherpa from reading files or running bash regardless of user input.
   const proc = spawn({
     cmd: [
       "claude",
@@ -146,8 +139,7 @@ async function runClaude(systemPrompt: string, userPrompt: string): Promise<stri
     stderr: "pipe",
   });
 
-  // Hard timeout — sonnet should respond in <10s; 25s is the soft cap before
-  // we kill the process and fall back to a canned message.
+  // Hard timeout — kill the process and fall back to a canned message.
   const timer = setTimeout(() => {
     try { proc.kill(); } catch { /* ignore */ }
   }, SUBPROCESS_TIMEOUT_MS);

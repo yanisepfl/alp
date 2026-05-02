@@ -1,15 +1,3 @@
-// Swap calldata builder. Mirrors ~/alp/agent/src/quoting.ts. Two paths:
-//
-//   - quoteAndBuildMultiHop: call Uniswap Trading API, get methodParameters,
-//     strip the UniversalRouter.execute selector to recover the
-//     (commands, inputs, deadline) tuple, return as `extra`.
-//   - buildSingleHopV3Swap: encode a UR V3_SWAP_EXACT_IN command directly
-//     against a known V3 pool. Used as a fallback when Trading API errors.
-//
-// The vault's executeSwap forwards `extra` to URAdapter, which decodes it
-// and dispatches to UniversalRouter.execute against the URAdapter's own
-// contract balance (URAdapter pulls funds from the vault first).
-
 import { encodeAbiParameters, encodePacked, type Address, type Hex } from "viem";
 
 const V3_SWAP_EXACT_IN: Hex = "0x00";
@@ -60,6 +48,9 @@ interface TradingApiQuoteResponse {
   methodParameters?: { calldata: Hex; to: Address; value: string };
 }
 
+/** Multi-hop swap calldata via Uniswap's Trading API. Returns the
+ *  abi-encoded (commands, inputs, deadline) tuple URAdapter forwards
+ *  to UniversalRouter.execute. */
 export async function quoteAndBuildMultiHop(args: {
   apiBase: string;
   apiKey?: string;
@@ -67,14 +58,7 @@ export async function quoteAndBuildMultiHop(args: {
   tokenOut: Address;
   amountIn: bigint;
   slippageBps: number;
-  /** Account that holds tokenIn and will sign the Permit2 grant. For the
-   *  ALP keeper this is the vault — URAdapter pulls funds from the vault
-   *  and forwards `payerIsUser=true` to UR. The Trading API requires
-   *  this field as of 2024+; without it the API rejects with
-   *  RequestValidationError ("swapper" is required). */
   swapper: Address;
-  /** Final destination of the swap output. Same as `swapper` for the
-   *  vault flow — URAdapter forwards the output back to the vault. */
   recipient: Address;
 }): Promise<SwapCalldata> {
   const body = {
@@ -101,9 +85,8 @@ export async function quoteAndBuildMultiHop(args: {
   const amountOut = BigInt(data.quote.output.amount);
   const amountOutMin = (amountOut * BigInt(10_000 - args.slippageBps)) / 10_000n;
   if (!data.methodParameters) throw new Error("Trading API did not return methodParameters");
-  // Strip 4-byte function selector from `UniversalRouter.execute(...)` to
-  // recover the abi-encoded (commands, inputs, deadline) tuple that the
-  // URAdapter expects to receive in `extra`.
+  // Strip the 4-byte UniversalRouter.execute selector to recover the
+  // (commands, inputs, deadline) tuple URAdapter expects in `extra`.
   const calldataNoSelector = ("0x" + data.methodParameters.calldata.slice(10)) as Hex;
   return { amountOut, amountOutMin, extra: calldataNoSelector };
 }

@@ -27,7 +27,7 @@ const MASK_STYLE = {
   maskPosition: "center",
 } as const;
 
-// Per-token deposit breakdown -used by the expanded Total Deposits view.
+// Per-token deposit breakdown — used by the expanded Total Deposits view.
 const DEPOSITS = [
   { slug: "USDC", src: "/tokens/usdc.png",     color: "#2775CA", amount: "$1.20M" },
   { slug: "ETH",  src: "/tokens/eth.png",      color: "#627EEA", amount: "$850K"  },
@@ -36,8 +36,8 @@ const DEPOSITS = [
   { slug: "UNI",  src: "/tokens/svg/uni.svg",  color: "#FF007A", amount: "$145K"  },
 ];
 
-// Inline `color` is intentionally omitted -color must come from a Tailwind
-// class so :hover and group-hover variants can override it.
+// Inline `color` is intentionally omitted — color must come from a
+// Tailwind class so :hover/group-hover variants can override it.
 const PILL_BOX = {
   height: 16,
   padding: "0 6px",
@@ -221,7 +221,7 @@ function TotalDeposits({ exiting = false }: { exiting?: boolean }) {
         </button>
       </div>
 
-      {/* Expanded view -per-token breakdown */}
+      {/* Expanded view — per-token breakdown */}
       <div
         className="absolute top-0 right-0 flex items-center gap-1.5 whitespace-nowrap text-xs text-haze"
         style={{
@@ -240,12 +240,11 @@ function TotalDeposits({ exiting = false }: { exiting?: boolean }) {
   );
 }
 
-// "Built on top of" stack — 3 prize tracks. Two architectural layers:
-//   AGENT layer: Gensyn (P2P comms between agent nodes) + KeeperHub
-//                (trustless keeper that fires signed agent actions).
-//   EXECUTION layer: Uniswap v4 hooks where the vault holds positions.
-// Brand colour is used ONLY in the small chip, never as a row background
-// (matches Vault flow's vocabulary — coloured chips on neutral chrome).
+// "Built on top of" stack — two architectural layers:
+//   AGENT: Gensyn (P2P comms) + KeeperHub (trustless trigger).
+//   EXECUTION: Uniswap v4 hooks where the vault holds positions.
+// Brand colour appears only in the small chip — coloured chips on
+// neutral chrome.
 type BuiltOnEntry = {
   name: string;
   role: string;
@@ -330,15 +329,14 @@ function StackViz({
   const GAP = 16;
   const CHIP = 36;
 
-  // Per-phase highlight state — mirrors the StackPreview row so the
-  // panels (Context / Agent / Execution) and the chip-row visualisation
-  // stay in lockstep with the typing animation on the left.
+  // Per-phase highlight — mirrors StackPreview so the panels and
+  // chip-row stay in lockstep with the typing animation on the left.
   const panelState = (i: number) => {
     const isActive = i === phaseIndex;
     const isGreen =
       completedPhases.has(i) || (isActive && innerPhase === "confirmed");
-    // Only "pulse" the active panel during its working states (title /
-    // list / done) — once green takes over the panel sits steady.
+    // Only pulse during the working states — once green, the panel
+    // sits steady.
     return { isPulsing: isActive && !isGreen, isGreen };
   };
 
@@ -445,8 +443,9 @@ function StackViz({
           background: "rgba(255,255,255,0.05)",
           backdropFilter: "blur(6px)",
           WebkitBackdropFilter: "blur(6px)",
-          // Real border (not inset shadow): backdrop-filter clips an inset stroke inside the curve.
-          // border-box keeps outer width = W to stay flush with panels above.
+          // Real border (not inset shadow) — backdrop-filter clips
+          // inset strokes inside the curve. border-box keeps outer
+          // width = W to stay flush with panels above.
           border: "1px solid rgba(255,255,255,0.06)",
           boxSizing: "border-box",
           borderRadius: 10,
@@ -496,9 +495,8 @@ function StackViz({
                   left: 0,
                   top: 0,
                   height: "100%",
-                  // Width is driven by the cycle pointer — fills change
-                  // during phase 2's "confirmed" hold; transition gives
-                  // a ~1.5s slide so the bar visibly rebalances.
+                  // Width changes during phase 2's "confirmed" hold;
+                  // 1.5s transition slides the bar visibly.
                   width: `${barFillPercent}%`,
                   borderRadius: 4,
                   background: USDC_VAULT_ENTRY.color,
@@ -527,10 +525,8 @@ function StackViz({
   );
 }
 
-// Plain-language summary of what the agent has surfaced for each
-// phase of the cycle: Twitter+Uniswap context, internal reasoning, and
-// the resulting onchain actions. Module scope so the typing effect's
-// closure has a stable reference.
+// Plain-language summary per cycle phase. Module scope so the typing
+// effect's closure has a stable reference.
 const CONTEXT_BULLETS = [
   "• ETH bull thesis trending on Twitter",
   "• 12k posts mention $4K target by Friday",
@@ -562,12 +558,9 @@ const EXECUTION_BULLETS = [
   "• Tx 0x9f3a confirmed, 2 blocks",
 ];
 
-// Per-phase done-state icon. Two states only: a solid default colour
-// while showing alongside the done message or as a preview in
-// upcoming panels, and solid green once the phase is confirmed
-// completed. Pen and Stars icons are fully solid; Performance keeps
-// its outer rectangle at 0.4 for visual hierarchy between the frame
-// and the chart line.
+// Per-phase done-state icon. Pen and Stars are fully solid;
+// Performance keeps its outer rectangle at 0.4 opacity for visual
+// hierarchy between frame and chart line.
 const PEN_ICON = (
   <>
     <path d="M5.493 3.49204L4.547 3.17704L4.23101 2.23005C4.12901 1.92405 3.622 1.92405 3.52 2.23005L3.20401 3.17704L2.25801 3.49204C2.10501 3.54304 2.00101 3.68603 2.00101 3.84803C2.00101 4.01003 2.10501 4.15305 2.25801 4.20405L3.20401 4.51905L3.52 5.46604C3.571 5.61904 3.71401 5.72202 3.87501 5.72202C4.03601 5.72202 4.18001 5.61804 4.23001 5.46604L4.54601 4.51905L5.492 4.20405C5.645 4.15305 5.74901 4.01003 5.74901 3.84803C5.74901 3.68603 5.646 3.54304 5.493 3.49204Z" />
@@ -626,32 +619,26 @@ const PHASE_CONFIGS: {
   },
 ];
 
-// USDC vault bar fill — 3 values cycled across 3 cycles. The first
-// and last are identical so after a full loop the bar lands back where
-// it started; the middle two are the "rebalanced" intermediate states.
+// USDC vault bar fill — 3 values cycled, returning to the start after
+// a full loop. The middle values are the "rebalanced" intermediate
+// states.
 const BAR_VALUES = [40, 56, 22];
 
-// Per-pool left-token balance ratio across the 3-cycle loop.
-// Shape: number[poolIndex][cycleIndex] — three pools (ETH/USDC,
-// BTC/USDC, USDC/USDT) × three cycles. Cycle 0 is the 0.5/0.5 norm
-// for every pool; cycles 1 and 2 drift to plausible LP imbalances.
-// Because barIdx wraps 0→1→2→0, the chips return to the norm after
-// every full loop. Each pool follows its own pattern so the three
-// chips don't move in lockstep.
+// Per-pool left-token balance ratio across the 3-cycle loop. Cycle 0
+// is the 0.5/0.5 norm; cycles 1 and 2 drift to plausible LP
+// imbalances. Each pool follows its own pattern so the chips don't
+// move in lockstep.
 const POOL_RATIOS: number[][] = [
   [0.5, 0.58, 0.46], // ETH/USDC — ETH up then under
   [0.5, 0.44, 0.62], // BTC/USDC — BTC under then over
   [0.5, 0.52, 0.48], // USDC/USDT — gentle peg drift
 ];
 
-// Three preview panels animating through the Context → Agent →
-// Execution cycle. The active phase's panel grows from a square to
-// fill the remaining row width, surfacing a title; the inactive two
-// stay square. ResizeObserver measures the row so the active width
-// adapts to the text column's actual rendered width. Cycle state
-// (phaseIndex / innerPhase / completedPhases) is owned by the parent
-// `StackBody` so the StackViz on the right can share it; this
-// component is purely presentational for the preview row.
+// Three preview panels cycling Context → Agent → Execution. Active
+// panel grows to fill the row width and surfaces a title; the
+// inactive two stay square. Cycle state (phaseIndex / innerPhase /
+// completedPhases) is owned by the parent StackBody so StackViz can
+// share it.
 function StackPreview({
   open,
   phaseIndex,
@@ -676,11 +663,9 @@ function StackPreview({
     return () => ro.disconnect();
   }, []);
 
-  // Typing animation — when the "list" phase starts, walk through the
-  // joined bullet text one character at a time. Base typing is fast
-  // (a few ms per letter) but each char rolls a 5% chance of a
-  // "thinking" lag, plus longer beats on newlines and punctuation, so
-  // the cadence varies naturally without ever being mechanical.
+  // Typing animation — walks through the joined bullet text one char
+  // at a time. Each tick rolls a 5% "thinking" lag plus longer beats
+  // on newlines and punctuation so the cadence reads naturally.
   const [typedChars, setTypedChars] = useState(0);
   useEffect(() => {
     if (!open || innerPhase !== "list") {
@@ -691,10 +676,8 @@ function StackPreview({
     let idx = 0;
     let timeoutId: ReturnType<typeof setTimeout>;
     const tick = () => {
-      // Batch 1–2 chars per tick. Below ~4ms single-char delays the
-      // browser's timer minimum kicks in, so batching keeps typing
-      // visibly fast without monotony. Random batch size + variable
-      // delays preserve a streaming-like rhythm.
+      // Batch 1–2 chars per tick — below ~4ms the browser's timer
+      // minimum makes single-char delays drop frames.
       const batch = 1 + Math.floor(Math.random() * 2);
       idx = Math.min(idx + batch, fullText.length);
       setTypedChars(idx);
@@ -704,8 +687,7 @@ function StackPreview({
       if (justTyped === "\n") delay = 10 + Math.random() * 21;
       else if (/[.,;:!?$/]/.test(justTyped)) delay = 3 + Math.random() * 11;
       else delay = 1 + Math.random() * 5.5;
-      // Occasional "thinking" lag — adds a longer pause to ~5% of
-      // ticks so the typing rhythm has natural irregularity.
+      // Occasional thinking-lag for natural irregularity.
       if (Math.random() < 0.05) delay += 19 + Math.random() * 34;
       timeoutId = setTimeout(tick, delay);
     };
@@ -713,16 +695,11 @@ function StackPreview({
     return () => clearTimeout(timeoutId);
   }, [innerPhase, open, phaseIndex]);
 
-  // Gate the done-area exit transitions. On entry to "done", styles
-  // (text width, opacity, gap) snap to their done values with no
-  // transition (avoids the icon-shift jump while the wrapper fades
-  // in). After 100ms — once the entry has painted — transitions are
-  // re-enabled, so the eventual done → check transition (when the
-  // phase advances) animates text fade + gap collapse + icon green
-  // together as a single combined motion. We deliberately don't
-  // reset readyToExit when innerPhase leaves "done": flipping the
-  // transition rule back to "none" mid-flight would cancel the very
-  // animation we're trying to play.
+  // Done-area transitions snap to their done values for the first
+  // 100ms (so the entry paints clean), then re-enable so the
+  // done→check transition animates as one combined motion. We
+  // deliberately don't reset readyToExit when innerPhase leaves
+  // "done"; flipping mid-flight would cancel that animation.
   const [readyToExit, setReadyToExit] = useState(false);
   useEffect(() => {
     if (innerPhase !== "done") return;
@@ -743,20 +720,16 @@ function StackPreview({
   const dur = 800;
 
   // Pre-sliced bullet text for the typed list rendering. Scroll is
-  // CSS-driven (.ai-context-flow), so the column glides linearly
-  // upward over 6s; typing is calibrated to finish well before that,
-  // so lines reach the top fully typed.
+  // CSS-driven (.ai-context-flow); typing is calibrated to finish
+  // before the column reaches the top.
   const visibleText =
     innerPhase === "list"
       ? PHASE_CONFIGS[phaseIndex].bullets.join("\n").slice(0, typedChars)
       : "";
 
-  // Cell grid for the diagonal wave. Each dot is 1px (integer pixel
-  // — the previous 1.5px size combined with fractional offsetX/Y
-  // values from the centring math made some dots straddle pixel
-  // boundaries, so the browser anti-aliased them as 1px in some
-  // positions and 2px in others). Centred at the 8px cell midpoint,
-  // with animation-delay = (col + row) * 30ms so the brightness
+  // Cell grid for the diagonal wave. Each dot is 1px (integer pixel)
+  // centred at the 8px cell midpoint, with animation-delay
+  // = (col + row) * 30ms so the brightness
   // pulse rolls from top-left to bottom-right. PAD cells extend past
   // the panel — overflow:hidden masks the overhang. Math.round on
   // each x/y locks dots to the integer pixel grid.
@@ -782,11 +755,8 @@ function StackPreview({
 
   const renderPanel = (i: number) => {
     const isActive = i === phaseIndex && rowWidth > 0;
-    // Three "green" trigger conditions: an inactive panel that's
-    // completed (showCheck), and the active phase-2 panel sitting in
-    // its "confirmed" hold state (showConfirmed). Either way the
-    // panel + icon + text all flip to the green palette with the
-    // same delayed pop animation.
+    // Two "green" triggers: an inactive panel that's completed, and
+    // the active panel in its "confirmed" hold state.
     const showConfirmed = isActive && innerPhase === "confirmed";
     const showCheck = !isActive && completedPhases.has(i);
     const isGreen = showConfirmed || showCheck;
@@ -835,11 +805,8 @@ function StackPreview({
               innerPhase !== "confirmed"
                 ? 1
                 : 0,
-            // Asymmetric transition: fade-in is delayed by 750ms so
-            // the wave doesn't slam in at full brightness when a
-            // panel switches from square to rectangle. Fade-out runs
-            // immediately so the wave is gone before the panel
-            // collapses, enters done, or holds in confirmed.
+            // 750ms fade-in delay so the wave doesn't slam in on
+            // panel-switch; instant fade-out before done/confirmed.
             transition:
               isActive &&
               innerPhase !== "done" &&
@@ -884,11 +851,8 @@ function StackPreview({
         >
           {titles[i]}
         </span>
-        {/* Typed bullet list — fixed-height 8-row column. translateY is
-            JS-driven from typedChars so the line being typed is always
-            pinned to the panel bottom; the scroll never outruns the
-            typing. Smooth CSS transition between line bumps gives a
-            steady, lined-up feel that's still kinetic. */}
+        {/* Typed bullet list — fixed-height column; scroll never
+            outruns the typing. */}
         {isActive && innerPhase === "list" && (
           <div
             aria-hidden
@@ -933,17 +897,9 @@ function StackPreview({
             </div>
           </div>
         )}
-        {/* Done / confirmed / check / preview area — same icon in four
-            contexts:
-            • "done"      : panel is in done phase; muted text + icon.
-            • "confirmed" : phase 2 only — active panel has finished
-                            its cycle and is holding the green
-                            success state for 3s before the cycle
-                            wraps. Text + icon both green and scaled.
-            • "check"     : a previous phase has collapsed back to a
-                            square; icon green, no text.
-            • "preview"   : phase hasn't reached this panel yet; icon
-                            in default colour as an upcoming-step hint. */}
+        {/* Done/confirmed/check/preview area — same icon in four
+            contexts (active-done, active-confirmed-green, completed-
+            check, upcoming-preview). */}
         {(() => {
           const showDone = isActive && innerPhase === "done";
           const showText = showDone || showConfirmed;
@@ -969,10 +925,7 @@ function StackPreview({
                   display: "inline-flex",
                   alignItems: "center",
                   gap: showText ? 6 : 0,
-                  // Whole inline-flex scales when entering green so
-                  // both text + icon "pop" together. Asymmetric
-                  // timing matches the icon-colour transition: long
-                  // delay + bouncy spring on entry, fast snap on exit.
+                  // Scales on green entry so text + icon pop together.
                   transform: isGreen ? "scale(1.12)" : "scale(1)",
                   transition: isGreen
                     ? `gap 400ms cubic-bezier(0.2, 0, 0.2, 1), transform 450ms cubic-bezier(0.34, 1.56, 0.64, 1) ${dur}ms`
@@ -997,9 +950,8 @@ function StackPreview({
                       ? "rgb(74, 222, 128)"
                       : "rgba(255,255,255,0.62)",
                     letterSpacing: "-0.005em",
-                    // lineHeight 1.3 leaves room for descenders ("g", "p",
-                    // "y") so the max-width collapse + overflow:hidden on
-                    // this span doesn't clip them.
+                    // 1.3 leaves room for descenders so the max-width
+                    // collapse doesn't clip them.
                     lineHeight: 1.3,
                   }}
                 >
@@ -1017,9 +969,6 @@ function StackPreview({
                     color: isGreen
                       ? "rgb(74, 222, 128)"
                       : "rgba(255,255,255,0.62)",
-                    // Scale lives on the parent inline-flex (so text
-                    // + icon scale together); here just colour. Same
-                    // delay-on-entry / instant-on-exit asymmetry.
                     transition: isGreen
                       ? `color 450ms cubic-bezier(0.34, 1.56, 0.64, 1) ${dur}ms`
                       : "color 180ms cubic-bezier(0.4, 0, 1, 1)",
@@ -1061,15 +1010,10 @@ function StackPreview({
         display: "flex",
         alignItems: "center",
         gap: GAP,
-        // Equal margins on both sides — auto/auto centers the row
-        // vertically in the remaining space below the description, so
-        // the gap to the description above matches the gap to the
-        // card's bottom edge.
+        // auto/auto vertically centers the row below the description.
         marginTop: "auto",
         marginBottom: "auto",
-        // 10% narrower than the column — shrinks rowWidth → activeWidth
-        // tracks automatically (computed from rowWidth in the layout
-        // math above).
+        // 10% narrower so activeWidth (driven by rowWidth) tracks.
         width: "90%",
       }}
     >
@@ -1082,11 +1026,8 @@ function StackPreview({
   );
 }
 
-// Wraps the Stack card's body — text column on the left (with the
-// preview row at the bottom) and StackViz on the right — and owns the
-// shared cycle state that drives both. Lifting state here is what
-// keeps the StackPreview animation in sync with the StackViz panel
-// highlights and the USDC bar fill.
+// Owns the cycle state shared by StackPreview (left, typing) and
+// StackViz (right, panel highlights + USDC bar) so they stay in sync.
 function StackBody({ open }: { open: boolean }) {
   const [phaseIndex, setPhaseIndex] = useState(0);
   const [innerPhase, setInnerPhase] = useState<
@@ -1096,8 +1037,7 @@ function StackBody({ open }: { open: boolean }) {
     () => new Set(),
   );
   // Cycle pointer for the USDC bar fill — advances at each phase 2
-  // "confirmed" entry, wraps mod 3 so after 3 cycles the bar lands
-  // back where it started.
+  // "confirmed" entry, wraps mod 3.
   const [barIdx, setBarIdx] = useState(0);
 
   useEffect(() => {
@@ -1211,9 +1151,9 @@ function StackBody({ open }: { open: boolean }) {
   );
 }
 
-// Panel keeps overflow:visible (so chip tooltips can extend above it) — footer owns its own bottom-corner radius.
-// `isPulsing` adds a slow white-border pulse via the .stackviz-panel-pulse class (active phase, working).
-// `isGreen` swaps to a green tint + green border with the same delayed transition the StackPreview uses.
+// Panel keeps overflow:visible so chip tooltips can extend above it.
+// `isPulsing` adds a slow white-border pulse for the active working
+// phase; `isGreen` swaps to a green tint + green border once done.
 function TopPanel({
   children,
   width,
@@ -1229,11 +1169,9 @@ function TopPanel({
   isPulsing?: boolean;
   isGreen?: boolean;
 }) {
-  // Diagonal wave grid covering the body (panel - footer). Mirrors the
-  // StackPreview pattern: CELL=8 spacing, DOT=1 dots, animation-delay
-  // = (col + row) * 30ms so the brightness ramp travels top-left to
-  // bottom-right. Only computed when width/height resolve to numbers
-  // (always the case in current usage).
+  // Diagonal wave grid covering the body. CELL=8 spacing, DOT=1 dots,
+  // animation-delay = (col + row) * 30ms so the brightness travels
+  // top-left to bottom-right.
   const FOOTER_H = 18;
   const numericW = typeof width === "number" ? width : 0;
   const numericH = typeof height === "number" ? height : 0;
@@ -1267,12 +1205,6 @@ function TopPanel({
         width,
         height,
         position: "relative",
-        // Body bg + inset border drive both the pulse animation
-        // (white) and the success state (green). When the pulse class
-        // is active, its keyframes override the inline boxShadow /
-        // background; when isGreen takes over, the inline values pin
-        // the panel to its green palette and the (delayed) transition
-        // animates the swap. Cycle reset → instant snap back.
         background: isGreen
           ? "rgba(74, 222, 128, 0.06)"
           : "rgba(255,255,255,0.04)",
@@ -1287,12 +1219,9 @@ function TopPanel({
         flexDirection: "column",
       }}
     >
-      {/* Wave layer — clipped to the body region (panel minus footer)
-          and to the panel's top-corner radius so dots don't bleed past
-          the rounded edges. Asymmetric fade: 750ms delay on entry
-          (matches StackPreview) so the wave doesn't slam in alongside
-          the panel switch; instant fade on exit when the phase wraps
-          to green or the panel becomes inactive. */}
+      {/* Wave layer — clipped to the body region. 750ms entry delay
+          so the wave doesn't slam in alongside the panel switch;
+          instant exit fade. */}
       <div
         aria-hidden
         style={{
@@ -1389,7 +1318,7 @@ function HoverChip({
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const ref = useRef<HTMLSpanElement>(null);
 
-  // Tooltip is portalled to <body> to escape ancestor backdrop-filter, which would otherwise blank it out.
+  // Tooltip is portalled to <body> to escape ancestor backdrop-filter.
   useLayoutEffect(() => {
     if (!hover || !ref.current) return;
     const update = () => {
@@ -1498,7 +1427,6 @@ function PoolPairChip({
         flexShrink: 0,
       }}
     >
-      {/* display:flex on absolute wrappers prevents inline-flex children inheriting line-height as padding. */}
       <span style={{ position: "absolute", left: 0, top: 0, display: "flex", zIndex: hoverLeft ? 6 : 1 }}>
         <HoverChip label={left.slug} onHoverChange={setHoverLeft}>
           <RatioChip entry={left} size={SIZE} radius={4} ratio={leftRatio} />
@@ -1513,11 +1441,10 @@ function PoolPairChip({
   );
 }
 
-// Two-layer chip: a greyscale base sits at full size (always visible),
-// a coloured copy of the same TokenChip overlays it clipped from the
-// bottom up to `ratio * height`. Reads as a fill-level / liquidity
-// gauge for the token's share of the pool. clip-path is animated so
-// ratio changes glide in lockstep with the USDC bar's transition.
+// Two-layer chip: a desaturated base sits at full size; a coloured
+// copy clips from the bottom up to `ratio * height`. Reads as a
+// fill-level gauge for the token's share of the pool. clip-path is
+// animated so ratio changes glide in lockstep with the bar.
 function RatioChip({
   entry,
   size,
@@ -1547,9 +1474,6 @@ function RatioChip({
           position: "absolute",
           inset: 0,
           display: "flex",
-          // Half-saturation base — the unfilled portion still reads as
-          // the token's own colour, just dimmer than the full-saturation
-          // overlay clipped on top.
           filter: "saturate(0.5)",
         }}
       >
@@ -1699,8 +1623,7 @@ function BuiltOnChip({
   );
 }
 
-// White circle layered behind a Uniswap chip's silhouette. 85% of the
-// chip's box, centered. Parent must be position:relative.
+// White circle layered behind a Uniswap chip's silhouette.
 function Moon() {
   return (
     <span
@@ -1720,9 +1643,7 @@ function Moon() {
   );
 }
 
-// Recoloured silhouette layered on top of Moon — masks the unicorn SVG
-// in the chip's brand colour at 62% of the box so it sits inside the
-// moon. Parent must be position:relative.
+// Brand-colour silhouette layered on top of Moon.
 function Silhouette({ src, color }: { src: string; color: string }) {
   return (
     <span
@@ -1857,18 +1778,13 @@ function LearnMore({ open, onClick }: { open: boolean; onClick: () => void }) {
   );
 }
 
-// "How it works?" — primary entry into the Learn-more overlay. Same
-// text + chip-arrow style as the Back button and same position too
-// (bottom-left, just below the panel). They occupy the same slot
-// mutually exclusively, toggled via display:none.
+// "How it works?" — primary entry into the Learn-more overlay; same
+// position + style as the Back button, toggled via display:none.
 //
-// The `reveal` entry animation must only play once on initial page load.
-// Browsers restart CSS animations when an element flips from `display:none`
-// back to a visible display value, so leaving the class on would re-fire
-// the 2700ms delayed reveal every time the user clicks Back from the
-// Learn-more overlay. Once the initial reveal has completed we strip the
-// class entirely — the button's resting state (opacity 1, no transform)
-// matches the animation's final keyframe, so there is no visual snap.
+// The reveal animation must only play once on initial load. Browsers
+// restart CSS animations when display flips back from none, so we
+// strip the class once the initial reveal has completed. The button's
+// resting state matches the animation's final keyframe, so no snap.
 const REVEAL_DELAY_MS = 2700;
 const REVEAL_DURATION_MS = 600;
 function HowItWorks({ disabled, onClick }: { disabled?: boolean; onClick: () => void }) {
@@ -1919,8 +1835,7 @@ function HowItWorks({ disabled, onClick }: { disabled?: boolean; onClick: () => 
   );
 }
 
-// Tiny stroke icons used inside inline pills + card labels. 24x24 viewBox so
-// stroke-width stays consistent regardless of render size.
+// Stroke icons used inside inline pills + card labels.
 const ICONS: Record<string, React.ReactNode> = {
   summary: <path d="M5 7h14M5 12h10M5 17h12" />,
   vault: (
@@ -1935,21 +1850,18 @@ const ICONS: Record<string, React.ReactNode> = {
       <path d="M3 12h6M15 12h6" />
     </>
   ),
-  // agent — clock (24/7 monitoring), reads as "always on, decisioning over time"
   agent: (
     <>
       <circle cx="12" cy="12" r="8.5" />
       <polyline points="12 7 12 12 15.5 14" />
     </>
   ),
-  // risk — shield with check, reads as "exposure managed"
   risk: (
     <>
       <path d="M12 3 L20 7 V13 C20 17 16.5 20 12 21 C7.5 20 4 17 4 13 V7 Z" />
       <polyline points="9 12 11 14 15 10" />
     </>
   ),
-  // pools — three stacked liquidity layers
   pools: (
     <>
       <path d="M4 7h16M4 12h16M4 17h16" />
@@ -1986,9 +1898,8 @@ const ICONS: Record<string, React.ReactNode> = {
   ),
 };
 
-// Inline brand reference - rendered as an InlinePill-shaped chip so it sits
-// flush with the other inline pills in body copy. Logo + "alps" wordmark in
-// pure white, hairline border, low-alpha bg.
+// Inline brand reference — InlinePill-shaped chip with the alps
+// wordmark, sits flush with other inline pills in body copy.
 function BrandRef() {
   return (
     <span
@@ -2050,8 +1961,7 @@ function StrokeIcon({ kind, size = 11, opacity = 1 }: { kind: keyof typeof ICONS
   );
 }
 
-// Filled icons (18×18 viewBox, two-tone via fill-opacity). Sourced from a
-// small icon kit; primary paths render at full color, secondary ones at 0.4.
+// Filled icons (18×18 viewBox, two-tone via fill-opacity).
 const FILLED_ICONS: Record<string, React.ReactNode> = {
   dots: (
     <>
@@ -2129,9 +2039,8 @@ function FilledIcon({ kind, size = 12 }: { kind: keyof typeof FILLED_ICONS | str
   );
 }
 
-// Inline data pill -woven into prose. Hairline border + low-alpha bg, Inter
-// numerals contrasting with the Radley body sets the "data" affordance in mono.
-// Three icon variants: stroke (default), single token PNG, or overlapping pair.
+// Inline data pill woven into prose. Three icon variants: stroke
+// (default), single token PNG, or overlapping pair.
 type TokenImg = { src: string; alt: string };
 type InlinePillProps = {
   icon?: keyof typeof ICONS;
@@ -2156,8 +2065,6 @@ function InlinePill({ icon, iconImage, iconPair, tooltip, children }: InlinePill
       </span>
     );
   } else if (iconPair) {
-    // No boxShadow ring — the dark outline read as a black outline against
-    // the muted scenery panel rather than blending invisibly into pill bg.
     iconSlot = (
       <span style={{ width: 23, height: 14, position: "relative", flexShrink: 0, display: "inline-block" }}>
         <Image
@@ -2216,11 +2123,9 @@ function InlinePill({ icon, iconImage, iconPair, tooltip, children }: InlinePill
   return <InlinePillWithTooltip pill={pill} tooltip={tooltip} />;
 }
 
-// Portalled tooltip variant. Tracks hover via state + the pill's
-// bounding rect, then renders the popover at <body> level so its
-// `backdrop-filter` samples the actual page bg instead of the
-// already-filtered ancestor (which would collapse the frosted effect
-// when the pill sits inside a blurred segment, e.g. /app's Summary).
+// Portalled tooltip variant — renders the popover at <body> level so
+// backdrop-filter samples the page bg instead of an already-filtered
+// ancestor.
 function InlinePillWithTooltip({ pill, tooltip }: { pill: React.ReactNode; tooltip: React.ReactNode }) {
   const [hover, setHover] = useState(false);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
@@ -2277,9 +2182,6 @@ function InlinePillWithTooltip({ pill, tooltip }: { pill: React.ReactNode; toolt
 }
 
 // Token + pair lists used by tooltip grids on the Summary card pills.
-// Shared 5-token set (matches ALLOCATIONS); each entry has the brand
-// colour and kind/src so it can render through TokenChip as a brand-
-// coloured rounded square (no more circular icon chrome).
 type TokenEntry = { slug: string; kind: "svg" | "png"; src: string; color: string };
 const TOKENS: Record<string, TokenEntry> = {
   USDC: { slug: "USDC", kind: "png", src: "/tokens/usdc.png",     color: "#2775CA" },
@@ -2319,10 +2221,8 @@ function PortfolioTooltip() {
   );
 }
 
-// Gauge-style allocation cells + shared TokenChip helper. Each chip is a
-// brand-color rounded square with the token glyph inside: ETH/BTC/USDT use
-// single-path SVGs masked white; USDC/UNI overlay their PNG (their SVG
-// sources don't exist).
+// Brand-color rounded-square token chips. ETH/BTC/USDT use masked
+// SVGs; USDC/UNI overlay PNG sources.
 type PiePngEntry = { slug: string; pct: number; color: string; kind: "png"; src: string };
 type PieSvgEntry = { slug: string; pct: number; color: string; kind: "svg"; src: string };
 type PieEntry = PiePngEntry | PieSvgEntry;
@@ -2500,8 +2400,6 @@ function PortfolioPies() {
 }
 
 
-// 3×2 grid of overlapping coin pairs — no text labels, the chip pair is
-// the affordance.
 function PairsTooltip() {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(3, auto)", gap: "12px 18px" }}>
@@ -2523,9 +2421,8 @@ function PairsTooltip() {
   );
 }
 
-// Top-left card label pill. Uses FilledIcon when the icon name is in
-// FILLED_ICONS; falls back to StrokeIcon otherwise. alignSelf flex-start
-// prevents the pill from stretching when its parent is a flex-col Card.
+// Top-left card label pill. Uses FilledIcon for icons in FILLED_ICONS,
+// falling back to StrokeIcon.
 function CardLabel({ icon, children }: { icon: string; children: React.ReactNode }) {
   const isFilled = icon in FILLED_ICONS;
   return (
@@ -2554,8 +2451,7 @@ function CardLabel({ icon, children }: { icon: string; children: React.ReactNode
   );
 }
 
-// Generic card chrome -bg + hairline + radius + padding. Used for Summary,
-// Vault flow, Strategy.
+// Generic card chrome — bg + hairline + radius + padding.
 function Card({ children, style, className }: { children: React.ReactNode; style?: React.CSSProperties; className?: string }) {
   return (
     <div
@@ -2573,9 +2469,8 @@ function Card({ children, style, className }: { children: React.ReactNode; style
   );
 }
 
-// VaultFlow -orbital basket. Five token chips ring an ALPS center; dashed
-// deposit/yield paths animate continuously. Hovering a chip dims the others
-// and updates the caption beneath the center card.
+// VaultFlow — orbital basket. Five token chips ring an ALPS center;
+// dashed deposit/yield paths animate continuously.
 type OrbitEntry = PieEntry & { angle: number; note: string };
 const ORBIT_TOKENS: OrbitEntry[] = [
   { slug: "USDC", kind: "png", src: "/tokens/usdc.png",     pct: 38, color: "#2775CA", note: "stable leg",     angle: -90  },
@@ -2587,10 +2482,8 @@ const ORBIT_TOKENS: OrbitEntry[] = [
 
 function VaultFlow() {
   const [hover, setHover] = useState<string | null>(null);
-  // Scaled-up internal coord space (216 → 240) so the ring + chips fill
-  // more of the card. HEIGHT is shorter than SIZE so the empty padding
-  // under the lowest chips is cropped via overflow:hidden — the viz
-  // itself isn't shrunk.
+  // HEIGHT < SIZE crops empty padding under the lowest chips via
+  // overflow:hidden without shrinking the viz itself.
   const SIZE = 240;
   const HEIGHT = 212;
   const CENTER = SIZE / 2;
@@ -2611,7 +2504,7 @@ function VaultFlow() {
         aria-hidden
         style={{ position: "absolute", inset: 0, overflow: "visible" }}
       >
-        {/* Ring -dashed outline indicating "the basket" */}
+        {/* Ring — dashed outline indicating "the basket" */}
         <circle
           cx={CENTER}
           cy={CENTER}
@@ -2621,11 +2514,10 @@ function VaultFlow() {
           strokeWidth={1}
           strokeDasharray="2 4"
         />
-        {/* Spokes — radial connectors that start at the ALPS card edge and
-            end at the chip edge, leaving the squares uncovered. ALPS
-            center is 58px and chips are CHIP px (half-sizes 29 and CHIP/2).
-            The distance from a square's center to its edge along an angle
-            θ is half_size / max(|cos θ|, |sin θ|). Adding a 2px gap. */}
+        {/* Spokes — radial connectors that start at the ALPS card edge
+            and end at the chip edge. Distance from a square's center
+            to its edge along angle θ is half_size / max(|cos θ|, |sin θ|),
+            plus a 2px gap. */}
         {ORBIT_TOKENS.map((t) => {
           const rad = (t.angle * Math.PI) / 180;
           const m = Math.max(Math.abs(Math.cos(rad)), Math.abs(Math.sin(rad)));
@@ -2750,21 +2642,17 @@ function VaultFlow() {
   );
 }
 
-// StrategyViz -active LP range management.
-// A price polyline drifts left under a clip window. A liquidity range band
-// sits at the midline and "snaps" up/down twice per loop -that's the
-// rebalance event. A fee-tick chip flashes after each snap; the agent dot
-// pulses bright at the same moment, telegraphing cause-and-effect.
-// All four animated layers share a 9s clock so they stay phase-locked.
-// Real ETH/USD price data — 7 days of hourly closes from CoinGecko, sampled
-// every 2nd point (85 waypoints, ~5px between steps for fine granularity),
-// mapped to viewBox y=86..170 (lower y = higher price), then linearly
-// detrended AND seam-slope-matched: |y[1]-y[0]| equals |y[N-1]-y[N-2]|, so
-// the wrap point shows no kink — the price flows continuously across loops.
-// The mid-series rally from ~$2300 to the $2415 peak reads as a real
-// out-of-range breakout above the LP band. Spans x=0..432; rendered twice
-// (second copy translated +432) so translateX(-50%) of the 864-wide group
-// cycles invisibly.
+// StrategyViz — active LP range management. A price polyline drifts
+// left under a clip window; a liquidity band sits at the midline and
+// "snaps" up/down twice per loop — the rebalance event. A fee-tick
+// chip flashes after each snap; the agent dot pulses at the same
+// moment. All four animated layers share a 9s clock to stay
+// phase-locked.
+//
+// Real ETH/USD price data — 7 days of hourly closes from CoinGecko,
+// linearly detrended and seam-slope-matched so the loop wraps without
+// a kink. Spans x=0..432; rendered twice (second copy translated
+// +432) so translateX(-50%) of the 864-wide group cycles invisibly.
 const PRICE_PATH =
   "M 0 140.9 L 5.1 135.6 L 10.3 128.4 L 15.4 145.5 L 20.6 156.3 L 25.7 165.0 " +
   "L 30.9 170.8 L 36.0 165.2 L 41.1 167.7 L 46.3 164.7 L 51.4 163.4 L 56.6 158.4 " +
@@ -2793,17 +2681,10 @@ function StrategyViz() {
   };
   const leaveBand = () => setHoveredBand(null);
 
-  // The SVG's viewBox is 256×256 but only the rectangle x=12..236, y=20..216
-  // contains real content (y-ticks, chart frame, bands, price line). At
-  // 216/256 render scale that's a ~189×166 visible region with ~14px of
-  // empty padding on top, ~34px on bottom, and ~14px on each side. Rather
-  // than re-coord the whole viz, we leave the SVG at 216×216 and translate
-  // it up-and-left inside a smaller wrapper that crops the empty borders —
-  // so content sits flush with the wrapper edge, matching the inner
-  // margin of text in other cards.
-  // Wrapper sized so the chart-frame's outer stroke edge sits flush with
-  // the wrapper edges; sized so the sim card doesn't push Strategy out
-  // of proportion in the row.
+  // The SVG's viewBox is 256×256 but only x=12..236, y=20..216 holds
+  // real content. We leave the SVG at 216×216 and translate it inside
+  // a smaller wrapper that crops the empty borders, so content sits
+  // flush with the card's text margin.
   const W = 168;
   const H = 138;
   const SHIFT_X = -16;
@@ -2839,8 +2720,7 @@ function StrategyViz() {
         />
 
         <g clipPath="url(#strategy-window)">
-          {/* WIDE range — slow Bollinger (k=3, 40-period). Sits BEHIND
-              the narrow range. Greyscale tint; brightens on hover. */}
+          {/* WIDE range — slow Bollinger. Sits behind the narrow range. */}
           <g
             className="animate-band-wide-volatility"
             onMouseEnter={() => enterBand("wide")}
@@ -2878,9 +2758,8 @@ function StrategyViz() {
             />
           </g>
 
-          {/* NARROW range — aggressive Bollinger (k=2, 20-period). Sits on
-              top of WIDE; deeper greyscale shade + dashed edges to read
-              as the tighter inner envelope. Brightens on hover. */}
+          {/* NARROW range — aggressive Bollinger. Sits on top of WIDE
+              with dashed edges as the tighter inner envelope. */}
           <g
             className="animate-band-volatility"
             onMouseEnter={() => enterBand("narrow")}
@@ -2920,9 +2799,8 @@ function StrategyViz() {
             />
           </g>
 
-          {/* Price line — random walk, drifts continuously leftward. The
-              path is rendered twice (second copy translated by 432 units)
-              so translateX(-50%) of the 864-wide group is a seamless loop. */}
+          {/* Price line drifts left; rendered twice so the 864-wide
+              group cycles seamlessly. */}
           <g className="animate-price-drift" style={{ transformOrigin: "0 0" }}>
             <path
               d={PRICE_PATH}
@@ -3084,10 +2962,9 @@ export function LearnMoreContent({ open, onAppNav, inline = false }: { open: boo
         </p>
       </div>
 
-      {/* Bento — two independent columns. Each card is sized to its own
-          content; nothing stretches to match siblings.
-            left:  Summary on top,    Strategy below it
-            right: Vault flow on top, Open App pinned bottom-right */}
+      {/* Bento — two independent columns:
+            left:  Summary on top, Stack below
+            right: Vault flow + Strategy/sim row, Open App bottom-right */}
       <div
         style={{
           display: "flex",
@@ -3111,18 +2988,9 @@ export function LearnMoreContent({ open, onAppNav, inline = false }: { open: boo
         >
         <SummaryCard />
 
-        {/* Stack — single card. Unlike Strategy/Vault flow which have a
-            CardLabel pill at top followed by a side-by-side row, here the
-            CardLabel lives INSIDE the left column so the viz can start
-            at the same Y as the pill (aligned to card top-padding).
-            On the landing version, height + paddingBottom are fixed
-            (264 / 12) — measured via DevTools — so the bottom edge lines
-            up exactly with Strategy's bottom in the right column.
-            On /app (inline), the right column hides the Open App row,
-            so the bento's content height is dictated by the right
-            column's natural height instead. We let Stack grow with
-            flex:1 (minHeight 264 keeps the StackViz from collapsing)
-            so its bottom tracks Strategy's bottom in inline mode. */}
+        {/* Stack — landing fixes height to 264 to match Strategy's
+            bottom on the right. Inline (/app) drops Open App, so we
+            let Stack flex with a 264 floor instead. */}
         <Card style={inline
           ? { paddingBottom: 12, flex: 1, minHeight: 264, display: "flex", flexDirection: "column" }
           : { paddingBottom: 12, height: 264, display: "flex", flexDirection: "column" }}>
@@ -3130,11 +2998,8 @@ export function LearnMoreContent({ open, onAppNav, inline = false }: { open: boo
         </Card>
         </div>
 
-        {/* Right column — Vault flow on top, Strategy/sim row, Open App
-            pinned bottom-right. alignSelf:stretch so the column fills the
-            bento's height (overriding the parent's alignItems:flex-start)
-            — needed for marginTop:auto on Open App to push it to the
-            actual bottom of the LMC, matching the right-edge margin. */}
+        {/* Right column. alignSelf:stretch fills the bento height so
+            marginTop:auto on Open App pushes it to the LMC bottom. */}
         <div
           style={{
             flex: 1,
@@ -3145,9 +3010,8 @@ export function LearnMoreContent({ open, onAppNav, inline = false }: { open: boo
             minWidth: 0,
           }}
         >
-          {/* Vault flow — top of right column. The orbital viz is lifted
-              with a negative margin so its rings visually align with the
-              card title row instead of sitting below it. */}
+          {/* Vault flow — orbital viz lifted with a negative margin
+              so its rings align with the card title row. */}
           <Card>
             <CardLabel icon="vault">Vault flow</CardLabel>
             <div
@@ -3195,9 +3059,8 @@ export function LearnMoreContent({ open, onAppNav, inline = false }: { open: boo
             </div>
           </Card>
 
-          {/* Strategy (text) + ETH/USDC sim (square) — split into two
-              side-by-side cards so the row's height isn't dictated by
-              the viz alone. */}
+          {/* Strategy text + ETH/USDC sim — two cards so the row's
+              height isn't dictated by the viz alone. */}
           <div style={{ display: "flex", gap: 14, alignItems: "stretch" }}>
             <Card style={{ flex: 1, minWidth: 0 }}>
               <CardLabel icon="strategy">Strategy</CardLabel>
@@ -3244,10 +3107,7 @@ export function LearnMoreContent({ open, onAppNav, inline = false }: { open: boo
             </Card>
           </div>
 
-          {/* Open App — marginTop:auto pushes it to the bottom of the
-              right column regardless of Strategy's content height.
-              Hidden when rendered inline on /app since the user is
-              already in the app. */}
+          {/* Open App — pinned bottom; hidden inline on /app. */}
           <div
             style={{
               marginTop: "auto",
@@ -3257,8 +3117,6 @@ export function LearnMoreContent({ open, onAppNav, inline = false }: { open: boo
               gap: 8,
             }}
           >
-            {/* Ghost secondary — GitHub icon square button. Same chrome
-                as the BuiltWith heart-icon (bg-white/10, text-haze). */}
             <a
               href="https://github.com/yanisepfl/alp"
               target="_blank"
@@ -3386,8 +3244,8 @@ export function LandingFace({
   const router = useRouter();
   const [exiting, setExiting] = useState(false);
 
-  // Trigger lockup-exit and fire navigation in parallel — animation
-  // runs on the still-mounted landing until the route swaps in.
+  // Trigger lockup-exit and navigation in parallel — animation
+  // runs on the still-mounted landing until the route swaps.
   const handleAppNav = () => {
     if (exiting) return;
     setExiting(true);
@@ -3396,9 +3254,8 @@ export function LandingFace({
 
   return (
     <>
-      {/* Lockup. Slides up from behind the muted scenery panel on
-          entry, back down behind it on exit. z-10 so scenery-panel
-          (z-15) covers it during the slide. */}
+      {/* Lockup slides up from behind the muted scenery panel and
+          back down on exit. z-10 lets scenery-panel (z-15) cover it. */}
       <div
         className={`absolute z-10 flex items-center gap-1.5 ${exiting ? "lockup-exit" : "lockup-enter"}`}
         style={{ top: "calc(20% - 48px)", left: "20%" }}

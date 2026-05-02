@@ -1,7 +1,6 @@
-// Frame parse / encode. Encoding is just JSON — kept here so future versioning
-// work has a single seam. Parsing distinguishes:
+// Frame parse / encode. Parsing distinguishes:
 //   - returns ClientFrame on a valid v=1 frame of a known type
-//   - returns null on v !== 1 (server drops silently per CONTRACT.md §7)
+//   - returns null on v !== 1 (server drops silently)
 //   - throws BadFrameError on malformed JSON / unknown shape (caller emits an
 //     `error` frame with code "bad_frame", connection stays open)
 

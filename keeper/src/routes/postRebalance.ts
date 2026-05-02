@@ -1,19 +1,6 @@
-// POST /post-rebalance — receives KeeperHub's reactive-workflow payload
-// after a vault.LiquidityRemoved/Added event fires on chain. KH has
-// already done supplementary chain reads (TAV, agent ETH, pool tick)
-// and we narrate them as a distinct signal-lane entry. Different from
-// the backend indexer's auto-folded kind:"action" entries — this is
-// the "KH said it happened, here's a health snapshot" cross-check.
-//
-// Auth: same Bearer / ?token= fallback as /scan and /force.
-
 import { Hono } from "hono";
 
-import { decodeEventLog, type Address } from "viem";
-
-import { vaultEventsAbi } from "../abi";
 import { publicClient } from "../chain";
-import { env } from "../env";
 import { signal } from "../ingest";
 import { rewriteSignal } from "../narrator";
 import { requireBearer } from "./auth";
@@ -23,14 +10,15 @@ interface PostRebalanceBody {
     tx?: string;
     poolKey?: string;
     blockNumber?: number | string;
-    amount0?: string;
-    amount1?: string;
+    positionId?: string;
+    amount0Used?: string;
+    amount1Used?: string;
     eventName?: string;
   };
-  postState?: {
-    tavAfter?: string;
+  basketState?: {
+    poolValues?: Array<{ success?: boolean; result?: string; error?: string }> | string;
+    deployedTotal?: string;
     agentEthAfter?: string;
-    tickAfter?: number;
   };
 }
 
@@ -45,10 +33,6 @@ postRebalanceRouter.post("/", async (c) => {
   const poolKey = body.event?.poolKey;
   const eventName = body.event?.eventName ?? "rebalance event";
 
-  // Optional verification: if a tx hash was supplied, look up the receipt
-  // and confirm the chain saw it. Failure here is logged but doesn't
-  // block narration — KH's event trigger is authoritative for "it
-  // happened"; verification just hardens the entry.
   let verified = false;
   if (tx && /^0x[0-9a-fA-F]{64}$/.test(tx)) {
     try {
@@ -59,26 +43,34 @@ postRebalanceRouter.post("/", async (c) => {
     }
   }
 
-  // Build a narration line with whatever fields KH gave us.
   const parts: string[] = [];
-  parts.push(`Detected vault.${eventName} on chain`);
-  if (poolKey) parts.push(`pool ${poolKey.slice(0, 12)}…`);
-  if (tx) parts.push(`tx ${tx.slice(0, 12)}…`);
-  if (body.postState?.tavAfter) {
-    parts.push(`TAV ${(Number(body.postState.tavAfter) / 1e6).toFixed(4)} USDC`);
+  parts.push(`Audit on vault.${eventName}`);
+  if (poolKey) parts.push(`triggered by pool ${poolKey.slice(0, 12)}…`);
+  if (body.event?.positionId) parts.push(`new position #${body.event.positionId}`);
+  const bs = body.basketState;
+  if (bs) {
+    const fmt6 = (raw?: string) => raw ? (Number(raw) / 1e6).toFixed(4) : "?";
+    let pv: Array<{ success?: boolean; result?: string }> | undefined;
+    if (typeof bs.poolValues === "string") {
+      try { pv = JSON.parse(bs.poolValues); } catch { /* skip */ }
+    } else if (Array.isArray(bs.poolValues)) {
+      pv = bs.poolValues;
+    }
+    if (pv && pv.length >= 3) {
+      const labels = ["USDC/USDT", "USDC/cbBTC", "ETH/USDC"];
+      const perPool = pv.slice(0, 3).map((r, i) => `${labels[i]} ${fmt6(r?.result)}`).join(", ");
+      parts.push(`basket: ${perPool}`);
+    }
+    if (bs.deployedTotal) {
+      parts.push(`deployed total ${fmt6(bs.deployedTotal)} USDC (KH math/aggregate)`);
+    }
+    if (bs.agentEthAfter) {
+      parts.push(`agent gas after ${(Number(bs.agentEthAfter) / 1e18).toFixed(6)} ETH`);
+    }
   }
-  if (body.postState?.agentEthAfter) {
-    parts.push(`agent ETH ${(Number(body.postState.agentEthAfter) / 1e18).toFixed(6)}`);
-  }
-  if (body.postState?.tickAfter !== undefined) {
-    parts.push(`pool tick ${body.postState.tickAfter}`);
-  }
-  if (verified) parts.push("(receipt confirmed)");
+  if (verified) parts.push("receipt confirmed");
   const rawText = parts.join(", ") + ".";
 
-  // Sources: link to basescan if we have a tx hash so the entry shows
-  // up grouped with the indexer's kind:"action" auto-folded entries on
-  // the same tx.
   const sources = tx
     ? [
         { kind: "basescan" as const, label: "rebalance tx", tx },
@@ -86,7 +78,6 @@ postRebalanceRouter.post("/", async (c) => {
       ]
     : undefined;
 
-  // Narrate via the signal-lane Claude prompt; falls back to raw on timeout.
   void (async () => {
     const polished = await rewriteSignal(rawText, "kh-event", { recentDecisions: [] });
     const text = polished ? `[kh-event] ${polished}` : `[kh-event] ${rawText}`;

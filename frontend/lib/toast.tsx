@@ -1,9 +1,8 @@
-// Lightweight toast surface. Style matches the page's card
-// vocabulary: same dark `#0c0c10` surface, same `rgba(255,255,255,
-// 0.08)` border, same `var(--sans-stack)` typography, same
-// 12px radius. Status is signalled by a small colored dot on the
-// left rather than a heavy left-border, so the toast reads as a
-// quiet sibling of the bento cards instead of a foreign component.
+// Lightweight toast surface. Style matches the page's card vocabulary
+// (same dark surface, same border, same typography, 12px radius).
+// Status is signalled by a small colored dot on the left rather than
+// a heavy left-border, so the toast reads as a quiet sibling of the
+// bento cards.
 //
 // Usage:
 //   import { toast, ToastViewport } from "@/lib/toast";
@@ -11,9 +10,8 @@
 //   toast("success", "Deposit confirmed");
 //   <ToastViewport />   // mount once at the app root
 //
-// Module-level subscriber pattern (same shape as
-// onApiAuthInvalid in lib/api/hooks.ts) so any handler can fire
-// a toast without prop-drilling.
+// Module-level subscriber pattern so any handler can fire a toast
+// without prop-drilling.
 
 "use client";
 

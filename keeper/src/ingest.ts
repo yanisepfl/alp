@@ -1,9 +1,3 @@
-// POST /ingest/signal helper. Backend route accepts { text, ts?, sources? };
-// sources let the frontend group the keeper's narrated entry with the
-// indexer's auto-generated kind:"action" entries on the same tx hash.
-//
-// Auth: Authorization: Bearer <INGEST_SECRET>, shared with backend .env.
-
 import { env } from "./env";
 import type { Decision } from "./policies/types";
 

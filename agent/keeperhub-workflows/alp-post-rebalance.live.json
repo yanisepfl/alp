@@ -1,0 +1,138 @@
+{
+  "version": 1,
+  "exportedAt": "2026-05-02T21:15:35.188Z",
+  "workflow": {
+    "name": "alp-post-rebalance",
+    "description": "Reactive audit workflow. Subscribes to vault.LiquidityAdded events on Base. When a rebalance lands, KeeperHub uses web3/batch-read-contract (Multicall3) to read vault.poolValueExternal() for ALL three tracked pools in a single RPC call, then math/aggregate sums the values into the deployed total — basket-wide health snapshot, computed inside the workflow. Re-reads agent gas balance, then POSTs the structured audit to keeper /post-rebalance for narration. Distinct from the indexer's auto-folded chain-event entries — this is KeeperHub's independent observation of the entire basket."
+  },
+  "nodes": [
+    {
+      "id": "trigger-event",
+      "data": {
+        "type": "trigger",
+        "label": "vault.LiquidityAdded",
+        "config": {
+          "network": "8453",
+          "eventName": "LiquidityAdded",
+          "contractABI": "[{\"type\":\"event\",\"name\":\"LiquidityAdded\",\"inputs\":[{\"name\":\"poolKey\",\"type\":\"bytes32\",\"indexed\":true},{\"name\":\"positionId\",\"type\":\"uint256\",\"indexed\":false},{\"name\":\"amount0Used\",\"type\":\"uint256\",\"indexed\":false},{\"name\":\"amount1Used\",\"type\":\"uint256\",\"indexed\":false}]}]",
+          "triggerType": "Event",
+          "contractAddress": "0x3F0e6cef3a75f52F1E55806Afe40317f51199CaE"
+        },
+        "status": "idle"
+      },
+      "type": "trigger",
+      "position": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": "batch-pool-values",
+      "data": {
+        "type": "action",
+        "label": "Batch Read Pool Values",
+        "config": {
+          "abi": "[{\"type\":\"function\",\"name\":\"poolValueExternal\",\"stateMutability\":\"view\",\"inputs\":[{\"name\":\"poolKey\",\"type\":\"bytes32\"}],\"outputs\":[{\"type\":\"uint256\"}]}]",
+          "network": "8453",
+          "argsList": "[[\"0x1410c48da640536a03a64200a517f3fe746a9ff6c15e81b1b663c9e18cd222e9\"],[\"0x08f9bc7c50e2b354764b84b8068d5583ca61f316792362bbb2765bd3c298e22d\"],[\"0xdd3d089fc5ee0d8c08e12e8fb7e2ed70ee2e154ea591a3536894b61ae67b40fa\"]]",
+          "batchSize": 100,
+          "inputMode": "uniform",
+          "actionType": "web3/batch-read-contract",
+          "abiFunction": "poolValueExternal",
+          "contractAddress": "0x3F0e6cef3a75f52F1E55806Afe40317f51199CaE"
+        },
+        "status": "idle"
+      },
+      "type": "action",
+      "position": {
+        "x": 280,
+        "y": 0
+      }
+    },
+    {
+      "id": "aggregate-deployed",
+      "data": {
+        "type": "action",
+        "label": "Sum Deployed Capital",
+        "config": {
+          "fieldPath": "result",
+          "inputMode": "array",
+          "operation": "sum",
+          "actionType": "math/aggregate",
+          "arrayInput": "{{@batch-pool-values:Batch Read Pool Values.results}}"
+        },
+        "status": "idle"
+      },
+      "type": "action",
+      "position": {
+        "x": 560,
+        "y": 0
+      }
+    },
+    {
+      "id": "read-gas-after",
+      "data": {
+        "type": "action",
+        "label": "Read Agent Gas After",
+        "config": {
+          "address": "0x8cf03f65ffC08a514dA09063b5632deC0b11475D",
+          "network": "8453",
+          "actionType": "web3/check-balance"
+        },
+        "status": "idle"
+      },
+      "type": "action",
+      "position": {
+        "x": 840,
+        "y": 0
+      }
+    },
+    {
+      "id": "post-audit",
+      "data": {
+        "type": "action",
+        "label": "Post audit to keeper",
+        "config": {
+          "endpoint": "https://${KEEPER_PUBLIC_HOST}/post-rebalance?token=${KEEPER_INBOUND_BEARER}",
+          "httpBody": "{\"event\":{\"tx\":\"{{@trigger-event:vault.LiquidityAdded.transactionHash}}\",\"poolKey\":\"{{@trigger-event:vault.LiquidityAdded.args.poolKey}}\",\"blockNumber\":\"{{@trigger-event:vault.LiquidityAdded.blockNumber}}\",\"positionId\":\"{{@trigger-event:vault.LiquidityAdded.args.positionId}}\",\"amount0Used\":\"{{@trigger-event:vault.LiquidityAdded.args.amount0Used}}\",\"amount1Used\":\"{{@trigger-event:vault.LiquidityAdded.args.amount1Used}}\",\"eventName\":\"LiquidityAdded\"},\"basketState\":{\"poolValues\":\"{{@batch-pool-values:Batch Read Pool Values.results}}\",\"deployedTotal\":\"{{@aggregate-deployed:Sum Deployed Capital.result}}\",\"agentEthAfter\":\"{{@read-gas-after:Read Agent Gas After.balanceWei}}\"}}",
+          "actionType": "HTTP Request",
+          "httpMethod": "POST",
+          "httpHeaders": "{\"Content-Type\":\"application/json\"}"
+        },
+        "status": "idle"
+      },
+      "type": "action",
+      "position": {
+        "x": 1120,
+        "y": 0
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "type": "animated",
+      "source": "trigger-event",
+      "target": "batch-pool-values"
+    },
+    {
+      "id": "e2",
+      "type": "animated",
+      "source": "batch-pool-values",
+      "target": "aggregate-deployed"
+    },
+    {
+      "id": "e3",
+      "type": "animated",
+      "source": "aggregate-deployed",
+      "target": "read-gas-after"
+    },
+    {
+      "id": "e4",
+      "type": "animated",
+      "source": "read-gas-after",
+      "target": "post-audit"
+    }
+  ],
+  "integrationBindings": []
+}
