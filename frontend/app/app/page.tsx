@@ -1811,7 +1811,7 @@ const THINKING_FRAME_MS = 200;
 const THINKING_BLUR_MS = 320;
 const THINKING_REST_MS = 200;
 
-function ThinkingMark({ size = 22 }: { size?: number }) {
+function ThinkingMark({ size = 11 }: { size?: number }) {
   // 0..5 = visible frame index; 6 = blur-out beat (last frame fades);
   // 7 = invisible rest beat. Then wraps back to 0.
   const [step, setStep] = useState(0);
@@ -1841,6 +1841,9 @@ function ThinkingMark({ size = 22 }: { size?: number }) {
   // During the blur+rest beats the wrapper hides; the underlying
   // image stays on the last visible frame so the blur reads as the
   // icon dissolving rather than a different frame fading.
+  // overflow:hidden clips the blur halo so it doesn't bleed past the
+  // wrapper bounds (was leaving phantom streaks above the icon
+  // during the fade-out beat).
   const hidden = step >= 6;
   const visibleFrame = step >= 6 ? THINKING_FRAME_COUNT - 1 : step;
 
@@ -1852,8 +1855,9 @@ function ThinkingMark({ size = 22 }: { size?: number }) {
         height: size,
         position: "relative",
         display: "inline-block",
-        opacity: hidden ? 0 : 1,
-        filter: hidden ? "blur(6px)" : "blur(0px)",
+        overflow: "hidden",
+        opacity: hidden ? 0 : 0.7,
+        filter: hidden ? "blur(3px)" : "blur(0px)",
         transition: "opacity 240ms ease, filter 240ms ease",
       }}
     >
@@ -3033,7 +3037,7 @@ function AgentChatPanel() {
         ))}
         {thinking && (
           <div style={{ display: "flex", alignItems: "center", gap: 9, paddingLeft: 2 }}>
-            <ThinkingMark size={22} />
+            <ThinkingMark size={11} />
             <span style={{ color: "rgba(255,255,255,0.55)", fontFamily: "var(--sans-stack)", fontSize: 12, fontStyle: "italic" }}>
               thinking…
             </span>
