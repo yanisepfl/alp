@@ -90,6 +90,24 @@ When uncertain whether something is noteworthy, lean toward SILENCE — the goal
 
 Respond with the sentence only, OR the single word SILENCE.`;
 
+const REACT_SYSTEM = `You are the inner voice of an automated liquidity-provisioning agent on Base mainnet. \
+A depositor just put USDC into the vault, or a holder just withdrew. You receive the event details, the engine's per-policy reasoning, and the recent agent feed. Your job is to write ONE short sentence explaining your reaction — specifically whether you'll rebalance now to absorb the flow or hold it.
+
+Output requirements:
+- Length: 12-22 words. One sentence ending with a period.
+- First-person. Plain text. No markdown.
+- Cite the deposit/withdraw amount in USDC.
+- If the engine chose to actuate (the chosen action is "rebalance"): state plainly which pool you'll touch and why this flow tipped the call.
+- If the engine chose to hold: explain why holding is right (idle reserve absorbs it, all positions in range, anti-whipsaw cooldown, etc.).
+- Do not give financial advice or hype. Reason about state.
+
+Good outputs:
+- "I'll absorb this 100 USDC into idle reserve since all three positions are sitting comfortably in range."
+- "Withdrawal of 50 USDC tapped idle reserve only; no positions touched, basket still well within range."
+- "Rebalancing USDC/cbBTC right now — the pool drifted out and this 250 USDC inflow gives me room to recenter."
+
+Respond with the sentence only — no prefix, no preamble.`;
+
 const SIGNAL_SYSTEM = `You are the inner voice of an automated liquidity-provisioning agent on Base mainnet. \
 The input describes a system-context signal — typically an external integration consultation (Uniswap SDK, KeeperHub, etc.), a cooldown/hold reason, or a status from another component. Your job is to convey it crisply.
 
@@ -134,6 +152,39 @@ export async function rewriteSignal(
 ): Promise<string | null> {
   const userPrompt = buildSignalPrompt(policy, rawText, context.recentDecisions);
   return await runClaude(SIGNAL_SYSTEM, userPrompt);
+}
+
+/** Reason about a user deposit/withdraw. Always returns a sentence — the
+ *  user's flow is by definition noteworthy, so SILENCE is not allowed
+ *  here. The output reflects whether the keeper will rebalance to absorb
+ *  the flow or hold it as idle. */
+export async function narrateUserEventReaction(
+  event: { kind: "deposit" | "withdraw"; amountUsdc: number; user: string; tx: string },
+  engineSummary: { chosenAction: string; chosenPool?: string; reasonings: readonly string[] },
+  context: { recentDecisions: readonly string[] },
+): Promise<string | null> {
+  const recentBlock = context.recentDecisions.length === 0
+    ? "Recent agent feed: (none)."
+    : `Recent agent feed (oldest first):\n${context.recentDecisions.slice(-12).map((l) => `- ${l}`).join("\n")}`;
+  const reasoningBlock = engineSummary.reasonings.length === 0
+    ? "(no reasoning emitted this tick)"
+    : engineSummary.reasonings.map((r) => `- ${r}`).join("\n");
+  const userShort = `${event.user.slice(0, 6)}…${event.user.slice(-4)}`;
+  const userPrompt = `A user just ${event.kind === "deposit" ? "deposited into" : "withdrew from"} the vault.
+- Amount: ${event.amountUsdc.toFixed(4)} USDC
+- User: ${userShort}
+- Tx: ${event.tx}
+
+Engine's chosen action this tick: ${engineSummary.chosenAction}${engineSummary.chosenPool ? ` on pool ${engineSummary.chosenPool}` : ""}.
+Per-policy reasoning:
+${reasoningBlock}
+
+${recentBlock}
+
+Reply with ONE sentence reasoning about whether to rebalance.`;
+  const out = await runClaude(REACT_SYSTEM, userPrompt);
+  if (!out) return null;
+  return out.trim();
 }
 
 /** Distill a full tick into a single noteworthy sentence — or SILENCE.

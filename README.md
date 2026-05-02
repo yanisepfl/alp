@@ -79,7 +79,7 @@ You deposit once, the basket runs itself.
         └────────────────────────────────────────────────────────────┘
 ```
 
-The keeper, backend, and KeeperHub workflows are independently deployable but speak well-defined contracts. The keeper exposes `/scan` (polling tick), `/post-rebalance` (reactive audit), `/force` (operator override), and `/log-tick` (workflow outcome log) — all bearer-authed.
+The keeper, backend, and KeeperHub workflows are independently deployable but speak well-defined contracts. The keeper exposes `/scan` (polling tick), `/post-rebalance` (reactive audit), `/force` (operator override), `/log-tick` (workflow outcome log), and `/react` (user-flow reaction) — all bearer-authed.
 
 ## The Rebalance Flow
 
@@ -93,14 +93,19 @@ The keeper, backend, and KeeperHub workflows are independently deployable but sp
 
 The Uniswap stack is central to this flow: the V3 + V4 SDKs handle all position math, the Trading API handles swap routing and calldata generation, and the V3/V4 PositionManager contracts execute the on-chain mint/burn. The keeper never reimplements any Uniswap logic.
 
+## User Flow Reactions
+
+Deposits and withdrawals don't wait for the next polling tick. The backend's vault indexer watches the live tail for `Deposit` and `Withdraw` events and forwards each one to the keeper's `/react` endpoint. The keeper emits one signal naming the flow ("Deposit of 5.0000 USDC by 0x1234…7890."), runs the engine immediately, emits one reaction-thought reasoning about whether to rebalance, and — if the engine chose to actuate — fires the rebalance and emits the action narration. So a user who deposits sees up to three feed entries within seconds: the deposit, the agent's thinking, and (when warranted) the matching rebalance.
+
 ## Agent Feed Narration
 
-A 5-policy engine across three pools produces a lot of raw reasoning per tick — surfacing it unfiltered would bury the user under spam. ALP curates everything into a high-signal feed through three Claude narrator personas, each with its own voice and triggering condition:
+A 5-policy engine across three pools produces a lot of raw reasoning per tick — surfacing it unfiltered would bury the user under spam. ALP curates everything into a high-signal feed through four Claude narrator personas, each with its own voice and triggering condition:
 
 | Narrator | Fires when | Output |
 |---|---|---|
 | **Action** | The keeper just submitted a transaction | One past-tense sentence, 4-5 words ("Rebalanced USDC/USDT.") |
 | **Rollup** | A tick finished without actuating (the common case) | Either one 8-20 word sentence — a logical deduction across policies, or a focused observation lifted from one — *or* `SILENCE`, in which case nothing is emitted at all. The rollup sees all five policies' reasoning, the KeeperHub pre-flight context, and the recent feed, and decides whether anything is worth surfacing. |
+| **React** | A user just deposited or withdrew | One 12-22 word sentence reasoning about whether to rebalance to absorb the flow, citing the actual amount. Always emits — the depositor or withdrawer is owed an explanation even when the answer is "holding as idle reserve". |
 | **Signal** | An external integration speaks: KeeperHub post-rebalance audit, inline Uniswap-SDK consult during a rebalance, low-gas alert | One 8-15 word sentence quoting concrete numbers ("Uniswap V3 SDK expects 0.148 USDC + 0.148 USDT for the re-mint.") |
 
 The rollup prompt explicitly leans toward `SILENCE` — a user who sees one polished entry per 15-30 minutes is happier than one buried under five flat status reports. Narration runs in `claude -p` subprocesses after the tx, never blocking on-chain actuation.

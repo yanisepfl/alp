@@ -4,7 +4,7 @@ import { bumpHoldCounter, markCooldown, resetHoldCounter, readHoldCounter, recen
 import { tick } from "../engine";
 import { execute } from "../executor";
 import { decisionToSignalText, signal, type WireSource } from "../ingest";
-import { rewriteAction, rollupTick } from "../narrator";
+import { narrateUserEventReaction, rewriteAction, rollupTick } from "../narrator";
 import { ACTUATING, type Decision } from "../policies/types";
 import { readTotalAssets } from "../vault";
 import { requireBearer } from "./auth";
@@ -29,10 +29,23 @@ export interface KhContext {
   source?: string;
 }
 
+/** A user-flow event the backend forwards to the keeper so the engine can
+ *  immediately reason about it. The keeper emits one signal naming the
+ *  flow, runs the engine, emits one reaction-thought, and (if the engine
+ *  chose to actuate) one action — instead of waiting up to 5 minutes for
+ *  the next polling tick. */
+export interface UserEvent {
+  kind: "deposit" | "withdraw";
+  assetsRaw: string;
+  user: string;
+  tx: string;
+}
+
 export interface ScanRunOpts {
   forcePool?: string;
   bypassAntiwhip?: boolean;
   khContext?: KhContext;
+  userEvent?: UserEvent;
 }
 
 export interface ScanResponse {
@@ -51,6 +64,20 @@ export interface ScanResponse {
 
 export async function runScan(opts: ScanRunOpts): Promise<ScanResponse> {
   const result = await tick(opts);
+
+  // User-flow events (deposit/withdraw) get a single header signal in the
+  // feed naming the flow before any engine reasoning lands. The follow-up
+  // reaction-thought + optional action are scheduled below.
+  if (opts.userEvent) {
+    const e = opts.userEvent;
+    const amt = (Number(BigInt(e.assetsRaw)) / 1e6).toFixed(4);
+    const userShort = `${e.user.slice(0, 6)}…${e.user.slice(-4)}`;
+    const verb = e.kind === "deposit" ? "Deposit" : "Withdrawal";
+    const txOk = /^0x[0-9a-fA-F]{64}$/.test(e.tx);
+    void signal(`[user-${e.kind}] ${verb} of ${amt} USDC by ${userShort}.`, {
+      sources: txOk ? [{ kind: "basescan", label: `${e.kind} tx`, tx: e.tx }] : undefined,
+    });
+  }
 
   // Build the KH-context line as part of the rollup input rather than
   // emitting it as its own ring entry.
@@ -87,6 +114,9 @@ export async function runScan(opts: ScanRunOpts): Promise<ScanResponse> {
   const txs: string[] = [];
   let actuated = false;
   let dryRun = false;
+  let actionConsultations: readonly string[] = [];
+  let actionTxHash: string | undefined;
+  let actionDryRun = false;
 
   if (ACTUATING.has(result.chosen.action)) {
     if (!result.chosenContext) {
@@ -119,40 +149,58 @@ export async function runScan(opts: ScanRunOpts): Promise<ScanResponse> {
         txs.push(exec.txHash);
         actuated = true;
         dryRun = exec.dryRun;
+        actionConsultations = exec.consultations;
+        actionTxHash = exec.txHash;
+        actionDryRun = exec.dryRun;
         if (result.chosen.pool) markCooldown(result.chosen.pool, result.chosen.action, exec.txHash);
         resetHoldCounter();
-
-        // Actuation gets exactly one feed entry: the action narration. The
-        // tx and Uniswap-SDK consult appear as sources on that single entry
-        // so the integration stays visible without a second debug line.
-        const actuationSources = !exec.dryRun ? [
-          { kind: "basescan" as const, label: "rebalance tx", tx: exec.txHash },
-          { kind: "uniswap" as const, label: "Uniswap V3/V4 SDK consult", url: "https://developers.uniswap.org/docs/liquidity/overview" },
-        ] : undefined;
-        const recentForAction = [
-          ...result.thoughts.map(decisionToSignalText),
-          ...exec.consultations,
-          decisionToSignalText(result.chosen),
-        ];
-        void narrateActionAsync(result.chosen, recentForAction, actuationSources);
       }
     }
-  } else {
-    // No actuation this tick. Roll up everything the engine reasoned about
-    // (per-policy thoughts, anti-whipsaw holds, KH context) and let the
-    // narrator decide whether anything is worth saying. Returns null →
-    // emit nothing.
-    if (result.chosen.action === "hold") bumpHoldCounter();
-    const reasonings: string[] = [
-      ...khLines,
-      ...result.thoughts.map(decisionToSignalText),
-      decisionToSignalText(result.chosen),
-    ];
-    const recent = recentRingTexts(12);
+  } else if (result.chosen.action === "hold") {
+    bumpHoldCounter();
+  }
+
+  const reasonings: string[] = [
+    ...khLines,
+    ...result.thoughts.map(decisionToSignalText),
+    decisionToSignalText(result.chosen),
+  ];
+  const recent = recentRingTexts(12);
+
+  // Narration scheduling. Three independent paths feed the same async
+  // queue; ordering between them is best-effort (claude subprocess
+  // timings vary). For user-flow /react calls we always emit a thought,
+  // even when actuating, so the depositor sees the agent's reasoning
+  // separately from the action card.
+  if (opts.userEvent) {
+    const e = opts.userEvent;
+    const amountUsdc = Number(BigInt(e.assetsRaw)) / 1e6;
+    void (async () => {
+      const polished = await narrateUserEventReaction(
+        { kind: e.kind, amountUsdc, user: e.user, tx: e.tx },
+        { chosenAction: result.chosen.action, chosenPool: result.chosen.pool, reasonings },
+        { recentDecisions: recent },
+      );
+      if (polished) await signal(`[react] ${polished}`);
+    })();
+  } else if (!actuated) {
     void (async () => {
       const polished = await rollupTick(reasonings, { recentDecisions: recent });
       if (polished) await signal(polished);
     })();
+  }
+
+  if (actuated && actionTxHash) {
+    const actuationSources = !actionDryRun ? [
+      { kind: "basescan" as const, label: "rebalance tx", tx: actionTxHash },
+      { kind: "uniswap" as const, label: "Uniswap V3/V4 SDK consult", url: "https://developers.uniswap.org/docs/liquidity/overview" },
+    ] : undefined;
+    const recentForAction = [
+      ...result.thoughts.map(decisionToSignalText),
+      ...actionConsultations,
+      decisionToSignalText(result.chosen),
+    ];
+    void narrateActionAsync(result.chosen, recentForAction, actuationSources);
   }
 
   const decisions = [...result.thoughts, result.chosen];

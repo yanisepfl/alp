@@ -36,6 +36,7 @@
 
 import { parseAbiItem, type Log, type PublicClient } from "viem";
 import { SHARE_UNIT, USDC_BASE_ADDRESS } from "./chain";
+import { notifyKeeperReact } from "./keeperReact";
 import type { UserActivityRow, UserSnapshot } from "./types";
 import {
  appendActivity, appendLot, deleteFirstDeposit, deleteLot, insertFeeEvent,
@@ -128,6 +129,10 @@ const BLOCK_TS_CONCURRENCY = 5;
 
 let started = false;
 let pruneTimer: ReturnType<typeof setInterval> | null = null;
+// Flips to true once startIndexer's backfill completes. Until then we
+// suppress keeper /react notifications so historical Deposit/Withdraw
+// events from the cold-start replay don't trigger phantom reactions.
+let liveTailActive = false;
 
 // ---------------------------------------------------------------------- API
 
@@ -171,6 +176,11 @@ export async function startIndexer(
  }
  lastIndexedBlock = head;
  upsertIndexerState("last_indexed_block", head.toString());
+ // Backfill done. From here on, every Deposit/Withdraw the live tail
+ // sees is a real-time user flow and gets forwarded to the keeper for
+ // an immediate /react. During backfill we kept this off so historical
+ // events don't replay reactions on every boot.
+ liveTailActive = true;
 
  const liveUsers = countLiveHolders();
  console.log(`[indexer] boot complete: ${liveUsers} users, ${feeEvents.length} fee events, ${poolOrientation.size} pools tracked`);
@@ -684,15 +694,19 @@ async function applyLogs(client: PublicClient, logs: Log[], cursorAt: bigint | n
  upsertFirstDeposit(owner, tsMs);
  }
 
+ const depositTx = (log as Log & { transactionHash?: `0x${string}` }).transactionHash ?? "0x";
  pushActivity(owner, {
  id: activityId(log),
  kind: "deposit",
  amount: Number(assets) / 1e6,
  token: "USDC",
  ts: new Date(tsMs).toISOString(),
- tx: (log as Log & { transactionHash?: `0x${string}` }).transactionHash ?? "0x",
+ tx: depositTx,
  }, blockNumber);
  tw.add(owner);
+ if (liveTailActive && /^0x[0-9a-fA-F]{64}$/.test(depositTx)) {
+ notifyKeeperReact("deposit", assets, owner, depositTx);
+ }
  } else if (evt === "Withdraw") {
  const owner = (args.owner as `0x${string}`).toLowerCase();
  const assets = args.assets as bigint;
@@ -723,15 +737,19 @@ async function applyLogs(client: PublicClient, logs: Log[], cursorAt: bigint | n
  upsertFirstDeposit(owner, walletLots[0]!.tsMs);
  }
 
+ const withdrawTx = (log as Log & { transactionHash?: `0x${string}` }).transactionHash ?? "0x";
  pushActivity(owner, {
  id: activityId(log),
  kind: "withdraw",
  amount: Number(assets) / 1e6,
  token: "USDC",
  ts: new Date(tsMs).toISOString(),
- tx: (log as Log & { transactionHash?: `0x${string}` }).transactionHash ?? "0x",
+ tx: withdrawTx,
  }, blockNumber);
  tw.add(owner);
+ if (liveTailActive && /^0x[0-9a-fA-F]{64}$/.test(withdrawTx)) {
+ notifyKeeperReact("withdraw", assets, owner, withdrawTx);
+ }
  }
  }
 

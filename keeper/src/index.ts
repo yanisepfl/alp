@@ -8,6 +8,7 @@ import { scanRouter, runScan } from "./routes/scan";
 import { forceRouter } from "./routes/force";
 import { postRebalanceRouter } from "./routes/postRebalance";
 import { logTickRouter } from "./routes/logTick";
+import { reactRouter } from "./routes/react";
 
 const app = new Hono();
 
@@ -21,10 +22,11 @@ app.route("/scan", scanRouter);
 app.route("/force", forceRouter);
 app.route("/post-rebalance", postRebalanceRouter);
 app.route("/log-tick", logTickRouter);
+app.route("/react", reactRouter);
 
 // Trailing-slash redirect preserves the query string for orchestrators
 // (e.g. KeeperHub) that occasionally append a slash to bare paths.
-for (const path of ["/scan", "/force", "/post-rebalance", "/log-tick"]) {
+for (const path of ["/scan", "/force", "/post-rebalance", "/log-tick", "/react"]) {
   app.all(`${path}/`, async (c) => {
     const qs = c.req.url.includes("?") ? "?" + c.req.url.split("?")[1] : "";
     return c.redirect(`${path}${qs}`, 307);
