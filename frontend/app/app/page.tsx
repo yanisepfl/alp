@@ -1811,33 +1811,27 @@ function UserActivityCard() {
 /* ---------- Agent chat sidebar ---------- */
 
 // Frame-by-frame thinking indicator. Cycles /public/thinking/0..5.png
-// then fades+blurs out and holds invisible for a short beat before
-// looping. All 6 frames are rendered stacked (absolute) so the
-// browser preloads them and per-frame swaps are pure opacity flips —
-// no src-swap flash. The wrapper carries the blur/opacity
-// transition that animates the gap between frame 5 and frame 0.
+// with a direct cut from the last frame back to frame 0. Frame 0 is
+// held for the full pause duration so the loop has a built-in beat
+// without any fade. All 6 frames are rendered stacked (absolute) so
+// the browser preloads them and per-frame swaps are pure opacity
+// flips — no src-swap flash.
 const THINKING_FRAME_COUNT = 6;
 const THINKING_FRAME_MS = 200;
-const THINKING_BLUR_MS = 320;
-const THINKING_REST_MS = 200;
+const THINKING_REST_MS = 520;
 
 function ThinkingMark({ size = 11 }: { size?: number }) {
-  // 0..5 = visible frame index; 6 = blur-out beat (last frame fades);
-  // 7 = invisible rest beat. Then wraps back to 0.
-  const [step, setStep] = useState(0);
+  const [frame, setFrame] = useState(0);
 
   useEffect(() => {
     let mounted = true;
     let timer: number | undefined;
     const advance = (current: number) => {
-      const next = current >= 7 ? 0 : current + 1;
-      const delay =
-        current === 6 ? THINKING_BLUR_MS :
-        current === 7 ? THINKING_REST_MS :
-        THINKING_FRAME_MS;
+      const next = (current + 1) % THINKING_FRAME_COUNT;
+      const delay = current === 0 ? THINKING_REST_MS : THINKING_FRAME_MS;
       timer = window.setTimeout(() => {
         if (!mounted) return;
-        setStep(next);
+        setFrame(next);
         advance(next);
       }, delay);
     };
@@ -1848,15 +1842,6 @@ function ThinkingMark({ size = 11 }: { size?: number }) {
     };
   }, []);
 
-  // During the blur+rest beats the wrapper hides; the underlying
-  // image stays on the last visible frame so the blur reads as the
-  // icon dissolving rather than a different frame fading.
-  // overflow:hidden clips the blur halo so it doesn't bleed past the
-  // wrapper bounds (was leaving phantom streaks above the icon
-  // during the fade-out beat).
-  const hidden = step >= 6;
-  const visibleFrame = step >= 6 ? THINKING_FRAME_COUNT - 1 : step;
-
   return (
     <div
       aria-hidden
@@ -1865,10 +1850,7 @@ function ThinkingMark({ size = 11 }: { size?: number }) {
         height: size,
         position: "relative",
         display: "inline-block",
-        overflow: "hidden",
-        opacity: hidden ? 0 : 0.7,
-        filter: hidden ? "blur(3px)" : "blur(0px)",
-        transition: "opacity 240ms ease, filter 240ms ease",
+        opacity: 0.7,
       }}
     >
       {Array.from({ length: THINKING_FRAME_COUNT }, (_, i) => (
@@ -1883,7 +1865,7 @@ function ThinkingMark({ size = 11 }: { size?: number }) {
             width: "100%",
             height: "100%",
             display: "block",
-            opacity: i === visibleFrame ? 1 : 0,
+            opacity: i === frame ? 1 : 0,
           }}
         />
       ))}
