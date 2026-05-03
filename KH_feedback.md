@@ -1,0 +1,42 @@
+# KeeperHub Feedback
+
+Notes from building the three KeeperHub workflows that drive the ALP rebalancer: [`alp-rebalance`](agent/keeperhub-workflows/alp-rebalance.live.json), [`alp-post-rebalance`](agent/keeperhub-workflows/alp-post-rebalance.live.json), and [`alp-demo-rebalance`](agent/keeperhub-workflows/alp-demo-rebalance.live.json). Hackathon scope, Base mainnet only, talking to the keeper service over a Cloudflare Tunnel.
+
+## What we used
+
+| Surface | Where in our workflows |
+|---|---|
+| **Schedule trigger** (cron `*/5 * * * *`) | `alp-rebalance` polling tick |
+| **Blockchain Event trigger** (`vault.LiquidityAdded` on Base) | `alp-post-rebalance` reactive audit |
+| **Manual trigger** | `alp-demo-rebalance` "Run now" button for the demo recording and on-call escape hatch |
+| `web3/read-contract` | three reads in `alp-rebalance` (TVL, active pool roster, L2 gas price) |
+| `web3/check-balance` | agent ETH balance, both pre-tick (`alp-rebalance`) and post-tick (`alp-post-rebalance`) |
+| `web3/batch-read-contract` | Multicall3 batch over 3 pool keys to read `poolValueExternal` in one round-trip |
+| `math/aggregate` (sum) | sums the batched pool values into a deployed-capital total without a custom transform node |
+| **Condition** | dynamic gas floor that skips the keeper call if agent ETH can't cover ~2 rebalance bundles at current L2 gas price |
+| **HTTP Request** with `${ENV_VAR}` interpolation | every keeper-bound POST (`/scan`, `/post-rebalance`, `/log-tick`, `/force`) |
+
+## What worked well
+
+* **Schedule and Event triggers cover both sides of the keeper loop natively.** No glue code. The polling tick is a cron expression. The reactive audit is event name plus ABI plus contract address. The two halves of the rebalance loop run on independent triggers without a coordinator service in the middle. This is the integration's defining feature for our use case.
+* **`web3/batch-read-contract` is a real Multicall3 in one node.** In `alp-post-rebalance` we read `poolValueExternal(poolKey)` for all three pools in one call ([alp-post-rebalance.live.json:30-44](agent/keeperhub-workflows/alp-post-rebalance.live.json#L30)). Without this we'd have either chained three serial reads (slow) or built a Multicall outside KeeperHub (defeats the point).
+* **`math/aggregate` composes with batch reads.** The batch returns an array. One `sum` aggregate gives us `deployedTotal` ([alp-post-rebalance.live.json:53-65](agent/keeperhub-workflows/alp-post-rebalance.live.json#L53)). We didn't need to drop down to a custom code node just to add three numbers.
+* **Condition node short-circuits cleanly.** Our gas check is a single expression, `{{@read-gas:Read Agent Gas.balanceWei}} > ({{@read-gas-price:Read L2 Gas Price.result}} * 14000000)` ([alp-rebalance.live.json:114](agent/keeperhub-workflows/alp-rebalance.live.json#L114)), that splits the flow into "fire" vs "log low gas." Avoids burning a `/scan` round-trip when the agent literally can't pay for a bundle.
+* **`${ENV_VAR}` interpolation in URLs and request bodies** keeps the keeper hostname and bearer token out of the workflow JSON, so the file is safe to export and check in. We use this for both `${KEEPER_PUBLIC_HOST}` and `${KEEPER_INBOUND_BEARER}` across every workflow.
+* **Workflows are self-contained, exportable JSON.** We can version them in git ([agent/keeperhub-workflows/](agent/keeperhub-workflows/)) and the diff is reviewable. This matters for a hackathon submission where reviewers need to be able to inspect what's actually running.
+* **Three-trigger split kept the workflows small and demoable.** Polling, reactive, and manual each get a tightly-scoped workflow. The manual `alp-demo-rebalance` is what we hit live during the recording. KeeperHub gives us a "Run now" button without writing a UI.
+
+## What was painful
+
+* **ABIs as escaped JSON strings inside JSON config fields.** `contractABI` and `abi` are double-stringified ([alp-rebalance.live.json:33](agent/keeperhub-workflows/alp-rebalance.live.json#L33), [alp-post-rebalance.live.json:17](agent/keeperhub-workflows/alp-post-rebalance.live.json#L17)). Editing them by hand is unpleasant. You escape quotes, paste, hope the `\\"` density is right, and lose syntax highlighting. A separate `abiFragment` field that takes a real JSON value would let editors lint and auto-format.
+* **Template references are verbose and redundant.** `{{@read-tvl:Read TVL.result}}` mentions both the node ID (`read-tvl`) and the human label (`Read TVL`). If either drifts during refactoring, the reference silently breaks. Just the ID would be sufficient and much shorter.
+* **Workflow JSON includes UI layout coordinates (`position.x`, `position.y`).** It's harmless data but pollutes git diffs whenever you nudge a node in the editor. Most of our workflow-file changes during iteration were just position diffs. Splitting layout state into a separate file (or omitting it from the export by default) would make code review noise-free.
+* **No way to combine triggers in one workflow.** Polling and reactive are sibling concerns of the same loop, but they live in two separate workflows because each workflow has exactly one trigger. Cross-workflow shared state (for example a "last fired at" timestamp) has to be read from the keeper instead of from KeeperHub. Workable, but a single workflow with multiple triggers (or a "shared store" primitive) would be a meaningful expressiveness boost.
+* **Bearer auth via URL query string.** We pass `?token=${KEEPER_INBOUND_BEARER}` on every POST ([alp-rebalance.live.json:131](agent/keeperhub-workflows/alp-rebalance.live.json#L131), [alp-post-rebalance.live.json:96](agent/keeperhub-workflows/alp-post-rebalance.live.json#L96)) instead of an `Authorization: Bearer` header. The HTTP node's `httpHeaders` field accepts arbitrary headers, so we could have used a header. We chose query string because it kept the wiring uniform with the keeper's existing `?token=` parsing. Tokens in query strings show up in any reverse-proxy access log though, so for a stable deployment we'd switch to header auth and update the keeper to read it.
+* **Iteration loop is browser-side.** Editing a workflow means clicking through the dashboard editor. Hit Save, the workflow runs, read the result, edit again. There's no `keeperhub run --workflow=alp-rebalance --dry-run` we could find. For us this was tolerable because the workflows are short, but a CLI for round-trip development would have shaved real time.
+
+## Hackathon caveats
+
+* **The Cloudflare Tunnel exposing the keeper to KeeperHub is an ephemeral quick-tunnel.** Every restart gives us a new random subdomain, which means re-editing every `${KEEPER_PUBLIC_HOST}` consumer in every workflow and on the frontend. A named tunnel with a stable subdomain (separate Cloudflare account work) is the right fix. We ate the churn for the demo. KeeperHub itself isn't responsible for this, but the friction lands inside KeeperHub config because that's where the URL is referenced.
+* **We did not exercise KeeperHub's Direct Execution / Turnkey signing path.** Our agent key sits in a `.env` on the keeper VM. KeeperHub talks to the keeper over HTTPS rather than signing transactions itself. Direct Execution looked like the right answer for production-grade signing, but pulling a Turnkey wallet into the loop was outside the hackathon scope. v2 work.
+* **The dynamic gas floor lives in the workflow, not in the keeper.** We compute `agentEth > gasPrice * 14_000_000` on the KeeperHub side ([alp-rebalance.live.json:114](agent/keeperhub-workflows/alp-rebalance.live.json#L114)) so the keeper never sees the call when there's nothing to actuate. This puts a small piece of policy in the workflow. Defensible because it short-circuits the network round-trip, but the floor calibration (`14_000_000` gas units, roughly 2 bundles) needs to be kept in sync with the keeper's actual bundle gas usage. A KeeperHub-native "fetch a constant from the keeper" primitive would let the floor live in one place.
