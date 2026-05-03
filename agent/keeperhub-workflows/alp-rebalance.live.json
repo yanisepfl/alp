@@ -1,0 +1,290 @@
+{
+  "version": 1,
+  "exportedAt": "2026-05-02T21:15:35.014Z",
+  "workflow": {
+    "name": "alp-rebalance",
+    "description": "Runs every 5 minutes. KeeperHub reads vault TVL, the active pool list, the agent ETH balance, and the current Base gas price, then sends them to the keeper's /scan endpoint. A Condition node skips the call when the agent does not have enough gas for 2 rebalance bundles. The outcome (fired or held) is posted back to /log-tick."
+  },
+  "nodes": [
+    {
+      "id": "trigger-schedule",
+      "data": {
+        "type": "trigger",
+        "label": "Every 5 min",
+        "config": {
+          "triggerType": "Schedule",
+          "scheduleCron": "*/5 * * * *",
+          "scheduleTimezone": "UTC"
+        },
+        "status": "idle"
+      },
+      "type": "trigger",
+      "position": {
+        "x": 0,
+        "y": 100
+      }
+    },
+    {
+      "id": "read-tvl",
+      "data": {
+        "type": "action",
+        "label": "Read TVL",
+        "config": {
+          "abi": "[{\"type\":\"function\",\"name\":\"totalAssets\",\"stateMutability\":\"view\",\"inputs\":[],\"outputs\":[{\"type\":\"uint256\"}]}]",
+          "network": "8453",
+          "actionType": "web3/read-contract",
+          "abiFunction": "totalAssets",
+          "functionArgs": "[]",
+          "contractAddress": "0x3F0e6cef3a75f52F1E55806Afe40317f51199CaE"
+        },
+        "status": "idle"
+      },
+      "type": "action",
+      "position": {
+        "x": 220,
+        "y": 100
+      }
+    },
+    {
+      "id": "read-pools",
+      "data": {
+        "type": "action",
+        "label": "Read Pool Roster",
+        "config": {
+          "abi": "[{\"type\":\"function\",\"name\":\"getActivePools\",\"stateMutability\":\"view\",\"inputs\":[],\"outputs\":[{\"type\":\"bytes32[]\"}]}]",
+          "network": "8453",
+          "actionType": "web3/read-contract",
+          "abiFunction": "getActivePools",
+          "functionArgs": "[]",
+          "contractAddress": "0x3F0e6cef3a75f52F1E55806Afe40317f51199CaE"
+        },
+        "status": "idle"
+      },
+      "type": "action",
+      "position": {
+        "x": 440,
+        "y": 100
+      }
+    },
+    {
+      "id": "read-gas",
+      "data": {
+        "type": "action",
+        "label": "Read Agent Gas",
+        "config": {
+          "address": "0x8cf03f65ffC08a514dA09063b5632deC0b11475D",
+          "network": "8453",
+          "actionType": "web3/check-balance"
+        },
+        "status": "idle"
+      },
+      "type": "action",
+      "position": {
+        "x": 660,
+        "y": 100
+      }
+    },
+    {
+      "id": "read-gas-price",
+      "data": {
+        "type": "action",
+        "label": "Read L2 Gas Price",
+        "config": {
+          "abi": "[{\"type\":\"function\",\"name\":\"gasPrice\",\"stateMutability\":\"view\",\"inputs\":[],\"outputs\":[{\"type\":\"uint256\"}]}]",
+          "network": "8453",
+          "actionType": "web3/read-contract",
+          "abiFunction": "gasPrice",
+          "functionArgs": "[]",
+          "contractAddress": "0x420000000000000000000000000000000000000F"
+        },
+        "status": "idle"
+      },
+      "type": "action",
+      "position": {
+        "x": 880,
+        "y": 100
+      }
+    },
+    {
+      "id": "gas-check",
+      "data": {
+        "type": "action",
+        "label": "Gas covers ≥ 2 bundles?",
+        "config": {
+          "condition": "{{@read-gas:Read Agent Gas.balanceWei}} > ({{@read-gas-price:Read L2 Gas Price.result}} * 14000000)",
+          "actionType": "Condition"
+        },
+        "status": "idle"
+      },
+      "type": "action",
+      "position": {
+        "x": 1100,
+        "y": 100
+      }
+    },
+    {
+      "id": "log-low-gas",
+      "data": {
+        "type": "action",
+        "label": "Log low-gas skip",
+        "config": {
+          "endpoint": "https://${KEEPER_PUBLIC_HOST}/log-tick?token=${KEEPER_INBOUND_BEARER}",
+          "httpBody": "{\"outcome\":\"low_gas\",\"tvl\":\"{{@read-tvl:Read TVL.result}}\",\"agentEth\":\"{{@read-gas:Read Agent Gas.balanceWei}}\",\"detail\":\"agent gas below dynamic floor (2 bundles at current L2 gas price)\"}",
+          "actionType": "HTTP Request",
+          "httpMethod": "POST",
+          "httpHeaders": "{\"Content-Type\":\"application/json\"}"
+        },
+        "status": "idle"
+      },
+      "type": "action",
+      "position": {
+        "x": 1350,
+        "y": 250
+      }
+    },
+    {
+      "id": "evaluate-rebalance",
+      "data": {
+        "type": "action",
+        "label": "Evaluate Rebalance",
+        "config": {
+          "endpoint": "https://${KEEPER_PUBLIC_HOST}/scan?token=${KEEPER_INBOUND_BEARER}",
+          "httpBody": "{\"context\":{\"tav\":\"{{@read-tvl:Read TVL.result}}\",\"agentEth\":\"{{@read-gas:Read Agent Gas.balanceWei}}\",\"poolKeys\":\"{{@read-pools:Read Pool Roster.result}}\",\"source\":\"kh-alp-rebalance\"}}",
+          "actionType": "HTTP Request",
+          "httpMethod": "POST",
+          "httpHeaders": "{\"Content-Type\":\"application/json\"}"
+        },
+        "status": "idle"
+      },
+      "type": "action",
+      "position": {
+        "x": 1350,
+        "y": 0
+      }
+    },
+    {
+      "id": "actuated-check",
+      "data": {
+        "type": "action",
+        "label": "Did rebalance fire?",
+        "config": {
+          "condition": "{{@evaluate-rebalance:Evaluate Rebalance.data.meta.actuated}} == true",
+          "actionType": "Condition"
+        },
+        "status": "idle"
+      },
+      "type": "action",
+      "position": {
+        "x": 1600,
+        "y": 0
+      }
+    },
+    {
+      "id": "log-fired",
+      "data": {
+        "type": "action",
+        "label": "Log rebalance fired",
+        "config": {
+          "endpoint": "https://${KEEPER_PUBLIC_HOST}/log-tick?token=${KEEPER_INBOUND_BEARER}",
+          "httpBody": "{\"outcome\":\"fired\",\"tvl\":\"{{@read-tvl:Read TVL.result}}\",\"agentEth\":\"{{@read-gas:Read Agent Gas.balanceWei}}\",\"txs\":\"{{@evaluate-rebalance:Evaluate Rebalance.data.txs}}\"}",
+          "actionType": "HTTP Request",
+          "httpMethod": "POST",
+          "httpHeaders": "{\"Content-Type\":\"application/json\"}"
+        },
+        "status": "idle"
+      },
+      "type": "action",
+      "position": {
+        "x": 1850,
+        "y": -50
+      }
+    },
+    {
+      "id": "log-held",
+      "data": {
+        "type": "action",
+        "label": "Log keeper held",
+        "config": {
+          "endpoint": "https://${KEEPER_PUBLIC_HOST}/log-tick?token=${KEEPER_INBOUND_BEARER}",
+          "httpBody": "{\"outcome\":\"held\",\"tvl\":\"{{@read-tvl:Read TVL.result}}\",\"agentEth\":\"{{@read-gas:Read Agent Gas.balanceWei}}\"}",
+          "actionType": "HTTP Request",
+          "httpMethod": "POST",
+          "httpHeaders": "{\"Content-Type\":\"application/json\"}"
+        },
+        "status": "idle"
+      },
+      "type": "action",
+      "position": {
+        "x": 1850,
+        "y": 100
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "type": "animated",
+      "source": "trigger-schedule",
+      "target": "read-tvl"
+    },
+    {
+      "id": "e2",
+      "type": "animated",
+      "source": "read-tvl",
+      "target": "read-pools"
+    },
+    {
+      "id": "e3",
+      "type": "animated",
+      "source": "read-pools",
+      "target": "read-gas"
+    },
+    {
+      "id": "e4",
+      "type": "animated",
+      "source": "read-gas",
+      "target": "read-gas-price"
+    },
+    {
+      "id": "e5",
+      "type": "animated",
+      "source": "read-gas-price",
+      "target": "gas-check"
+    },
+    {
+      "id": "e6",
+      "type": "animated",
+      "source": "gas-check",
+      "target": "evaluate-rebalance",
+      "sourceHandle": "true"
+    },
+    {
+      "id": "e7",
+      "type": "animated",
+      "source": "gas-check",
+      "target": "log-low-gas",
+      "sourceHandle": "false"
+    },
+    {
+      "id": "e8",
+      "type": "animated",
+      "source": "evaluate-rebalance",
+      "target": "actuated-check"
+    },
+    {
+      "id": "e9",
+      "type": "animated",
+      "source": "actuated-check",
+      "target": "log-fired",
+      "sourceHandle": "true"
+    },
+    {
+      "id": "e10",
+      "type": "animated",
+      "source": "actuated-check",
+      "target": "log-held",
+      "sourceHandle": "false"
+    }
+  ],
+  "integrationBindings": []
+}

@@ -281,9 +281,8 @@ contract ManipulationAttacksTest is V4Deployers {
     function test_attack_lockoutBypass_freshReceiver_blocked() public {
         _setUpVaultPosition();
         // Attacker has no prior shares. They deposit to a fresh address, then
-        // immediately try to redeem from THEMSELVES — the bypass that an
-        // earlier audit flagged. Lockout now stamps both `caller` and
-        // `receiver` so this reverts.
+        // immediately try to redeem from THEMSELVES. Lockout stamps both
+        // `caller` and `receiver` so this reverts.
         vm.prank(attacker);
         vault.deposit(50_000e18, makeAddr("freshReceiver"));
 

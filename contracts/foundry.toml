@@ -7,7 +7,7 @@ script = "script"
 solc_version = "0.8.26"
 optimizer = true
 # Lower optimizer_runs trades runtime gas for smaller bytecode, keeping
-# ALPVault under the 24,576-byte EIP-170 limit after the audit-fix pass.
+# ALPVault under the 24,576-byte EIP-170 limit.
 optimizer_runs = 1
 via_ir = true
 evm_version = "cancun"

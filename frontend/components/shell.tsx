@@ -17,17 +17,15 @@ const REF_H = 1300;
 export function Shell() {
   const [learnMore, setLearnMore] = useState(false);
 
-  // Mark the entry choreography as seen on this browser. An inline script
-  // in app/layout.tsx reads this flag on the next load (synchronously,
-  // before React hydrates) and injects a style that disables the lockup
-  // glide and word-by-word reveal animations. Set on first mount — even a
-  // partial first view counts as "seen". localStorage (not sessionStorage)
-  // so the flag survives new tabs and browser restarts.
+  // Mark the entry choreography as seen on this browser. An inline
+  // script in app/layout.tsx reads this flag on the next load (before
+  // React hydrates) and injects a style that disables the lockup glide
+  // and word-by-word reveal animations.
   useEffect(() => {
     try {
       localStorage.setItem("alp:intro-played", "1");
     } catch {
-      /* localStorage unavailable (privacy mode) — intro will replay, fine. */
+      /* localStorage unavailable; intro will replay. */
     }
   }, []);
 

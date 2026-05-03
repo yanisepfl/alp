@@ -3,17 +3,62 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { formatUnits, parseUnits } from "viem";
 import {
-  clientId,
-  subscribeAgentStream,
-  type ActionCategory,
-  type StreamHandle,
-  type WireMessage,
-  type WireSource,
-} from "@/lib/agent-stream";
+  useAccount,
+  useReadContract,
+  useWaitForTransactionReceipt,
+  useWriteContract,
+} from "wagmi";
+import { getAppKit } from "@/components/web3-provider";
+import {
+  useAgentStream,
+  useApiWallet,
+  useSendUserMessage,
+  useUser,
+  useVault,
+} from "@/lib/api";
+import type {
+  ActionCategory,
+  VaultPool,
+  WireMessage,
+} from "@/lib/api";
+import {
+  ALP_DECIMALS,
+  USDC_ADDRESS,
+  USDC_DECIMALS,
+  VAULT_ADDRESS,
+  usdcAbi,
+  vaultAbi,
+} from "@/lib/contracts";
+import { toast } from "@/lib/toast";
 import { LearnMoreContent, SummaryText } from "@/components/landing-face";
+
+// Sniff wagmi/viem's UserRejectedRequestError — the user clicked
+// reject in their wallet popup. Wagmi/viem wraps the underlying
+// provider error 2-3 levels deep depending on the call path, so walk
+// the `cause` chain rather than checking just one level. The regex
+// fallback catches wallet vendors whose error name varies.
+function isUserRejection(err: unknown): boolean {
+  let cur: unknown = err;
+  for (let depth = 0; depth < 10 && cur && typeof cur === "object"; depth++) {
+    const e = cur as { name?: string; code?: number; message?: string; cause?: unknown };
+    if (e.name === "UserRejectedRequestError") return true;
+    if (e.code === 4001) return true;
+    if (typeof e.message === "string" && /user (rejected|denied|cancelled)/i.test(e.message)) return true;
+    cur = e.cause;
+  }
+  return false;
+}
+
+// Pretty-print a wallet address as 0x1234…abcd. Callers should
+// branch on `isConnected` first since wagmi can hand back undefined
+// during connecting/reconnecting transitions.
+function shortAddress(addr: string) {
+  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
+}
 
 /* ---------- Panel rect ---------- */
 
@@ -24,21 +69,16 @@ import { LearnMoreContent, SummaryText } from "@/components/landing-face";
 // footer below, bento inside) positions against (0, 0, PANEL_W,
 // PANEL_H) and rides the same outer transform.
 //
-// A single right-side sidebar (Sherpa agent OR vault stats, toggled
-// by the tab pill above it) lives in raw viewport space — no
-// transform. It stretches from the panel's right edge plus a gap to
-// the viewport's right edge minus a margin, so on wider screens the
-// sidebar gets more room. CSS clamps width at 0 on narrow viewports
-// (negative calc result), letting the sidebar collapse without a JS
-// breakpoint.
+// The right-side sidebar (Sherpa agent OR vault stats) lives in raw
+// viewport space — no transform — and stretches from the panel's
+// right edge to the viewport's right edge.
 const PANEL_W = 1380;
 const PANEL_H = 780;
 
 // Floating nav design height — measured from the FloatingNav pill
-// (8 + max(button=29, logo=22) + 8 inner padding + 1+1 border).
-// Pulled out as a constant because the sidebar tab pill scales its
-// height to this value via --shell-scale, so the two chrome strips
-// share a baseline + height at every viewport.
+// (8 + max(button=29, logo=22) + 8 inner padding + 1+1 border). The
+// sidebar tab pill scales its height to this value so the two chrome
+// strips share a baseline at every viewport.
 const NAV_DESIGN_HEIGHT = 47;
 
 type PanelLayout = { left: number; top: number; width: number; height: number; scale: number };
@@ -48,50 +88,14 @@ type SidebarTab = "agent" | "stats";
 // FloatingNav / FooterStrip so they can position relative to it.
 const MAIN_PANEL: PanelLayout = { left: 0, top: 0, width: PANEL_W, height: PANEL_H, scale: 1 };
 
-// Landscape filter — colour-preserving, just slightly desaturated and dimmed.
-// Used on the main panel + nav pill so the colour reads through.
+// Landscape filter — colour-preserving, slightly desaturated and dimmed.
 const LANDSCAPE_FILTER = "saturate(0.85) brightness(0.7)";
 
-// LMC-style muted filter — exact match to landing's Scenery muted state
-// (when learnMore = true). Applied to the agent chat sidebar so it
-// reads as a recessed, greyscaled surface vs the colourful main panel.
+// Muted variant — applied to the agent chat sidebar so it reads as a
+// recessed, greyscaled surface vs the colourful main panel.
 const LANDSCAPE_FILTER_MUTED = "grayscale(0.85) saturate(0.35) contrast(0.85) brightness(0.55)";
 
-/* ---------- Constants & sample data ---------- */
-
-const SHARE_PRICE = 1.0427;
-
-// Demo wallet position. Real backend: read from `/me/position` once a
-// wallet is connected. Stable-token deposit so HODL value == principal,
-// which makes outperformance the same as raw P&L.
-const USER_DEPOSIT_TS = "2026-02-27T10:14:00";
-const USER_DEPOSIT_AMT = 5000;
-const USER_DEPOSIT_TX = "0x82a3…4d91";
-const USER_ENTRY_SHARE_PRICE = 1.0184;
-const USER_DAYS_HELD = 60;
-const USER_SHARES = USER_DEPOSIT_AMT / USER_ENTRY_SHARE_PRICE;
-const USER_VALUE = USER_SHARES * SHARE_PRICE;
-const USER_PNL = USER_VALUE - USER_DEPOSIT_AMT;
-const USER_PNL_PCT = (USER_PNL / USER_DEPOSIT_AMT) * 100;
-const USER_REALIZED_APY = ((USER_VALUE / USER_DEPOSIT_AMT) ** (365 / USER_DAYS_HELD) - 1) * 100;
-
-const SHARE_PRICE_30D = [
-  1.0000, 0.9994, 1.0008, 1.0021, 1.0014, 1.0035, 1.0028, 1.0049, 1.0061, 1.0078,
-  1.0090, 1.0089, 1.0103, 1.0118, 1.0127, 1.0145, 1.0162, 1.0179, 1.0184, 1.0202,
-  1.0218, 1.0228, 1.0218, 1.0234, 1.0252, 1.0268, 1.0290, 1.0312, 1.0349, 1.0427,
-];
-
-const TVL_30D = [
-  3.05, 3.07, 3.08, 3.06, 3.09, 3.11, 3.13, 3.12, 3.15, 3.16,
-  3.18, 3.19, 3.17, 3.20, 3.22, 3.21, 3.24, 3.23, 3.25, 3.27,
-  3.25, 3.26, 3.27, 3.28, 3.26, 3.27, 3.29, 3.28, 3.27, 3.26,
-];
-
-const APR_30D = [
-  11.2, 11.5, 11.8, 12.1, 11.9, 12.3, 12.8, 12.6, 13.0, 13.2,
-  13.5, 13.3, 13.4, 13.7, 13.9, 14.2, 14.0, 13.8, 13.6, 13.9,
-  14.1, 14.3, 14.0, 13.8, 14.0, 14.2, 14.4, 14.1, 14.0, 14.2,
-];
+/* ---------- Static reference (assets, masks, formatters) ---------- */
 
 const MASK_STYLE = {
   backgroundColor: "#fff",
@@ -115,29 +119,10 @@ const TOKENS: Record<string, TokenEntry> = {
 };
 
 const ICONS: Record<string, React.ReactNode> = {
-  position:   (<><circle cx="12" cy="12" r="3" /><path d="M3 12h6M15 12h6" /></>),
-  vault:      (<><path d="M5 9h14v9H5z" /><path d="M9 9V6a3 3 0 0 1 6 0v3" /></>),
-  allocation: (
-    <>
-      <path d="M4 7h16M4 12h16M4 17h16" />
-      <circle cx="8" cy="7" r="0.8" fill="currentColor" />
-      <circle cx="14" cy="12" r="0.8" fill="currentColor" />
-      <circle cx="10" cy="17" r="0.8" fill="currentColor" />
-    </>
-  ),
-  agent:      (<><circle cx="12" cy="12" r="8.5" /><polyline points="12 7 12 12 15.5 14" /></>),
-  arrow:      (<path d="M5 12h14M12 5l7 7-7 7" />),
-  external:   (<><path d="M14 4h6v6" /><path d="M20 4l-9 9" /><path d="M19 13v6H5V5h6" /></>),
-  pools:      (<><path d="M4 7h16M4 12h16M4 17h16" /></>),
-  fees:       (<><circle cx="12" cy="12" r="9" /><path d="M14.5 9.5h-3a1.5 1.5 0 0 0 0 3h2a1.5 1.5 0 0 1 0 3h-3M12 7.5v9" /></>),
-  clock:      (<><circle cx="12" cy="12" r="8.5" /><polyline points="12 7 12 12 15.5 14" /></>),
-  flow:       (<><path d="M4 7h12M16 3l4 4-4 4" /><path d="M20 17H8M8 13l-4 4 4 4" /></>),
-  range:      (<><path d="M3 8h18M3 16h18" /><path d="M7 12h10" /></>),
+  arrow:    (<path d="M5 12h14M12 5l7 7-7 7" />),
+  external: (<><path d="M14 4h6v6" /><path d="M20 4l-9 9" /><path d="M19 13v6H5V5h6" /></>),
 };
 
-// Copy + check icons — user-supplied artwork on a 20×20 viewBox. Both
-// stroke-only so they swap cleanly on `copied`. `currentColor` lets
-// the surrounding button drive the fill.
 function CopyIcon({ size = 14 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 20 20" fill="none" aria-hidden style={{ display: "inline-block", flexShrink: 0 }}>
@@ -155,9 +140,6 @@ function CheckIcon({ size = 14 }: { size?: number }) {
   );
 }
 
-// "New context" icon — user-supplied artwork for the signal card.
-// Document-with-lines mark; opacity-0.4 body + solid corner fold and
-// solid lines so it reads at small sizes against a dark grey panel.
 function NewContextIcon({ size = 13 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden style={{ display: "inline-block", flexShrink: 0 }}>
@@ -170,10 +152,9 @@ function NewContextIcon({ size = 13 }: { size?: number }) {
   );
 }
 
-// Source icons — three rendered styles for the three source kinds.
-// `vault` uses the alps logo (mask), `uniswap` is the unicorn glyph,
-// `basescan` is the stylized B. All grayscale to match the chat. The
-// `vault` kind reuses MASK_STYLE so it tracks logo.png changes.
+// Source icons for the three source kinds. `vault` reuses the alps
+// logo mask, `uniswap` is the unicorn glyph, `basescan` is a
+// stylized B.
 type SourceKind = "vault" | "uniswap" | "basescan";
 
 function SourceIcon({ kind, size = 12 }: { kind: SourceKind; size?: number }) {
@@ -207,11 +188,8 @@ function StrokeIcon({ kind, size = 11 }: { kind: keyof typeof ICONS | string; si
   );
 }
 
-// Filled-icon set used by `CardLabel` pills. Each path uses
-// currentColor (inherited from the SVG `fill="currentColor"` wrapper
-// in `<FilledIcon>`); `fillOpacity` introduces the soft tint passes.
+// Filled-icon set used by `CardLabel` pills.
 const FILLED_ICONS: Record<string, React.ReactNode> = {
-  // Deposit — filled card with a deposit-arrow / lines and chip dots.
   vault: (
     <>
       <path d="M4.75 2C3.23079 2 2 3.23079 2 4.75V13.25C2 14.7692 3.23079 16 4.75 16H13.25C14.7692 16 16 14.7692 16 13.25V4.75C16 3.23079 14.7692 2 13.25 2H4.75Z" fillOpacity="0.4" />
@@ -223,8 +201,6 @@ const FILLED_ICONS: Record<string, React.ReactNode> = {
       <path d="M12.5 16H13.25C13.51 16 13.7616 15.9639 14 15.8965V16.75C14 17.1642 13.6642 17.5 13.25 17.5C12.8358 17.5 12.5 17.1642 12.5 16.75V16Z" />
     </>
   ),
-  // Position — three dim circles + a bright "add" circle (the user
-  // adding a position to the basket).
   position: (
     <>
       <path d="M15.5001 12H13.7501V10.25C13.7501 9.8359 13.4142 9.5 13.0001 9.5C12.586 9.5 12.2501 9.8359 12.2501 10.25V12H10.5001C10.086 12 9.75012 12.3359 9.75012 12.75C9.75012 13.1641 10.086 13.5 10.5001 13.5H12.2501V15.25C12.2501 15.6641 12.586 16 13.0001 16C13.4142 16 13.7501 15.6641 13.7501 15.25V13.5H15.5001C15.9142 13.5 16.2501 13.1641 16.2501 12.75C16.2501 12.3359 15.9142 12 15.5001 12Z" />
@@ -240,8 +216,6 @@ const FILLED_ICONS: Record<string, React.ReactNode> = {
       <path d="M9.00012 12.5H3.75012C3.33612 12.5 3.00012 12.164 3.00012 11.75C3.00012 11.336 3.33612 11 3.75012 11H9.00012C9.41412 11 9.75012 11.336 9.75012 11.75C9.75012 12.164 9.41412 12.5 9.00012 12.5Z" />
     </>
   ),
-  // Performance — chart card: a dim card with a sparkline-style line
-  // crossing it and two dot markers.
   sparkles: (
     <>
       <path d="M3.75 2C2.23079 2 1 3.23079 1 4.75V13.25C1 14.7692 2.23079 16 3.75 16H14.25C15.7692 16 17 14.7692 17 13.25V4.75C17 3.23079 15.7692 2 14.25 2H3.75Z" fillOpacity="0.4" />
@@ -250,7 +224,6 @@ const FILLED_ICONS: Record<string, React.ReactNode> = {
       <path d="M6.75 6C7.164 6 7.5 5.664 7.5 5.25C7.5 4.836 7.164 4.5 6.75 4.5C6.336 4.5 6 4.836 6 5.25C6 5.664 6.336 6 6.75 6Z" />
     </>
   ),
-  // Activity — calendar card with dotted entries.
   stack: (
     <>
       <path fillRule="evenodd" clipRule="evenodd" d="M1.5 4.75C1.5 3.23069 2.73128 2 4.25 2H13.75C15.2687 2 16.5 3.23069 16.5 4.75V13.25C16.5 14.7693 15.2687 16 13.75 16H4.25C2.73128 16 1.5 14.7693 1.5 13.25V4.75Z" fillOpacity="0.4" />
@@ -272,8 +245,6 @@ function FilledIcon({ kind, size = 12 }: { kind: keyof typeof FILLED_ICONS | str
   );
 }
 
-// User-supplied wallet artwork — stays in sync with the connect-wallet
-// nav button on the floating top nav.
 function WalletIcon({ size = 14 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden style={{ display: "inline-block", flexShrink: 0 }}>
@@ -307,9 +278,7 @@ function TokenChip({ entry, size = 18, radius }: { entry: TokenEntry; size?: num
   const r = radius ?? Math.max(3, Math.round(size * 0.26));
   const withMoon = entry.kind === "png" && entry.src.endsWith("/uni.svg");
   // Inner mask sized as a percentage (not rounded px) so the padding
-  // ring stays symmetric at every chip size — at 14px or 16px the
-  // rounded-px version produced uneven sub-pixel offsets that read
-  // as "icon shifted up-right".
+  // ring stays symmetric at every chip size.
   return (
     <span aria-hidden style={{
       width: size, height: size, borderRadius: r, background: entry.color,
@@ -346,8 +315,6 @@ function AlpChip({ size = 18 }: { size?: number }) {
       display: "inline-flex", alignItems: "center", justifyContent: "center",
       flexShrink: 0, lineHeight: 0, verticalAlign: "middle",
     }}>
-      {/* Percentage-sized inner so the mask padding stays exactly
-          symmetric at any chip size — same fix as TokenChip. */}
       <span style={{
         display: "block", width: "65%", height: "65%",
         ...MASK_STYLE,
@@ -372,8 +339,6 @@ function PoolPairChip({ left, right, size = 18 }: { left: TokenEntry; right: Tok
 }
 
 function Card({ children, style, className }: { children: React.ReactNode; style?: React.CSSProperties; className?: string }) {
-  // Mirrors landing-face's Card 1:1 — no backdrop blur, so segments
-  // sit on a flat rgba surface like the How-it-works bento.
   return (
     <div className={className} style={{
       background: "rgba(255,255,255,0.04)",
@@ -399,31 +364,8 @@ function CardLabel({ icon, children }: { icon: keyof typeof ICONS | keyof typeof
       letterSpacing: "0.02em", lineHeight: 1, width: "max-content",
     }}>
       {isFilled ? <FilledIcon kind={icon} size={12} /> : <StrokeIcon kind={icon} size={11} />}
-      {/* Inter at this size has its x-height-center below its
-          line-box-center, so flex-center-aligned text reads as a
-          touch low. A 1px upward nudge lines the visual mid-mark of
-          the lowercase letters with the icon's pixel center. */}
+      {/* 1px upward nudge centres lowercase x-height against the icon. */}
       <span style={{ display: "inline-block", transform: "translateY(-1px)" }}>{children}</span>
-    </span>
-  );
-}
-
-function InlinePill({ icon, iconImage, children }: { icon?: keyof typeof ICONS | string; iconImage?: { src: string; alt: string }; children: React.ReactNode }) {
-  return (
-    <span style={{
-      display: "inline-flex", alignItems: "center", gap: 5,
-      padding: "2px 8px 2px 6px", borderRadius: 999,
-      background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.09)",
-      verticalAlign: "-0.12em", margin: "0 0.12em",
-      color: "#fff", fontFamily: "var(--font-radley)", fontSize: 13, fontWeight: 400, lineHeight: 1, whiteSpace: "nowrap",
-    }}>
-      {iconImage && (
-        <span style={{ width: 14, height: 14, display: "inline-flex", flexShrink: 0 }}>
-          <Image src={iconImage.src} alt={iconImage.alt} width={14} height={14} style={{ borderRadius: 999, display: "block" }} />
-        </span>
-      )}
-      {icon && <StrokeIcon kind={icon} size={12} />}
-      {children}
     </span>
   );
 }
@@ -482,77 +424,63 @@ function Sparkline({ values, lineColor, fillColor, height = 64 }: { values: numb
   );
 }
 
-function DetailRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", color: "rgba(255,255,255,0.55)", fontFamily: "var(--sans-stack)", fontSize: 12, lineHeight: 1.2 }}>
-      <span>{label}</span>
-      <span style={{ color: "rgba(255,255,255,0.92)", fontVariantNumeric: "tabular-nums" }}>{value}</span>
-    </div>
-  );
-}
-
 const fmtNum = (n: number) =>
   n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4 });
 
-/* ---------- Data ---------- */
+/* ---------- Data adapters (wire snapshots → view shapes) ---------- */
 
 type AllocationEntry = TokenEntry & { pct: number };
-const ALLOCATIONS: AllocationEntry[] = [
-  { ...TOKENS.USDC, pct: 38 },
-  { ...TOKENS.ETH,  pct: 24 },
-  { ...TOKENS.BTC,  pct: 18 },
-  { ...TOKENS.USDT, pct: 12 },
-  { ...TOKENS.UNI,  pct:  8 },
-];
 
 type PoolEntry = {
   slug: string;
   pct: number;
   color: string;
+  apr: number;
+  earned30d: number;
   pair?: { left: TokenEntry; right: TokenEntry };
   single?: TokenEntry;
 };
-const POOLS: PoolEntry[] = [
-  { slug: "ETH/USDC",     pct: 24, color: TOKENS.ETH.color,  pair: { left: TOKENS.ETH,  right: TOKENS.USDC } },
-  { slug: "BTC/USDC",     pct: 18, color: TOKENS.BTC.color,  pair: { left: TOKENS.BTC,  right: TOKENS.USDC } },
-  { slug: "USDC/USDT",    pct: 12, color: TOKENS.USDT.color, pair: { left: TOKENS.USDC, right: TOKENS.USDT } },
-  { slug: "UNI/USDC",     pct:  8, color: TOKENS.UNI.color,  pair: { left: TOKENS.UNI,  right: TOKENS.USDC } },
-  { slug: "Idle reserve", pct: 38, color: TOKENS.USDC.color, single: TOKENS.USDC },
-];
 
-const POSITIONS_SORTED: PoolEntry[] = [
-  POOLS.find((p) => p.slug === "Idle reserve")!,
-  ...POOLS
-    .filter((p) => p.slug !== "Idle reserve")
-    .sort((a, b) => b.pct - a.pct),
-];
+function toPoolEntry(p: VaultPool): PoolEntry {
+  if (p.position.kind === "pair") {
+    const left = resolveToken(p.position.left);
+    const right = resolveToken(p.position.right);
+    return {
+      slug: p.label,
+      pct: p.pct,
+      color: left.color,
+      apr: p.apr,
+      earned30d: p.earned30d,
+      pair: { left, right },
+    };
+  }
+  const single = resolveToken(p.position.token);
+  return {
+    slug: p.label,
+    pct: p.pct,
+    color: single.color,
+    apr: p.apr,
+    earned30d: p.earned30d,
+    single,
+  };
+}
 
-// Per-pool APR + 30d fees earned. Same eventual source as POOLS — a
-// vault-state read on the backend; mocked here for the demo.
-const POOL_APR: Record<string, number> = {
-  "ETH/USDC":     18.4,
-  "BTC/USDC":     14.2,
-  "USDC/USDT":     8.6,
-  "UNI/USDC":     22.1,
-  "Idle reserve":  0.0,
-};
-const POOL_EARNED_30D: Record<string, number> = {
-  "ETH/USDC":     1240.50,
-  "BTC/USDC":      890.20,
-  "USDC/USDT":     320.10,
-  "UNI/USDC":      215.80,
-  "Idle reserve":    0.00,
-};
-const BASKET_APR_30D = 14.2;
-const BASKET_EARNED_30D = POOLS.reduce((a, p) => a + (POOL_EARNED_30D[p.slug] ?? 0), 0);
+// Idle reserve floats to the top; remaining positions sort by share desc.
+function sortPositions(pools: PoolEntry[]): PoolEntry[] {
+  const idle = pools.find((p) => p.slug === "Idle reserve");
+  const others = pools.filter((p) => p.slug !== "Idle reserve").sort((a, b) => b.pct - a.pct);
+  return idle ? [idle, ...others] : others;
+}
+
+// Wire ships full 0x-prefixed 66-char hashes; UI shortens for display.
+const shortenTx = (tx: string) => `${tx.slice(0, 6)}…${tx.slice(-4)}`;
 
 // Agent message feed:
-//   signal  — raw incoming data (price/vol move, fee accrual, etc.).
-//             Standalone: a signal may or may not get acted on.
-//   action  — onchain tx (hash + chip + title). Carries an optional
-//             `thought` lead-in; thoughts only exist tethered to the
-//             action they triggered, never standalone.
-// Plus user/reply for live chat.
+//   signal  — raw incoming data (price/vol move, fee accrual, etc.);
+//             may or may not get acted on.
+//   action  — onchain tx (hash + chip + title). Optional `thought`
+//             lead-in is always tethered to its action.
+//   user/reply — live chat.
 type ActionChip =
   | { type: "single"; token: TokenEntry }
   | { type: "pair"; left: TokenEntry; right: TokenEntry };
@@ -560,13 +488,13 @@ type ActionChip =
 type SourceRef = { kind: SourceKind; label: string; tx?: string; href?: string };
 
 type AgentMessage =
-  | { id: string; kind: "signal"; iso: string; text: string }
-  | { id: string; kind: "action"; title: string; category: ActionCategory; chip: ActionChip; iso: string; tx: string; text: string; thought?: string }
-  | { id: string; kind: "user";   iso: string; text: string }
-  | { id: string; kind: "reply";  iso: string; text: string; sources?: SourceRef[]; replyTo?: string };
+  | { id: string; kind: "signal";  iso: string; text: string }
+  | { id: string; kind: "thought"; iso: string; text: string }
+  | { id: string; kind: "action";  title: string; category: ActionCategory; chip: ActionChip; iso: string; tx: string; text: string; thought?: string }
+  | { id: string; kind: "user";    iso: string; text: string }
+  | { id: string; kind: "reply";   iso: string; text: string; sources?: SourceRef[]; replyTo?: string };
 
 // Pulls the hour-of-day (0–23) from an iso label like "Apr 28 · 14:23".
-// Returns null if the format is unexpected.
 function parseHour(iso: string): number | null {
   const time = iso.split(" · ")[1];
   if (!time) return null;
@@ -575,9 +503,8 @@ function parseHour(iso: string): number | null {
 }
 
 // Builds 24 hour buckets ending at the latest message's hour. Each
-// bucket counts `signal` and `action` messages and dedupes the tokens
-// touched by actions in that hour (used by the tooltip's chip row).
-// User/reply chat is ignored — this is agent-side cadence.
+// bucket counts signal/action messages and dedupes tokens touched by
+// actions. User/reply chat is ignored — this is agent-side cadence.
 type HourBucket = { signals: number; actions: number; tokens: TokenEntry[] };
 function buildHourlyActivity(messages: AgentMessage[]): HourBucket[] {
   const buckets: HourBucket[] = Array.from({ length: 24 }, () => ({ signals: 0, actions: 0, tokens: [] }));
@@ -590,15 +517,15 @@ function buildHourlyActivity(messages: AgentMessage[]): HourBucket[] {
     return 0;
   })();
   for (const m of messages) {
-    if (m.kind !== "signal" && m.kind !== "action") continue;
+    if (m.kind !== "signal" && m.kind !== "thought" && m.kind !== "action") continue;
     const h = parseHour(m.iso);
     if (h === null) continue;
-    // Distance backward from lastHour, wrapping mod 24. Bucket index
-    // is (23 - distance) so the latest hour sits at the right edge.
+    // Distance backward from lastHour, wrapping mod 24; latest hour
+    // ends up at index 23 (right edge).
     const dist = (lastHour - h + 24) % 24;
     if (dist > 23) continue;
     const idx = 23 - dist;
-    if (m.kind === "signal") buckets[idx].signals++;
+    if (m.kind === "signal" || m.kind === "thought") buckets[idx].signals++;
     else {
       buckets[idx].actions++;
       const ts: TokenEntry[] = m.chip.type === "pair" ? [m.chip.left, m.chip.right] : [m.chip.token];
@@ -612,7 +539,7 @@ function buildHourlyActivity(messages: AgentMessage[]): HourBucket[] {
   return buckets;
 }
 
-// "MMM D · HH:MM" — what the chat row + hover time render.
+// "MMM D · HH:MM" format used by the chat row + hover time.
 function formatDisplayIso(d: Date): string {
   const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
   const hh = String(d.getHours()).padStart(2, "0");
@@ -620,19 +547,24 @@ function formatDisplayIso(d: Date): string {
   return `${months[d.getMonth()]} ${d.getDate()} · ${hh}:${mm}`;
 }
 
-function nowIso(): string { return formatDisplayIso(new Date()); }
-
 // Falls back to USDC if the backend ever sends an unknown symbol —
 // keeps the chip from rendering undefined and crashing TokenChip.
-const resolveToken = (sym: string): TokenEntry => TOKENS[sym] ?? TOKENS.USDC;
+function resolveToken(sym: string): TokenEntry { return TOKENS[sym] ?? TOKENS.USDC; }
 
 // Wire → view: resolves token symbols, reshapes WireSource → SourceRef,
-// preserves id + replyTo so optimistic reconciliation can work.
-function toAgentMessage(w: WireMessage): AgentMessage {
+// preserves id + replyTo so optimistic reconciliation can work. Returns
+// null when the wire frame uses a `kind` this FE build doesn't know
+// about — the backend may ship new kinds before a redeploy lands, and
+// silently dropping unknowns is better than poisoning the messages
+// array with `undefined`.
+function toAgentMessage(w: WireMessage): AgentMessage | null {
+  if (!w || typeof w !== "object" || typeof (w as { kind?: unknown }).kind !== "string") return null;
   const iso = formatDisplayIso(new Date(w.ts));
   switch (w.kind) {
     case "signal":
       return { id: w.id, kind: "signal", iso, text: w.text };
+    case "thought":
+      return { id: w.id, kind: "thought", iso, text: w.text };
     case "action":
       return {
         id: w.id, kind: "action", iso,
@@ -657,90 +589,16 @@ function toAgentMessage(w: WireMessage): AgentMessage {
             : { kind: s.kind, label: s.label, tx: s.tx }
         ),
       };
+    default:
+      return null;
   }
-}
-
-// Wire-shape demo seed. `ts` is local-time ISO (no Z) so the display
-// stays stable across timezones; prod backend should emit UTC.
-const ACTION_TITLE = "Action submitted";
-
-const INITIAL_WIRE_MESSAGES: WireMessage[] = [
-  { id: "evt_001", ts: "2026-04-28T05:18:00", kind: "signal", text: "USDC/USDT stable-pair fees: $890 accrued." },
-  { id: "evt_002", ts: "2026-04-28T05:24:00", kind: "action", title: ACTION_TITLE, category: "claim_fees", chip: { type: "single", token: "USDT" }, tx: "0xc4e2…77f9",
-    text: "Compounded $890 from USDC/USDT into LP." },
-  { id: "evt_003", ts: "2026-04-28T08:11:00", kind: "signal", text: "ETH/USDC mid drifted to $4,124, +1.4% from band center." },
-  { id: "evt_004", ts: "2026-04-28T08:24:00", kind: "action", title: ACTION_TITLE, category: "edit_position", chip: { type: "single", token: "ETH" }, tx: "0x9f15…c780",
-    thought: "Drift exceeds the rebalance threshold. Recentering before fees decay further.",
-    text: "Rebalanced ETH/USDC at $4,124 mid. New range ±1.0%." },
-  // Standalone signal — TWAP divergence noted, but no action follows.
-  { id: "evt_005", ts: "2026-04-28T09:55:00", kind: "signal", text: "TWAP divergence between USDC and USDT widening to 4 bps." },
-  { id: "evt_006", ts: "2026-04-28T11:20:00", kind: "signal", text: "UNI/USDC price re-entered the inner range." },
-  { id: "evt_007", ts: "2026-04-28T11:25:00", kind: "action", title: ACTION_TITLE, category: "edit_position", chip: { type: "single", token: "UNI" }, tx: "0x2e91…44ab",
-    text: "Closed UNI/USDC outer band to reserve. Price action settled inside the inner range." },
-  { id: "evt_008", ts: "2026-04-28T13:18:00", kind: "signal", text: "UNI 1h volume +43% post-governance vote." },
-  { id: "evt_009", ts: "2026-04-28T13:25:00", kind: "action", title: ACTION_TITLE, category: "swap", chip: { type: "pair", left: "BTC", right: "UNI" }, tx: "0xa7d3…91f2",
-    thought: "Volume regime shift on UNI looks structural, not a wick. Reallocating exposure.",
-    text: "Rotated 5% from BTC/USDC into UNI/USDC." },
-  { id: "evt_010", ts: "2026-04-28T14:01:00", kind: "signal", text: "Accrued fees on BTC/USDC: $1.21k." },
-  { id: "evt_011", ts: "2026-04-28T14:08:00", kind: "action", title: ACTION_TITLE, category: "claim_fees", chip: { type: "single", token: "BTC" }, tx: "0xb1c2…8e4d",
-    text: "Harvested $1.2k in fees from BTC/USDC and compounded back into the position." },
-  { id: "evt_012", ts: "2026-04-28T14:15:00", kind: "signal", text: "ETH/USDC realized vol −22% over the last 4h." },
-  { id: "evt_013", ts: "2026-04-28T14:23:00", kind: "action", title: ACTION_TITLE, category: "edit_position", chip: { type: "single", token: "ETH" }, tx: "0x4f8a…c3b1",
-    thought: "Vol contracting cleanly. A tighter band captures more of the spread without raising rebalance frequency.",
-    text: "Tightened ETH/USDC to ±0.8%. Realized vol dropped 22% in the last 4h, capturing more of the spread in a tighter band." },
-];
-
-// Pre-built dev replies. Sources are WireSource so the stub round-trips
-// through the same adapter the real backend will feed.
-const QUICK_REPLIES: { match: RegExp; text: string; sources?: WireSource[] }[] = [
-  { match: /\b(position|stake|holding|holdings|share|shares|alp)\b/i,
-    text: "You currently hold 0 ALP. Once you deposit, each ALP claims a slice of $3.26M of active liquidity across 5 pools, with 38% sitting in the idle reserve.",
-    sources: [{ kind: "vault", label: "Vault state", tx: "0xa1b2…f9c8" }] },
-  { match: /\b(apr|yield|earning|earnings|return|fee|fees)\b/i,
-    text: "30-day rolling APR is 14.2%, slightly above the 90-day average (13.6%). Driven mostly by ETH/USDC fee capture this week.",
-    sources: [
-      { kind: "vault", label: "30d performance", tx: "0xa1b2…f9c8" },
-      { kind: "uniswap", label: "ETH/USDC pool", url: "https://app.uniswap.org/" },
-    ] },
-  { match: /\b(rebalance|range|tighten|widen)\b/i,
-    text: "Tightened ETH/USDC to ±0.8% two minutes ago after realized vol dropped. Fee yield projected up ~12% over the next 24h.",
-    sources: [
-      { kind: "basescan", label: "Rebalance tx", tx: "0x4f8a…c3b1" },
-      { kind: "uniswap", label: "ETH/USDC pool", url: "https://app.uniswap.org/" },
-    ] },
-  { match: /\b(tvl|vault|value)\b/i,
-    text: "Vault TVL is $3.26M, up 6.9% over 30 days. Four active pools and the idle reserve at 38%.",
-    sources: [{ kind: "vault", label: "Vault state", tx: "0xa1b2…f9c8" }] },
-  { match: /\b(risk|il|impermanent|drawdown)\b/i,
-    text: "Impermanent loss is contained by continuous rebalancing. 30-day net APR (14.2%) sits well above estimated IL drag (~2.4%/y).",
-    sources: [{ kind: "vault", label: "Risk model", tx: "0xa1b2…f9c8" }] },
-  { match: /\b(idle|reserve|cash)\b/i,
-    text: "Idle reserve is at 38% (target band 30 to 45%). It's USDC sitting in the vault, used for instant withdrawals and quick redeployments.",
-    sources: [{ kind: "vault", label: "Vault state", tx: "0xa1b2…f9c8" }] },
-  { match: /\b(pool|pools|pair|pairs)\b/i,
-    text: "Active pools: ETH/USDC (24%), BTC/USDC (18%), USDC/USDT (12%), UNI/USDC (8%). Each is rebalanced independently based on its own vol and fee signals.",
-    sources: [
-      { kind: "vault", label: "Vault allocation", tx: "0xa1b2…f9c8" },
-      { kind: "uniswap", label: "Uniswap pools", url: "https://app.uniswap.org/" },
-    ] },
-  { match: /\b(hi|hello|hey|sup|yo)\b/i,
-    text: "Hey. I manage the active positions across the basket and rebalance them continuously. Try asking about position, APR, rebalances, TVL, risk, or pools." },
-];
-
-function getAgentReply(input: string): { text: string; sources?: WireSource[] } {
-  for (const r of QUICK_REPLIES) {
-    if (r.match.test(input)) return { text: r.text, sources: r.sources };
-  }
-  return { text: "I don't have a pre-built answer for that one. Try asking about position, APR, rebalances, TVL, risk, or pools." };
 }
 
 /* ---------- Backdrop ---------- */
 
 function PanelLandscape({ muted = false }: { muted?: boolean }) {
-  // zIndex: -1 (stays inside the section's `isolation: isolate`
-  // context) so the panel-scroll above doesn't need its own stacking
-  // context to layer over it — keeps backdrop-filter on cards inside
-  // the scroll area free to sample this image as their backdrop.
+  // zIndex: -1 keeps this inside the section's isolate context so
+  // backdrop-filter on cards inside the scroll area can sample it.
   return (
     <div aria-hidden style={{ position: "absolute", inset: 0, zIndex: -1 }}>
       <Image src="/landscape.png" alt="" fill priority sizes="100vw" style={{
@@ -753,15 +611,16 @@ function PanelLandscape({ muted = false }: { muted?: boolean }) {
 
 /* ---------- Floating nav pill — full main-panel width, sits just above it ---------- */
 
-function FloatingNav({ layout, exiting, onBack }: { layout: PanelLayout; exiting: boolean; onBack: () => void }) {
+function FloatingNav({ layout, exiting, muted = false, onBack }: { layout: PanelLayout; exiting: boolean; muted?: boolean; onBack: () => void }) {
+  const { address, isConnected } = useAccount();
   return (
     <div className={exiting ? "app-nav-exit" : "app-nav-enter"} style={{
       position: "fixed",
       left: layout.left,
       width: layout.width,
       top: layout.top - 14,
-      // Below the main panel's z-index so the panel covers the nav
-      // initially — the slide-up reveals the nav from behind it.
+      // Below the main panel so the slide-up reveals the nav from
+      // behind it.
       zIndex: 1,
     }}>
       <div style={{
@@ -774,7 +633,8 @@ function FloatingNav({ layout, exiting, onBack }: { layout: PanelLayout; exiting
         <div aria-hidden style={{ position: "absolute", inset: 0, zIndex: 0 }}>
           <Image src="/landscape.png" alt="" fill priority sizes="100vw" style={{
             objectFit: "cover",
-            filter: LANDSCAPE_FILTER,
+            filter: muted ? LANDSCAPE_FILTER_MUTED : LANDSCAPE_FILTER,
+            transition: "filter 1400ms cubic-bezier(0.16, 1, 0.3, 1)",
           }} />
         </div>
 
@@ -805,13 +665,19 @@ function FloatingNav({ layout, exiting, onBack }: { layout: PanelLayout; exiting
             <span style={{ color: "#fff", fontFamily: "var(--font-radley)", fontSize: 20, lineHeight: 1, fontWeight: 400, letterSpacing: "-0.02em" }}>alps</span>
           </Link>
 
-          <button type="button" className="bg-white/[0.20] transition-colors duration-300 ease-out hover:bg-white/[0.32]" style={{
-            display: "inline-flex", alignItems: "center", gap: 7,
-            padding: "8px 14px", borderRadius: 10 * layout.scale, border: "none",
-            color: "#fff", fontFamily: "var(--sans-stack)",
-            fontSize: 12, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1,
-          }}>
-            Connect wallet
+          <button
+            type="button"
+            onClick={() => getAppKit()?.open(isConnected ? { view: "Account" } : { view: "Connect" })}
+            className="bg-white/[0.20] transition-colors duration-300 ease-out hover:bg-white/[0.32]"
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 7,
+              padding: "8px 14px", borderRadius: 10 * layout.scale, border: "none",
+              color: "#fff", fontFamily: "var(--sans-stack)",
+              fontSize: 12, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1,
+              cursor: "pointer",
+            }}
+          >
+            {isConnected && address ? shortAddress(address) : "Connect wallet"}
             <WalletIcon size={13} />
           </button>
         </div>
@@ -820,41 +686,8 @@ function FloatingNav({ layout, exiting, onBack }: { layout: PanelLayout; exiting
   );
 }
 
-/* ---------- Hero ---------- */
-
-function HeroTitle() {
-  return (
-    <h1 style={{
-      color: "#fff", fontFamily: "var(--font-radley)",
-      fontSize: 42, lineHeight: 1.08, letterSpacing: "-0.01em",
-      margin: 0, fontWeight: 400,
-      alignSelf: "center",
-    }}>
-      Start earning from onchain volume.
-    </h1>
-  );
-}
-
-// Empty visual segment used in the top-right of the bento until the
-// real content lands (3D bluechip render, marquee, etc.).
-function PlaceholderCard({ label }: { label: string }) {
-  return (
-    <Card style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", minHeight: 0 }}>
-      <span style={{
-        color: "rgba(255,255,255,0.30)",
-        fontFamily: "var(--sans-stack)", fontSize: 11, fontWeight: 500,
-        letterSpacing: "0.10em", textTransform: "uppercase",
-      }}>
-        {label}
-      </span>
-    </Card>
-  );
-}
-
 /* ---------- User cards ---------- */
 
-// Filled "i" — user-supplied artwork. Outer disc at 40% opacity,
-// the glyph at full opacity, both via currentColor.
 function InfoIcon({ size = 12 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden style={{ display: "block", flexShrink: 0, verticalAlign: "middle" }}>
@@ -864,10 +697,9 @@ function InfoIcon({ size = 12 }: { size?: number }) {
   );
 }
 
-// Hover tooltip wrapper. Renders the popover via `createPortal` to
-// `document.body` so it escapes any ancestor `overflow: hidden` (the
-// deposit sub-card has it for the dot-grid clip) and isn't cut off
-// when expanding upward over the input area.
+// Tooltip rendered via portal to document.body so it escapes any
+// ancestor overflow:hidden (the deposit sub-card has it for the
+// dot-grid clip).
 function InfoTip({ label, children }: { label: string; children: React.ReactNode }) {
   const [hover, setHover] = useState(false);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
@@ -923,8 +755,6 @@ function InfoTip({ label, children }: { label: string; children: React.ReactNode
   );
 }
 
-// User-supplied chevron-pair (up + down). Uses currentColor so it
-// inherits the surrounding muted-text shade.
 function SwapVerticalIcon({ size = 12 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 18 18" aria-hidden style={{ display: "inline-block", flexShrink: 0, opacity: 0.85 }}>
@@ -939,11 +769,132 @@ function VaultCard() {
   const num = Number.parseFloat(amount.replace(/,/g, "")) || 0;
   const usdValue = num; // 1:1 since input is in USDC
   const inputRef = useRef<HTMLInputElement>(null);
+  const { address, isConnected } = useAccount();
+  const { snapshot: vault } = useVault();
 
-  // Five-token row used by the Exposure detail. Leftmost on top,
-  // each subsequent chip steps right with a lower z-index. Hovered
-  // chip lifts + scales + reveals its slug; neighbours stay put.
-  const exposureTokens: TokenEntry[] = [TOKENS.USDC, TOKENS.ETH, TOKENS.BTC, TOKENS.USDT, TOKENS.UNI];
+  const sharePrice = vault?.sharePrice ?? 0;
+  const tvl = vault?.tvl ?? 0;
+  const basketApr = vault?.basketApr ?? 0;
+
+  // Live USDC balance for the connected wallet. wagmi v2 dropped the
+  // ERC20 `token` shortcut on useBalance, so we read balanceOf
+  // directly. Disabled when disconnected so we don't fire RPC reads
+  // against an undefined address.
+  const balanceQuery = useReadContract({
+    address: USDC_ADDRESS,
+    abi: usdcAbi,
+    functionName: "balanceOf",
+    args: address ? [address] : undefined,
+    query: { enabled: isConnected && !!address },
+  });
+  const balanceFmt: string = (() => {
+    if (!isConnected) return "0.00";
+    if (typeof balanceQuery.data === "bigint") {
+      return Number(formatUnits(balanceQuery.data, USDC_DECIMALS)).toLocaleString("en-US", {
+        minimumFractionDigits: 2, maximumFractionDigits: 2,
+      });
+    }
+    return balanceQuery.isLoading ? "-" : "0.00";
+  })();
+  const maxUsdcStr = typeof balanceQuery.data === "bigint"
+    ? formatUnits(balanceQuery.data, USDC_DECIMALS)
+    : "0";
+
+  // parseUnits throws on malformed strings; catching keeps the
+  // disabled-state gating clean rather than crashing the render.
+  const parsedAssets: bigint | null = (() => {
+    if (num <= 0) return null;
+    try {
+      return parseUnits(amount.replace(/,/g, "") as `${number}`, USDC_DECIMALS);
+    } catch {
+      return null;
+    }
+  })();
+
+  // Allowance read drives the approve-vs-deposit gating below.
+  // Refetched by the approve-receipt effect once the tx confirms.
+  const allowanceQuery = useReadContract({
+    address: USDC_ADDRESS,
+    abi: usdcAbi,
+    functionName: "allowance",
+    args: address ? [address, VAULT_ADDRESS] : undefined,
+    query: { enabled: isConnected && !!address },
+  });
+  const allowance: bigint = allowanceQuery.data ?? 0n;
+  const needsApprove = parsedAssets !== null && allowance < parsedAssets;
+
+  // Two write hooks keep approve and deposit lifecycles independent
+  // so the button can flip cleanly between them as allowance updates.
+  const approveTx = useWriteContract();
+  const depositTx = useWriteContract();
+  const approveReceipt = useWaitForTransactionReceipt({ hash: approveTx.data });
+  const depositReceipt = useWaitForTransactionReceipt({ hash: depositTx.data });
+
+  // After approve confirms → refetch allowance so the button flips
+  // to "Deposit" on its own. After deposit confirms → clear amount;
+  // backend pushes the new user.snapshot via its event listener.
+  //
+  // Dedupe by tx hash: wagmi v2 returns a fresh query-object identity
+  // every render, so we toast/refetch only when the receipt's hash
+  // differs from the last one we acted on.
+  const toastedApproveHash = useRef<`0x${string}` | null>(null);
+  useEffect(() => {
+    if (approveReceipt.isSuccess && approveTx.data && toastedApproveHash.current !== approveTx.data) {
+      toastedApproveHash.current = approveTx.data;
+      toast("success", "USDC approval confirmed");
+      void allowanceQuery.refetch();
+      void balanceQuery.refetch();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [approveReceipt.isSuccess, approveTx.data]);
+  const toastedDepositHash = useRef<`0x${string}` | null>(null);
+  useEffect(() => {
+    if (depositReceipt.isSuccess && depositTx.data && toastedDepositHash.current !== depositTx.data) {
+      toastedDepositHash.current = depositTx.data;
+      toast("success", "Deposit confirmed");
+      setAmount("");
+      void balanceQuery.refetch();
+      void allowanceQuery.refetch();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [depositReceipt.isSuccess, depositTx.data]);
+
+  const approving  = approveTx.isPending  || approveReceipt.isLoading;
+  const depositing = depositTx.isPending  || depositReceipt.isLoading;
+  const txInFlight = approving || depositing;
+
+  const handleApprove = async () => {
+    if (!parsedAssets || !address) return;
+    try {
+      await approveTx.writeContractAsync({
+        address: USDC_ADDRESS,
+        abi: usdcAbi,
+        functionName: "approve",
+        args: [VAULT_ADDRESS, parsedAssets],
+      });
+    } catch (err) {
+      if (isUserRejection(err)) toast("info", "Approval rejected");
+      else                       toast("error", "Approval failed, try again");
+    }
+  };
+  const handleDeposit = async () => {
+    if (!parsedAssets || !address) return;
+    try {
+      await depositTx.writeContractAsync({
+        address: VAULT_ADDRESS,
+        abi: vaultAbi,
+        functionName: "deposit",
+        args: [parsedAssets, address],
+      });
+    } catch (err) {
+      if (isUserRejection(err)) toast("info", "Deposit rejected");
+      else                       toast("error", "Deposit failed, try again");
+    }
+  };
+
+  // Exposure chips — leftmost on top, each subsequent chip steps
+  // right with a lower z-index. Driven by vault.allocations.
+  const exposureTokens: TokenEntry[] = (vault?.allocations ?? []).map((a) => resolveToken(a.token));
   const TOK_SIZE = 16;
   const TOK_OFFSET = 10;
   const [hoveredTokIdx, setHoveredTokIdx] = useState<number | null>(null);
@@ -962,10 +913,7 @@ function VaultCard() {
         <H3>Start earning fees from onchain volume!</H3>
       </div>
 
-      {/* Sub-card 1 — amount input + APY readout. The deposit area
-          (top portion above the divider) carries the dot-grid bg
-          that matches Sherpa's action-summary bubble. The APY row
-          below the divider stays on a flat surface. */}
+      {/* Amount input + APY readout. */}
       <div style={{
         marginTop: 18,
         border: "1px solid rgba(255,255,255,0.06)",
@@ -973,9 +921,8 @@ function VaultCard() {
         overflow: "hidden",
         background: "rgba(255,255,255,0.03)",
       }}>
-        {/* Whole grid segment is a click-target for the input — any
-            blank area focuses it. The USDC chip + Max + input itself
-            still handle their own events first via bubbling. */}
+        {/* Whole grid is a click-target for the input — blank area
+            focuses it; chip/Max/input handle their own events first. */}
         <div
           onClick={() => inputRef.current?.focus()}
           style={{
@@ -1005,10 +952,8 @@ function VaultCard() {
                 fontVariantNumeric: "tabular-nums",
               }}
             />
-            {/* Opaque bg ≈ Vault card #0c0c10 + 0.06 white tint, so
-                the pill matches the Connect wallet button visually
-                without the dot-grid behind sub-card 1 bleeding
-                through a translucent rgba bg. */}
+            {/* Opaque bg matches Connect wallet button without the
+                dot-grid behind sub-card 1 bleeding through. */}
             <span style={{
               display: "inline-flex", alignItems: "center", gap: 7,
               padding: "4px 11px 4px 4px",
@@ -1039,7 +984,7 @@ function VaultCard() {
             {/* Click balance to MAX-fill — keeps the row chrome-free. */}
             <button
               type="button"
-              onClick={() => setAmount("0")}
+              onClick={() => isConnected && setAmount(maxUsdcStr)}
               onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "#fff"; }}
               onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.55)"; }}
               style={{
@@ -1047,11 +992,11 @@ function VaultCard() {
                 color: "rgba(255,255,255,0.55)",
                 fontFamily: "var(--sans-stack)", fontSize: 12, fontWeight: 400,
                 fontVariantNumeric: "tabular-nums", lineHeight: 1,
-                cursor: "pointer",
+                cursor: isConnected ? "pointer" : "default",
                 transition: "color 200ms ease",
               }}
             >
-              Balance: 0.00
+              Balance: {balanceFmt}
             </button>
           </div>
         </div>
@@ -1068,12 +1013,12 @@ function VaultCard() {
             </InfoTip>
           </span>
           <span style={{ color: "rgb(134, 239, 172)", fontWeight: 600, fontVariantNumeric: "tabular-nums", letterSpacing: "-0.005em" }}>
-            {BASKET_APR_30D.toFixed(2)}%
+            {basketApr.toFixed(2)}%
           </span>
         </div>
       </div>
 
-      {/* Sub-card 2 — vault details. Flat bg, no dot grid. */}
+      {/* Vault details. */}
       <div style={{
         marginTop: 10,
         padding: "10px 14px",
@@ -1083,8 +1028,8 @@ function VaultCard() {
         display: "flex", flexDirection: "column", gap: 8,
         fontFamily: "var(--sans-stack)", fontSize: 12,
       }}>
-        {/* Exposure — overlapping token chips. Hovered chip lifts +
-            scales up, neighbours fan outward, tooltip reveals slug. */}
+        {/* Exposure — overlapping token chips; hover lifts the chip
+            and reveals its slug. */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "rgba(255,255,255,0.55)" }}>
             Exposure
@@ -1148,7 +1093,7 @@ function VaultCard() {
               <InfoIcon size={12} />
             </InfoTip>
           </span>
-          <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)", fontVariantNumeric: "tabular-nums" }}>$1.0427</span>
+          <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)", fontVariantNumeric: "tabular-nums" }}>${sharePrice.toFixed(4)}</span>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "rgba(255,255,255,0.55)" }}>
@@ -1166,41 +1111,75 @@ function VaultCard() {
               <InfoIcon size={12} />
             </InfoTip>
           </span>
-          <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)", fontVariantNumeric: "tabular-nums" }}>$3.26M</span>
+          <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)", fontVariantNumeric: "tabular-nums" }}>{fmtUsdAdaptive(tvl * 1_000_000)}</span>
         </div>
       </div>
 
-      {/* Full-width primary CTA — no inline margin so it sits flush
-          with the card's uniform 20px padding (top = sides = bottom). */}
-      <button
-        type="button"
-        className="transition-colors duration-200 ease-out"
-        style={{
-          marginTop: "auto", width: "100%",
-          display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
-          padding: "14px 16px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.10)",
-          background: "rgba(255,255,255,0.06)",
-          color: "rgba(255,255,255,0.78)", fontFamily: "var(--sans-stack)",
-          fontSize: 13, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1,
-          cursor: "pointer",
-        }}
-        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.10)"; }}
-        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.06)"; }}
-      >
-        Connect wallet
-        <WalletIcon size={14} />
-      </button>
+      {/* Primary CTA. Disconnected → opens AppKit. Connected: flips
+          through Enter amount → Approve USDC → Deposit based on the
+          parsed amount and live allowance. */}
+      {(() => {
+        const ctaLabel = !isConnected
+          ? "Connect wallet"
+          : approving
+          ? "Approving…"
+          : depositing
+          ? "Depositing…"
+          : !parsedAssets
+          ? "Enter an amount"
+          : needsApprove
+          ? "Approve USDC"
+          : "Deposit";
+        const ctaDisabled = isConnected && (txInFlight || !parsedAssets);
+        const ctaOnClick = !isConnected
+          ? () => getAppKit()?.open({ view: "Connect" })
+          : !parsedAssets || txInFlight
+          ? undefined
+          : needsApprove
+          ? handleApprove
+          : handleDeposit;
+        return (
+          <button
+            type="button"
+            disabled={ctaDisabled}
+            onClick={ctaOnClick}
+            className="transition-colors duration-200 ease-out"
+            style={{
+              marginTop: "auto", width: "100%",
+              display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
+              padding: "14px 16px", borderRadius: 12,
+              border: `1px solid ${ctaDisabled ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.14)"}`,
+              background: ctaDisabled ? "rgba(255,255,255,0.04)" : "rgba(255,255,255,0.10)",
+              color: ctaDisabled ? "rgba(255,255,255,0.40)" : "#fff",
+              fontFamily: "var(--sans-stack)",
+              fontSize: 13, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1,
+              cursor: ctaDisabled ? "not-allowed" : "pointer",
+            }}
+            onMouseEnter={(e) => { if (!ctaDisabled) (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.14)"; }}
+            onMouseLeave={(e) => { if (!ctaDisabled) (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.10)"; }}
+          >
+            {ctaLabel}
+            {!isConnected && <WalletIcon size={14} />}
+          </button>
+        );
+      })()}
     </Card>
   );
 }
 
-const fmtUsd2 = (n: number, signed = false) => {
-  const sign = signed ? (n >= 0 ? "+" : "−") : "";
+// 2 decimals; scales to K/M/B based on magnitude. Input is raw USD —
+// caller is responsible for unit conversion (e.g. multiply vault.tvl
+// by 1e6 since backend ships it in millions). `signed=true` forces a
+// leading "+" on non-negatives.
+function fmtUsdAdaptive(n: number, signed = false): string {
+  const sign = signed ? (n >= 0 ? "+" : "−") : (n < 0 ? "−" : "");
   const abs = Math.abs(n);
-  return `${sign}$${abs.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-};
+  if (abs >= 1e9) return `${sign}$${(abs / 1e9).toFixed(2)}B`;
+  if (abs >= 1e6) return `${sign}$${(abs / 1e6).toFixed(2)}M`;
+  if (abs >= 1e3) return `${sign}$${(abs / 1e3).toFixed(2)}K`;
+  return `${sign}$${abs.toFixed(2)}`;
+}
 
-// Compact key/value row used in the user-side cards.
 function KvRow({ label, value, valueColor }: { label: string; value: string; valueColor?: string }) {
   return (
     <div style={{
@@ -1213,28 +1192,34 @@ function KvRow({ label, value, valueColor }: { label: string; value: string; val
   );
 }
 
-// Position: current value + ALP shares in a rounded dot-grid sub-
-// card (mirrors the Deposit input field's surface), Deposited /
-// Yield pinned to the card floor on plain dark surface. Outer
-// frame matches VaultCard (dark + 0.08 border) so the segments
-// read as one family.
+// Shares wei → display number. ALPVault uses 12-decimal shares
+// (USDC asset 6 + `_decimalsOffset()` 6). Narrow precision to 1e6
+// via BigInt before crossing to Number to avoid losing the trailing
+// wei on large balances.
+function sharesToNumber(weiStr: string): number {
+  return Number(BigInt(weiStr) / 10n ** 6n) / 1e6;
+}
+
 function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
-  const up = USER_PNL >= 0;
+  const { isConnected } = useAccount();
+  const { snapshot } = useUser();
+  const position = isConnected ? (snapshot?.position ?? null) : null;
+  const valueUsd = position?.valueUsd ?? 0;
+  const sharesNum = position ? sharesToNumber(position.shares) : 0;
+  const totalDeposited = position?.totalDepositedUsd ?? 0;
+  const pnl = position?.pnlUsd ?? 0;
+  const up = pnl >= 0;
   const accent = up ? "rgb(134, 239, 172)" : "rgb(248, 113, 113)";
   return (
     <Card style={{
       height: "100%", display: "flex", flexDirection: "column",
-      background: "#0c0c10",
+      background: "rgba(12, 12, 16, 0.65)",
       border: "1px solid rgba(255,255,255,0.08)",
       backdropFilter: "none",
       WebkitBackdropFilter: "none",
     }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
         <CardLabel icon="position">Position</CardLabel>
-        {/* Connect-wallet styling on the dark card surface, with the
-            dot-grid overlay matching the hero sub-card below. No
-            arrow — text reads as the full affordance. Muted at rest,
-            lifts on hover. */}
         <button
           type="button"
           onClick={onWithdraw}
@@ -1265,15 +1250,15 @@ function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
         </button>
       </div>
 
-      {/* $ value + ALP chip, sitting directly on the dark Card
-          surface — no wrapping container chrome. */}
+      {/* $ value + ALP chip on the dark Card surface. Zeros when
+          disconnected; populates when the user snapshot lands. */}
       <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
         <span style={{
           color: "#fff", fontFamily: "var(--sans-stack)",
           fontSize: 26, fontWeight: 600, lineHeight: 1,
           letterSpacing: "-0.015em", fontVariantNumeric: "tabular-nums",
         }}>
-          {fmtUsd2(USER_VALUE)}
+          {fmtUsdAdaptive(valueUsd)}
         </span>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
           <AlpChip size={20} />
@@ -1282,61 +1267,63 @@ function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
             fontFamily: "var(--sans-stack)", fontSize: 12.5, fontWeight: 500,
             fontVariantNumeric: "tabular-nums", lineHeight: 1,
           }}>
-            {USER_SHARES.toLocaleString("en-US", { maximumFractionDigits: 2 })} ALP
+            {sharesNum.toLocaleString("en-US", { maximumFractionDigits: 2 })} ALP
           </span>
         </span>
       </div>
 
-      {/* KvRows pinned to the card floor; Performance is the taller
-          sibling so this just absorbs the height difference. */}
       <div style={{ marginTop: "auto", paddingTop: 14, display: "flex", flexDirection: "column", gap: 6 }}>
-        <KvRow label="Deposited" value={fmtUsd2(USER_DEPOSIT_AMT)} />
-        <KvRow label="Yield" value={fmtUsd2(USER_PNL, true)} valueColor={accent} />
+        <KvRow label="Deposited" value={fmtUsdAdaptive(totalDeposited)} />
+        <KvRow label="PnL" value={fmtUsdAdaptive(pnl, true)} valueColor={accent} />
       </div>
     </Card>
   );
 }
 
-// Performance: realized APY (Inter), hover-trackable sparkline. Date
-// in top-right swaps to the hovered day so the value/header heights
-// stay constant — no layout shift on hover.
+// Performance: realized APY + hover-trackable sparkline.
 function UserAprCard() {
-  const data = APR_30D;
+  const { isConnected } = useAccount();
+  const { snapshot: vault } = useVault();
+  const { snapshot: user } = useUser();
+  const data = vault?.apr30d ?? [];
+  const realizedApy = isConnected ? (user?.position?.realizedApyPct ?? 0) : 0;
+  // Disconnected → dashes. Same-day deposit → dashes too: realized
+  // APY annualized over a sub-day window is noise.
+  const daysHeld = user?.position?.firstDepositTs
+    ? (Date.now() - new Date(user.position.firstDepositTs).getTime()) / 86_400_000
+    : 0;
+  const showDash = !isConnected || (!!user?.position && daysHeld < 1);
+
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const handleMove = (e: React.MouseEvent<HTMLDivElement>) => {
     const el = containerRef.current;
-    if (!el) return;
+    if (!el || data.length < 2) return;
     const rect = el.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const ratio = Math.max(0, Math.min(1, x / rect.width));
     setHoverIdx(Math.round(ratio * (data.length - 1)));
   };
 
-  // Day index → "MMM D". Last index is today; we walk backward by
-  // (data.length - 1 - i) days from today.
+  // Day index → "MMM D"; last index is today, walking backward.
   const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-  const today = new Date(USER_DEPOSIT_TS);
-  today.setDate(today.getDate() + USER_DAYS_HELD);
+  const today = new Date();
   const dateForIdx = (i: number) => {
+    if (data.length === 0) return "";
     const d = new Date(today);
     d.setDate(d.getDate() - (data.length - 1 - i));
     return `${months[d.getMonth()]} ${d.getDate()}`;
   };
 
-  const value = hoverIdx === null ? USER_REALIZED_APY : data[hoverIdx];
-  const dateLabel = dateForIdx(hoverIdx === null ? data.length - 1 : hoverIdx);
+  const value = hoverIdx === null
+    ? realizedApy
+    : (data[hoverIdx] ?? realizedApy);
+  const dateLabel = dateForIdx(hoverIdx === null ? Math.max(0, data.length - 1) : hoverIdx);
 
   return (
-    // Same dark family as the sibling cards, but tinted up to the
-    // shade that an rgba(255,255,255,0.03) sub-card creates on top
-    // of #0c0c10 (= rgb(19,19,23) ≈ #131317). Keeps Performance one
-    // step lighter than its neighbours, like a "lifted" tile, while
-    // the dot-grid wash tiles edge-to-edge over the whole surface
-    // without touching any of the card's internal structure.
     <Card style={{
       height: "100%", display: "flex", flexDirection: "column",
-      backgroundColor: "#131317",
+      backgroundColor: "rgba(19, 19, 23, 0.65)",
       backgroundImage: "radial-gradient(circle, rgba(255,255,255,0.10) 0.7px, transparent 1.1px)",
       backgroundSize: "9px 9px",
       border: "1px solid rgba(255,255,255,0.08)",
@@ -1355,19 +1342,16 @@ function UserAprCard() {
       </div>
       <div style={{ marginTop: 14 }}>
         <span style={{
-          color: "rgb(134, 239, 172)",
+          color: showDash ? "rgba(255,255,255,0.45)" : "rgb(134, 239, 172)",
           fontFamily: "var(--sans-stack)",
           fontSize: 26, fontWeight: 600, lineHeight: 1,
           letterSpacing: "-0.015em", fontVariantNumeric: "tabular-nums",
         }}>
-          {value.toFixed(1)}%
+          {showDash ? "—" : `${value.toFixed(1)}%`}
         </span>
       </div>
-      {/* marginTop matches the gap from the value to the KvRows in
-          Position (chip + gap + KvRow padding) so both cards' second
-          block starts at the same Y. Rounded corners on the chart
-          container so the sparkline's fill area doesn't end with a
-          hard rectangular bottom-right. */}
+      {/* marginTop aligns with Position's second block; rounded
+          corners hide the sparkline fill's bottom-right edge. */}
       <div
         ref={containerRef}
         onMouseMove={handleMove}
@@ -1377,8 +1361,10 @@ function UserAprCard() {
           borderRadius: 10, overflow: "hidden",
         }}
       >
-        <Sparkline values={data} lineColor="rgba(134, 239, 172, 0.85)" fillColor="rgba(134, 239, 172, 0.10)" height={56} />
-        {hoverIdx !== null && (
+        {data.length >= 2 && (
+          <Sparkline values={data} lineColor="rgba(134, 239, 172, 0.85)" fillColor="rgba(134, 239, 172, 0.10)" height={56} />
+        )}
+        {hoverIdx !== null && data.length >= 2 && (
           <div aria-hidden style={{
             position: "absolute",
             left: `${(hoverIdx / (data.length - 1)) * 100}%`,
@@ -1392,19 +1378,67 @@ function UserAprCard() {
   );
 }
 
-// Withdraw modal — overlays the main panel only (rendered as an
-// absolute child of the panel <section>). backdrop-filter blurs
-// just the panel content underneath, leaving the sidebar/tabs/nav
-// unaffected. Structure mirrors the Deposit (VaultCard) segment 1:1
-// — same outer dark frame, same sub-card with dot-grid input area
-// + divider + summary row, same vault-details sub-card, same grey
-// CTA — only the chip (ALP), the labels, and the math (shares →
-// USDC) flip to withdraw semantics.
+// Withdraw modal — overlays the main panel only (rendered inside
+// the panel section). backdrop-filter blurs just the panel content
+// underneath, leaving the sidebar/tabs/nav sharp.
 function WithdrawModal({ onClose }: { onClose: () => void }) {
   const [amount, setAmount] = useState("");
   const num = Number.parseFloat(amount.replace(/,/g, "")) || 0;
-  const usdcOut = num * SHARE_PRICE;
-  const valid = num > 0 && num <= USER_SHARES;
+  const { address, isConnected } = useAccount();
+  const { snapshot: vault } = useVault();
+  const { snapshot: user } = useUser();
+  const sharePrice = vault?.sharePrice ?? 0;
+  const tvl = vault?.tvl ?? 0;
+  const userSharesWei: bigint = user?.position ? BigInt(user.position.shares) : 0n;
+  const userShares = user?.position ? sharesToNumber(user.position.shares) : 0; // display only
+  const usdcOut = num * sharePrice;
+
+  // Gate the CTA on a wei-to-wei comparison against
+  // user.position.shares — comparing the parsed float to a Number-
+  // converted balance can drift by an epsilon. parseUnits throws on
+  // malformed strings; catch keeps the disabled-state gate honest.
+  const parsedShares: bigint | null = (() => {
+    if (num <= 0) return null;
+    try {
+      const wei = parseUnits(amount.replace(/,/g, "") as `${number}`, ALP_DECIMALS);
+      if (wei <= 0n || wei > userSharesWei) return null;
+      return wei;
+    } catch {
+      return null;
+    }
+  })();
+  const valid = parsedShares !== null;
+
+  const redeemTx = useWriteContract();
+  const redeemReceipt = useWaitForTransactionReceipt({ hash: redeemTx.data });
+  const redeeming = redeemTx.isPending || redeemReceipt.isLoading;
+
+  // Backend pushes a fresh user.snapshot once the on-chain Withdraw
+  // event lands. The toast confirms the redemption since the modal
+  // disappears immediately. Dedupe by hash (see VaultCard).
+  const toastedRedeemHash = useRef<`0x${string}` | null>(null);
+  useEffect(() => {
+    if (redeemReceipt.isSuccess && redeemTx.data && toastedRedeemHash.current !== redeemTx.data) {
+      toastedRedeemHash.current = redeemTx.data;
+      toast("success", "Withdrawal confirmed");
+      onClose();
+    }
+  }, [redeemReceipt.isSuccess, redeemTx.data, onClose]);
+
+  const handleRedeem = async () => {
+    if (!parsedShares || !address) return;
+    try {
+      await redeemTx.writeContractAsync({
+        address: VAULT_ADDRESS,
+        abi: vaultAbi,
+        functionName: "redeem",
+        args: [parsedShares, address, address],
+      });
+    } catch (err) {
+      if (isUserRejection(err)) toast("info", "Withdrawal rejected");
+      else                       toast("error", "Withdrawal failed, try again");
+    }
+  };
 
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -1446,8 +1480,6 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
           animation: "withdraw-pop 180ms ease-out",
         }}
       >
-        {/* Header — CardLabel on the left (mirrors VaultCard's
-            "Deposit" label) + a quiet close button on the right. */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
           <CardLabel icon="vault">Withdraw</CardLabel>
           <button
@@ -1474,10 +1506,8 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
           <H3>We&rsquo;re sad to see you go.</H3>
         </div>
 
-        {/* Sub-card 1 — withdraw amount + grid bg, mirroring the
-            Deposit input field 1:1. ALP chip replaces USDC, balance
-            is in shares, and the bottom row is "You receive" (USDC
-            equivalent) instead of "Deposit APY". */}
+        {/* Withdraw amount input. ALP chip replaces USDC; balance is
+            in shares; bottom row is "You receive" in USDC. */}
         <div style={{
           marginTop: 18,
           border: "1px solid rgba(255,255,255,0.06)",
@@ -1514,9 +1544,6 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
                   fontVariantNumeric: "tabular-nums",
                 }}
               />
-              {/* ALP chip — mirrors VaultCard's USDC chip exactly:
-                  same opaque #1a1c20 bg, 0.10 border, padding,
-                  radius, font sizing. */}
               <span style={{
                 display: "inline-flex", alignItems: "center", gap: 7,
                 padding: "4px 11px 4px 4px",
@@ -1546,7 +1573,12 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
               </span>
               <button
                 type="button"
-                onClick={() => setAmount(USER_SHARES.toFixed(2))}
+                onClick={() => {
+                  if (!user?.position) return;
+                  // formatUnits → canonical exact decimal that
+                  // parseUnits inverts cleanly without rounding drift.
+                  setAmount(formatUnits(BigInt(user.position.shares), ALP_DECIMALS));
+                }}
                 onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "#fff"; }}
                 onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.55)"; }}
                 style={{
@@ -1558,7 +1590,7 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
                   transition: "color 200ms ease",
                 }}
               >
-                Balance: {USER_SHARES.toLocaleString("en-US", { maximumFractionDigits: 2 })}
+                Balance: {userShares.toLocaleString("en-US", { maximumFractionDigits: 2 })}
               </button>
             </div>
           </div>
@@ -1580,10 +1612,7 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
           </div>
         </div>
 
-        {/* Sub-card 2 — vault details. Mirrors VaultCard's second
-            sub-card minus the Exposure row (Withdraw doesn't need
-            to surface the vault's basket composition; the Share
-            price + delay + TVL are the relevant context here). */}
+        {/* Vault details — Share price + delay + TVL. */}
         <div style={{
           marginTop: 10,
           padding: "10px 14px",
@@ -1600,7 +1629,7 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
                 <InfoIcon size={12} />
               </InfoTip>
             </span>
-            <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)", fontVariantNumeric: "tabular-nums" }}>$1.0427</span>
+            <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)", fontVariantNumeric: "tabular-nums" }}>${sharePrice.toFixed(4)}</span>
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "rgba(255,255,255,0.55)" }}>
@@ -1618,88 +1647,125 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
                 <InfoIcon size={12} />
               </InfoTip>
             </span>
-            <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)", fontVariantNumeric: "tabular-nums" }}>$3.26M</span>
+            <span style={{ display: "inline-flex", alignItems: "center", color: "rgba(255,255,255,0.55)", fontVariantNumeric: "tabular-nums" }}>{fmtUsdAdaptive(tvl * 1_000_000)}</span>
           </div>
         </div>
 
-        {/* CTA — copy of VaultCard's Connect-wallet button (grey
-            translucent + 0.10 border + 0.78 white text). When the
-            input is invalid the text dims and the click is blocked;
-            shape/colors stay so the button doesn't reflow. */}
-        <button
-          type="button"
-          disabled={!valid}
-          className="transition-colors duration-200 ease-out"
-          style={{
-            marginTop: 12, width: "100%",
-            display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
-            padding: "14px 16px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.10)",
-            background: "rgba(255,255,255,0.06)",
-            color: valid ? "rgba(255,255,255,0.92)" : "rgba(255,255,255,0.40)",
-            fontFamily: "var(--sans-stack)",
-            fontSize: 13, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1,
-            cursor: valid ? "pointer" : "default",
-          }}
-          onMouseEnter={(e) => { if (valid) (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.10)"; }}
-          onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.06)"; }}
-        >
-          {valid ? `Withdraw ${fmtUsd2(usdcOut)}` : "Enter an amount"}
-          <StrokeIcon kind="arrow" size={14} />
-        </button>
+        {/* CTA — disconnected opens AppKit; connected cycles
+            Enter amount → Withdraw $X.XX → Withdrawing…. */}
+        {(() => {
+          const ctaLabel = !isConnected
+            ? "Connect wallet"
+            : redeeming
+            ? "Withdrawing…"
+            : valid
+            ? `Withdraw ${fmtUsdAdaptive(usdcOut)}`
+            : "Enter an amount";
+          const ctaDisabled = isConnected && (redeeming || !valid || !parsedShares || !address);
+          const ctaOnClick = !isConnected
+            ? () => getAppKit()?.open({ view: "Connect" })
+            : ctaDisabled
+            ? undefined
+            : handleRedeem;
+          return (
+            <button
+              type="button"
+              disabled={ctaDisabled}
+              onClick={ctaOnClick}
+              className="transition-colors duration-200 ease-out"
+              style={{
+                marginTop: 12, width: "100%",
+                display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
+                padding: "14px 16px", borderRadius: 12,
+                border: `1px solid ${ctaDisabled ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.14)"}`,
+                background: ctaDisabled ? "rgba(255,255,255,0.04)" : "rgba(255,255,255,0.10)",
+                color: ctaDisabled ? "rgba(255,255,255,0.40)" : "#fff",
+                fontFamily: "var(--sans-stack)",
+                fontSize: 13, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1,
+                cursor: ctaDisabled ? "not-allowed" : "pointer",
+              }}
+              onMouseEnter={(e) => { if (!ctaDisabled) (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.14)"; }}
+              onMouseLeave={(e) => { if (!ctaDisabled) (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.10)"; }}
+            >
+              {ctaLabel}
+              {!isConnected && <WalletIcon size={14} />}
+            </button>
+          );
+        })()}
       </div>
     </div>
   );
 }
 
-// Full-width log of the user's own deposits/withdrawals. Wire-shape
-// extension once backend lands: filter by connected wallet, surface
-// withdraw events, and group same-day transactions.
-type UserActivityKind = "deposit" | "withdraw";
-type UserActivityRow = {
-  kind: UserActivityKind;
-  amount: number;
-  token: TokenEntry;
-  ts: string;
-  tx: string;
-};
-const USER_ACTIVITY: UserActivityRow[] = [
-  { kind: "deposit", amount: USER_DEPOSIT_AMT, token: TOKENS.USDC, ts: USER_DEPOSIT_TS, tx: USER_DEPOSIT_TX },
-];
-
+// Full-width log of the user's own deposits/withdrawals.
 function UserActivityCard() {
+  // Gate on isConnected — the cached snapshot can persist across
+  // disconnects; we ignore it when the wallet isn't connected.
+  const { isConnected } = useAccount();
+  const { snapshot } = useUser();
+  const rows = isConnected ? (snapshot?.activity ?? []) : [];
+  const empty = rows.length === 0;
   return (
-    // Dark frame matching VaultCard / Position. Each item gets its
-    // own dot-grid surface (matching the Deposit input field); the
-    // Card bg behind them stays plain dark.
     <Card style={{
       height: "100%", display: "flex", flexDirection: "column",
-      background: "#0c0c10",
+      background: "rgba(12, 12, 16, 0.65)",
       border: "1px solid rgba(255,255,255,0.08)",
       backdropFilter: "none",
       WebkitBackdropFilter: "none",
     }}>
-      <CardLabel icon="stack">Activity</CardLabel>
-      <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 4 }}>
-        {USER_ACTIVITY.length === 0 ? (
-          <div style={{
-            padding: "16px 14px",
-            textAlign: "center",
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <CardLabel icon="stack">Activity</CardLabel>
+        {empty && (
+          <span style={{
             color: "rgba(255,255,255,0.45)",
-            fontFamily: "var(--sans-stack)", fontSize: 12,
+            fontFamily: "var(--sans-stack)",
+            fontSize: 11, fontWeight: 500,
+            letterSpacing: "-0.005em",
           }}>
-            No activity yet — deposit to get started.
-          </div>
-        ) : USER_ACTIVITY.map((a, i) => {
+            No activity yet
+          </span>
+        )}
+      </div>
+      <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 4 }}>
+        {empty ? (
+          // Skeleton rows — same shape as a populated row, fading out.
+          [0.40, 0.25, 0.15].map((opacity, i) => (
+            <div
+              key={i}
+              aria-hidden
+              style={{
+                display: "grid",
+                gridTemplateColumns: "auto minmax(0, 1fr) auto auto",
+                alignItems: "center",
+                gap: 12,
+                padding: "10px 12px",
+                borderRadius: 10,
+                backgroundColor: "rgba(255,255,255,0.03)",
+                backgroundImage: "radial-gradient(circle, rgba(255,255,255,0.10) 0.7px, transparent 1.1px)",
+                backgroundSize: "9px 9px",
+                border: "1px solid rgba(255,255,255,0.06)",
+                opacity,
+              }}
+            >
+              <span style={{ width: 18, height: 18, borderRadius: 5, background: "rgba(255,255,255,0.10)" }} />
+              <span style={{ height: 10, borderRadius: 4, background: "rgba(255,255,255,0.10)", maxWidth: 160 }} />
+              <span style={{ width: 32, height: 8, borderRadius: 4, background: "rgba(255,255,255,0.08)" }} />
+              <span style={{ width: 56, height: 8, borderRadius: 4, background: "rgba(255,255,255,0.08)" }} />
+            </div>
+          ))
+        ) : rows.map((a) => {
           const d = new Date(a.ts);
           const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
           const dateLabel = `${months[d.getMonth()]} ${d.getDate()}`;
+          const token = resolveToken(a.token);
+          const txDisplay = shortenTx(a.tx);
           return (
             <a
-              key={i}
-              href={`${TX_BASE_URL}${a.tx.replace(/…/g, "")}`}
+              key={a.id}
+              href={`${TX_BASE_URL}${a.tx}`}
               target="_blank"
               rel="noopener noreferrer"
-              className="chat-tx-link"
+              className="chat-tx-link activity-row"
               style={{
                 display: "grid",
                 gridTemplateColumns: "auto minmax(0, 1fr) auto auto",
@@ -1709,21 +1775,18 @@ function UserActivityCard() {
                 borderRadius: 10,
                 textDecoration: "none",
                 color: "rgba(255,255,255,0.85)",
-                // Dot-grid surface on each item — matches the Deposit
-                // input sub-card. Border keeps the row's frame
-                // legible against the dark Card background.
                 backgroundColor: "rgba(255,255,255,0.03)",
                 backgroundImage: "radial-gradient(circle, rgba(255,255,255,0.10) 0.7px, transparent 1.1px)",
                 backgroundSize: "9px 9px",
                 border: "1px solid rgba(255,255,255,0.06)",
               }}
             >
-              <TokenChip entry={a.token} size={18} radius={5} />
+              <TokenChip entry={token} size={18} radius={5} />
               <span style={{
                 fontFamily: "var(--sans-stack)", fontSize: 12.5, fontWeight: 500,
                 whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
               }}>
-                {a.kind === "deposit" ? "Deposited" : "Withdrew"} {a.amount.toLocaleString("en-US")} {a.token.slug}
+                {a.kind === "deposit" ? "Deposit" : "Withdraw"} {a.amount.toLocaleString("en-US")} {token.slug}
               </span>
               <span style={{
                 color: "rgba(255,255,255,0.45)",
@@ -1733,7 +1796,7 @@ function UserActivityCard() {
                 {dateLabel}
               </span>
               <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "rgba(255,255,255,0.55)", fontFamily: "var(--sans-stack)", fontSize: 11, fontVariantNumeric: "tabular-nums" }}>
-                {a.tx}
+                {txDisplay}
                 <StrokeIcon kind="external" size={10} />
               </span>
             </a>
@@ -1747,21 +1810,66 @@ function UserActivityCard() {
 
 /* ---------- Agent chat sidebar ---------- */
 
-// Stylised alps mark for the thinking indicator — a triangular peak with
-// 5 streaks above. Mountain stays muted; streaks fade in one-by-one in a
-// looping cycle (`thinking-streak` keyframe in the inline <style>).
-function ThinkingMark({ size = 22 }: { size?: number }) {
-  const mountain = "rgba(255,255,255,0.18)";
-  const streak = "rgba(255,255,255,0.55)";
+// Frame-by-frame thinking indicator. Cycles /public/thinking/0..5.png
+// with a direct cut from the last frame back to frame 0. Frame 0 is
+// held for the full pause duration so the loop has a built-in beat
+// without any fade. All 6 frames are rendered stacked (absolute) so
+// the browser preloads them and per-frame swaps are pure opacity
+// flips — no src-swap flash.
+const THINKING_FRAME_COUNT = 6;
+const THINKING_FRAME_MS = 200;
+const THINKING_REST_MS = 520;
+
+function ThinkingMark({ size = 11 }: { size?: number }) {
+  const [frame, setFrame] = useState(0);
+
+  useEffect(() => {
+    let mounted = true;
+    let timer: number | undefined;
+    const advance = (current: number) => {
+      const next = (current + 1) % THINKING_FRAME_COUNT;
+      const delay = current === 0 ? THINKING_REST_MS : THINKING_FRAME_MS;
+      timer = window.setTimeout(() => {
+        if (!mounted) return;
+        setFrame(next);
+        advance(next);
+      }, delay);
+    };
+    advance(0);
+    return () => {
+      mounted = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, []);
+
   return (
-    <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden style={{ display: "block" }}>
-      <line className="thinking-streak streak-1" x1="11.5" y1="4"  x2="13.5" y2="4"  stroke={streak} strokeWidth="1.4" strokeLinecap="round" />
-      <line className="thinking-streak streak-2" x1="14"   y1="6"  x2="16"   y2="6"  stroke={streak} strokeWidth="1.4" strokeLinecap="round" />
-      <line className="thinking-streak streak-3" x1="16.5" y1="4"  x2="18.5" y2="4"  stroke={streak} strokeWidth="1.4" strokeLinecap="round" />
-      <line className="thinking-streak streak-4" x1="13"   y1="8"  x2="15"   y2="8"  stroke={streak} strokeWidth="1.4" strokeLinecap="round" />
-      <line className="thinking-streak streak-5" x1="17"   y1="8"  x2="19"   y2="8"  stroke={streak} strokeWidth="1.4" strokeLinecap="round" />
-      <path d="M5 27 L16 11 L27 27 Z" fill={mountain} />
-    </svg>
+    <div
+      aria-hidden
+      style={{
+        width: size,
+        height: size,
+        position: "relative",
+        display: "inline-block",
+        opacity: 0.7,
+      }}
+    >
+      {Array.from({ length: THINKING_FRAME_COUNT }, (_, i) => (
+        <img
+          key={i}
+          src={`/thinking/${i}.png`}
+          alt=""
+          draggable={false}
+          style={{
+            position: "absolute",
+            inset: 0,
+            width: "100%",
+            height: "100%",
+            display: "block",
+            opacity: i === frame ? 1 : 0,
+          }}
+        />
+      ))}
+    </div>
   );
 }
 
@@ -1775,10 +1883,8 @@ function formatHoverIso(iso: string, todayLabel: string): string {
   return date === todayLabel ? (time ?? iso) : (date ?? iso);
 }
 
-// Solid grey rounded-square copy button overlaid on a bubble's
-// top-right corner. Positioned absolute so it sits ON TOP of body text.
-// Reveals on `.chat-msg:hover`. Click → write to clipboard, brief flash
-// of brighter bg (no svg color change).
+// Copy button overlaid on a bubble's top-right corner. Reveals on
+// `.chat-msg:hover`; click writes to clipboard with a brief flash.
 function BubbleCopy({ copyText }: { copyText: string }) {
   const [copied, setCopied] = useState(false);
   const onCopy = (e: React.MouseEvent) => {
@@ -1788,12 +1894,6 @@ function BubbleCopy({ copyText }: { copyText: string }) {
       window.setTimeout(() => setCopied(false), 1200);
     }).catch(() => {});
   };
-  // Sized to match the inner content height of a single-line bubble
-  // (≈line-height 19.4 + a bit of breathing room → 28×28). Stays the
-  // same constant size on multi-line bubbles so it doesn't grow.
-  // backdropFilter blurs whatever's behind the square (dot grid, body
-  // text, etc.) so the icon stays readable on every surface — same
-  // technique the main panel `Card`s use.
   return (
     <button
       type="button"
@@ -1819,8 +1919,7 @@ function BubbleCopy({ copyText }: { copyText: string }) {
   );
 }
 
-// Inline timestamp shown below the bubble on hover only. Renders
-// absolutely so it doesn't reserve vertical space when hidden.
+// Inline timestamp shown below the bubble on hover only.
 function BubbleTime({ iso, todayLabel }: { iso: string; todayLabel: string }) {
   return (
     <time className="chat-msg-time" style={{
@@ -1839,13 +1938,9 @@ function BubbleTime({ iso, todayLabel }: { iso: string; todayLabel: string }) {
   );
 }
 
-// 24h micro-histogram of agent activity — one bar per hour, latest on
-// the right. Each bar is two stacked sub-bars: actions at the bottom
-// (dim) + signals on top (bright white). Tokens in the tooltip line
-// up with the bottom (actions) row, matching the dim color. Empty
-// hours render as a faint floor pin so the timeline reads even when
-// sparse. The rightmost "now" bar gets a slow pulse. Hovering a bar
-// reveals a small tooltip card above the histogram.
+// 24h micro-histogram of agent activity. Each bar stacks actions
+// (dim) below signals (bright). Empty hours show as a faint floor
+// pin; the rightmost "now" bar pulses. Hover for a tooltip.
 function ActivityHistogram({ messages, onSelectHour }: { messages: AgentMessage[]; onSelectHour: (hour: number) => void }) {
   const buckets = React.useMemo(() => buildHourlyActivity(messages), [messages]);
   const lastHour = React.useMemo(() => {
@@ -1869,9 +1964,8 @@ function ActivityHistogram({ messages, onSelectHour }: { messages: AgentMessage[
     : null;
   const hovered = hoverIdx !== null ? buckets[hoverIdx] : null;
 
-  // Capture the histogram's bounding rect on hover so the portalled
-  // tooltip can position itself in viewport space (escapes the chat
-  // panel's `overflow: hidden`).
+  // Capture rect on hover so the portalled tooltip positions in
+  // viewport space (escapes the chat panel's overflow:hidden).
   const onEnterHisto = () => {
     const el = containerRef.current;
     if (!el) return;
@@ -1953,9 +2047,6 @@ function ActivityHistogram({ messages, onSelectHour }: { messages: AgentMessage[
         );
       })}
 
-      {/* Tooltip is portalled to <body> with position: fixed so it
-          escapes the chat panel's `overflow: hidden` clipping when it
-          renders above the header. */}
       {hovered !== null && hoveredHour !== null && tipPos && typeof document !== "undefined" && createPortal(
         <div style={{
           position: "fixed",
@@ -1975,7 +2066,6 @@ function ActivityHistogram({ messages, onSelectHour }: { messages: AgentMessage[
           pointerEvents: "none",
           zIndex: 1000,
         }}>
-          {/* Top row: signals (bright square) + count, hour pill on right. */}
           <div style={{ display: "flex", alignItems: "center", gap: 8, color: "rgba(255,255,255,0.92)", fontSize: 11, fontWeight: 500 }}>
             <span aria-hidden style={{ width: 8, height: 8, borderRadius: 2, background: "rgba(255,255,255,0.85)", flexShrink: 0 }} />
             <span style={{ flex: 1 }}>{hovered.signals} signal{hovered.signals === 1 ? "" : "s"}</span>
@@ -1988,9 +2078,6 @@ function ActivityHistogram({ messages, onSelectHour }: { messages: AgentMessage[
               {String(hoveredHour).padStart(2, "0")}:00
             </span>
           </div>
-          {/* Bottom row: actions (dim square) + count, token chips + "+N"
-              right-aligned. Tokens come from actions, so they align
-              semantically with the action row's dim color. */}
           <div style={{ display: "flex", alignItems: "center", gap: 8, color: "rgba(255,255,255,0.92)", fontSize: 11, fontWeight: 500 }}>
             <span aria-hidden style={{ width: 8, height: 8, borderRadius: 2, background: "rgba(255,255,255,0.30)", flexShrink: 0 }} />
             <span style={{ flex: 1 }}>{hovered.actions} action{hovered.actions === 1 ? "" : "s"}</span>
@@ -2009,9 +2096,6 @@ function ActivityHistogram({ messages, onSelectHour }: { messages: AgentMessage[
   );
 }
 
-// Small grey rounded square used as a glyph holder for non-action
-// message kinds (signal, etc.) — visually sibling to the agent header
-// avatar but smaller/inline.
 function GlyphSquare({ children, size = 22 }: { children: React.ReactNode; size?: number }) {
   return (
     <span aria-hidden style={{
@@ -2029,8 +2113,6 @@ function GlyphSquare({ children, size = 22 }: { children: React.ReactNode; size?
 function MessageView({ m, todayLabel, flash }: { m: AgentMessage; todayLabel: string; flash: boolean }) {
   const wrapperClass = `chat-msg${flash ? " chat-msg-flash" : ""}`;
   if (m.kind === "signal") {
-    // Same chassis as an action bubble (dark card, no dot grid). Header
-    // is a "New context" label with a glyph square — no chip/no hash.
     return (
       <div className={wrapperClass} data-msg-id={m.id} style={{ display: "flex", flexDirection: "column", gap: 7 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -2065,11 +2147,34 @@ function MessageView({ m, todayLabel, flash }: { m: AgentMessage; todayLabel: st
     );
   }
 
+  if (m.kind === "thought") {
+    // Standalone thought = the agent's own first-person reasoning. Same
+    // italic-quote treatment as the action's tethered thought lead-in,
+    // so the visual language stays consistent.
+    return (
+      <div className={wrapperClass} data-msg-id={m.id} style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+        <div style={{
+          position: "relative",
+          color: "rgba(255,255,255,0.72)",
+          fontFamily: "var(--font-radley)",
+          fontSize: 13.5, lineHeight: 1.55, fontStyle: "italic",
+          paddingLeft: 12,
+          borderLeft: "1.5px solid rgba(255,255,255,0.18)",
+        }}>
+          <span aria-hidden style={{ marginRight: 2, color: "rgba(255,255,255,0.5)" }}>{"“"}</span>
+          {m.text}
+          <span aria-hidden style={{ marginLeft: 2, color: "rgba(255,255,255,0.5)" }}>{"”"}</span>
+          <BubbleCopy copyText={m.text} />
+        </div>
+        <BubbleTime iso={m.iso} todayLabel={todayLabel} />
+      </div>
+    );
+  }
+
   if (m.kind === "action") {
     return (
       <div className={wrapperClass} data-msg-id={m.id} style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-        {/* Optional thought lead-in — italic Radley framed by curly
-            quotes and a left divider. Always tethered to its action. */}
+        {/* Optional thought lead-in. Always tethered to its action. */}
         {m.thought && (
           <div style={{
             color: "rgba(255,255,255,0.62)",
@@ -2083,7 +2188,6 @@ function MessageView({ m, todayLabel, flash }: { m: AgentMessage; todayLabel: st
             <span aria-hidden style={{ marginLeft: 2, color: "rgba(255,255,255,0.45)" }}>{"\u201D"}</span>
           </div>
         )}
-        {/* Header: chip + generic "Action submitted" title + tx hash. */}
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {m.chip.type === "pair" ? (
             <PoolPairChip left={m.chip.left} right={m.chip.right} size={14} />
@@ -2101,7 +2205,7 @@ function MessageView({ m, todayLabel, flash }: { m: AgentMessage; todayLabel: st
             {m.title}
           </span>
           <a
-            href={`${TX_BASE_URL}${m.tx.replace(/…/g, "")}`}
+            href={`${TX_BASE_URL}${m.tx}`}
             target="_blank"
             rel="noopener noreferrer"
             className="chat-tx-link"
@@ -2115,11 +2219,10 @@ function MessageView({ m, todayLabel, flash }: { m: AgentMessage; todayLabel: st
               transition: "color 160ms ease",
             }}
           >
-            {m.tx}
+            {shortenTx(m.tx)}
             <StrokeIcon kind="external" size={10} />
           </a>
         </div>
-        {/* Body — static dot grid only on action bubbles */}
         <div style={{
           position: "relative",
           color: "rgba(255,255,255,0.92)",
@@ -2191,8 +2294,8 @@ function MessageView({ m, todayLabel, flash }: { m: AgentMessage; todayLabel: st
           </div>
           {m.sources.map((s, i) => {
             // basescan tx → explorer URL; everything else uses an
-            // explicit href (Uniswap pool page, vault detail, etc.)
-            const href = s.tx ? `${TX_BASE_URL}${s.tx.replace(/…/g, "")}` : (s.href ?? "#");
+            // explicit href.
+            const href = s.tx ? `${TX_BASE_URL}${s.tx}` : (s.href ?? "#");
             return (
               <a
                 key={i}
@@ -2219,15 +2322,7 @@ function MessageView({ m, todayLabel, flash }: { m: AgentMessage; todayLabel: st
   );
 }
 
-const WSS_URL = process.env.NEXT_PUBLIC_SHERPA_WSS_URL;
-const IS_DEV_STUB = !WSS_URL;
-
-/* ---------- Dashboard sidebar (left) ---------- */
-
-const fmtUsd = (n: number) => {
-  if (n === 0) return "$0";
-  return `$${n.toLocaleString("en-US", { minimumFractionDigits: n < 1000 ? 2 : 0, maximumFractionDigits: n < 1000 ? 2 : 0 })}`;
-};
+/* ---------- Dashboard panel (right sidebar, Stats tab) ---------- */
 
 const fmtPct = (n: number) => n === 0 ? "0%" : `${n.toFixed(1)}%`;
 
@@ -2237,11 +2332,8 @@ const CATEGORY_LABEL: Record<ActionCategory, string> = {
   claim_fees: "Claim fees",
 };
 
-const ALPS_USERS = 247;
-
-// Hover-interactive mini sparkline. Tooltip is portalled to <body>
-// so it escapes the sidebar's overflow:hidden when it sits near the
-// edge.
+// Hover-interactive mini sparkline; tooltip is portalled to body
+// to escape the sidebar's overflow:hidden.
 function MiniSparkline({ data, width = 60, height = 18, stroke = "rgba(255,255,255,0.85)", label, formatValue }: {
   data: number[]; width?: number; height?: number; stroke?: string;
   label?: string;
@@ -2293,10 +2385,9 @@ function MiniSparkline({ data, width = 60, height = 18, stroke = "rgba(255,255,2
           position: "fixed",
           left: tipPos.left,
           top: tipPos.top - 8,
-          // translateZ forces a GPU compositor layer → integer-pixel
-          // edges. The border becomes an inset box-shadow because
-          // border + backdrop-filter on a translucent bg doubles up
-          // antialiasing along the top edge.
+          // translateZ forces a GPU compositor layer for integer-pixel
+          // edges; the border is an inset box-shadow to avoid
+          // antialiasing doubling along the top edge.
           transform: "translate(-50%, -100%) translateZ(0)",
           background: "#15161b",
           boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.08)",
@@ -2325,8 +2416,8 @@ function PoolChip({ p, size = 16 }: { p: PoolEntry; size?: number }) {
   return null;
 }
 
-// Compact 3/4-circle gauge sized to fit a row of 5 across the
-// dashboard sidebar. Smaller cousin of <Gauge>.
+// Compact 3/4-circle gauge for the dashboard sidebar — smaller
+// cousin of <Gauge>.
 function DashGauge({ pct, color, chip }: { pct: number; color: string; chip: React.ReactNode }) {
   const SIZE = 44;
   const STROKE = 4;
@@ -2352,8 +2443,8 @@ function DashGauge({ pct, color, chip }: { pct: number; color: string; chip: Rea
 const EXPOSURE_GRID = "minmax(0, 1fr) 44px 44px 56px";
 
 function ExposureRow({ p, dimmed }: { p: PoolEntry; dimmed: boolean }) {
-  const apr = POOL_APR[p.slug] ?? 0;
-  const earned = POOL_EARNED_30D[p.slug] ?? 0;
+  const apr = p.apr;
+  const earned = p.earned30d;
   const display = p.slug === "Idle reserve" ? "Reserve" : p.slug;
   const muted = "rgba(255,255,255,0.45)";
   return (
@@ -2386,14 +2477,14 @@ function ExposureRow({ p, dimmed }: { p: PoolEntry; dimmed: boolean }) {
         {fmtPct(apr)}
       </span>
       <span style={{ color: earned === 0 ? muted : "rgba(255,255,255,0.85)", fontSize: 11, fontWeight: 500, fontFamily: "var(--sans-stack)", fontVariantNumeric: "tabular-nums", textAlign: "right" }}>
-        {fmtUsd(earned)}
+        {fmtUsdAdaptive(earned)}
       </span>
     </div>
   );
 }
 
-// True if the pool has the given token slug somewhere in its make-up.
-// USDC is in every pool, so hovering USDC's gauge keeps all rows lit.
+// True if the pool contains the given token slug. USDC sits in
+// every pool, so hovering USDC's gauge keeps all rows lit.
 function poolContainsToken(p: PoolEntry, slug: string | null): boolean {
   if (slug === null) return true;
   if (p.single) return p.single.slug === slug;
@@ -2401,12 +2492,11 @@ function poolContainsToken(p: PoolEntry, slug: string | null): boolean {
   return false;
 }
 
-// Compact action log — title + chip + tx + time. No body / thought /
-// sources. Just the audit trail.
+// Compact action log row — chip + label + time, links to BaseScan.
 function ActionLogRow({ m }: { m: AgentMessage & { kind: "action" } }) {
   return (
     <a
-      href={`${TX_BASE_URL}${m.tx.replace(/…/g, "")}`}
+      href={`${TX_BASE_URL}${m.tx}`}
       target="_blank"
       rel="noopener noreferrer"
       className="chat-tx-link"
@@ -2445,8 +2535,6 @@ function ActionLogRow({ m }: { m: AgentMessage & { kind: "action" } }) {
   );
 }
 
-// Inline value + label, same font size — `value` white-bold, `label`
-// muted. Used for the TVL block's bottom row stats.
 function DashStat({ value, label }: { value: string; label: string }) {
   return (
     <div style={{
@@ -2468,8 +2556,6 @@ function DashStat({ value, label }: { value: string; label: string }) {
   );
 }
 
-// Section heading row used between blocks. Lives inline with content,
-// not a chrome bar — same family as the Exposure header row.
 function SectionTitle({ children }: { children: React.ReactNode }) {
   return (
     <div style={{
@@ -2483,21 +2569,41 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 }
 
 function DashboardPanel() {
-  const recentActions = INITIAL_WIRE_MESSAGES
-    .filter((m): m is Extract<WireMessage, { kind: "action" }> => m.kind === "action")
-    .slice(-6)
-    .reverse()
-    .map((w) => toAgentMessage(w))
-    .filter((m): m is AgentMessage & { kind: "action" } => m.kind === "action");
+  const { snapshot: vault } = useVault();
+  const { messages: wire } = useAgentStream();
 
-  const tvl = TVL_30D[TVL_30D.length - 1] ?? 3.26;
-  const activePools = POOLS.filter((p) => p.slug !== "Idle reserve").length;
+  const recentActions = useMemo(() =>
+    wire
+      .filter((m): m is Extract<WireMessage, { kind: "action" }> => m.kind === "action")
+      .slice(-6)
+      .reverse()
+      .map((w) => toAgentMessage(w))
+      .filter((m): m is AgentMessage & { kind: "action" } => m !== null && m.kind === "action"),
+    [wire]);
+
+  const tvl = vault?.tvl ?? 0;
+  const sharePrice = vault?.sharePrice ?? 0;
+  const basketApr = vault?.basketApr ?? 0;
+  const basketEarned30d = vault?.basketEarned30d ?? 0;
+  const users = vault?.users ?? 0;
+  const sharePrice30d = vault?.sharePrice30d ?? [];
+  const tvl30d = vault?.tvl30d ?? [];
+  const apr30d = vault?.apr30d ?? [];
+
+  const allocViews: AllocationEntry[] = useMemo(() =>
+    (vault?.allocations ?? []).map((a) => ({ ...resolveToken(a.token), pct: a.pct })),
+    [vault?.allocations]);
+  const poolViews: PoolEntry[] = useMemo(() =>
+    (vault?.pools ?? []).map(toPoolEntry),
+    [vault?.pools]);
+  const positionsSorted = useMemo(() => sortPositions(poolViews), [poolViews]);
+  const activePools = poolViews.filter((p) => p.slug !== "Idle reserve").length;
+
   const [hoveredToken, setHoveredToken] = useState<string | null>(null);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      {/* Fixed top — everything but the Recent actions list itself.
-          Mirrors Sherpa: only the bottom feed scrolls. */}
+      {/* Fixed top — only the Recent actions list scrolls. */}
       <div style={{
         flexShrink: 0,
         padding: "16px 14px 0",
@@ -2517,13 +2623,11 @@ function DashboardPanel() {
                 Vault TVL
               </div>
               <div style={{ marginTop: 4, color: "#fff", fontFamily: "var(--sans-stack)", fontSize: 22, fontWeight: 600, lineHeight: 1, letterSpacing: "-0.015em", fontVariantNumeric: "tabular-nums" }}>
-                ${tvl.toFixed(2)}M
+                {fmtUsdAdaptive(tvl * 1_000_000)}
               </div>
             </div>
-            <MiniSparkline data={TVL_30D} width={80} height={24} label="TVL" formatValue={(v) => `$${v.toFixed(2)}M`} />
+            <MiniSparkline data={tvl30d} width={80} height={24} label="TVL" formatValue={(v) => fmtUsdAdaptive(v * 1_000_000)} />
           </div>
-          {/* Bottom row: 3 stats inline with equal gaps between them
-              via space-between. */}
           <div style={{
             display: "flex",
             justifyContent: "space-between",
@@ -2532,9 +2636,9 @@ function DashboardPanel() {
             paddingTop: 10,
             borderTop: "1px solid rgba(255,255,255,0.05)",
           }}>
-            <DashStat value={fmtUsd(BASKET_EARNED_30D)} label="fees earned" />
+            <DashStat value={fmtUsdAdaptive(basketEarned30d)} label="fees earned" />
             <DashStat value={String(activePools)} label="active pools" />
-            <DashStat value={String(ALPS_USERS)} label="users" />
+            <DashStat value={String(users)} label="users" />
           </div>
         </div>
 
@@ -2551,9 +2655,9 @@ function DashboardPanel() {
             </div>
             <div style={{ marginTop: 5, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
               <span style={{ color: "rgb(134, 239, 172)", fontFamily: "var(--sans-stack)", fontSize: 18, fontWeight: 600, lineHeight: 1, letterSpacing: "-0.01em", fontVariantNumeric: "tabular-nums" }}>
-                {fmtPct(BASKET_APR_30D)}
+                {fmtPct(basketApr)}
               </span>
-              <MiniSparkline data={APR_30D} width={56} height={18} stroke="rgba(134, 239, 172, 0.85)" label="Yield" formatValue={(v) => `${v.toFixed(1)}%`} />
+              <MiniSparkline data={apr30d} width={56} height={18} stroke="rgba(134, 239, 172, 0.85)" label="Yield" formatValue={(v) => `${v.toFixed(1)}%`} />
             </div>
           </div>
           <div style={{
@@ -2567,9 +2671,9 @@ function DashboardPanel() {
             </div>
             <div style={{ marginTop: 5, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
               <span style={{ color: "#fff", fontFamily: "var(--sans-stack)", fontSize: 18, fontWeight: 600, lineHeight: 1, letterSpacing: "-0.01em", fontVariantNumeric: "tabular-nums" }}>
-                {fmtNum(SHARE_PRICE)}
+                {fmtNum(sharePrice)}
               </span>
-              <MiniSparkline data={SHARE_PRICE_30D} width={56} height={18} label="Share price" formatValue={(v) => `$${v.toFixed(4)}`} />
+              <MiniSparkline data={sharePrice30d} width={56} height={18} label="Share price" formatValue={(v) => `$${v.toFixed(4)}`} />
             </div>
           </div>
         </div>
@@ -2579,13 +2683,12 @@ function DashboardPanel() {
           <div style={{ padding: "0 10px", marginBottom: 8 }}>
             <SectionTitle>Exposure</SectionTitle>
           </div>
-          {/* Gauges by TOKEN. No container chrome; tighter spacing.
-              Hovering a gauge lights its token's exposure rows. */}
+          {/* Hovering a gauge lights its token's exposure rows. */}
           <div style={{
             display: "flex", alignItems: "center", gap: 16,
             padding: "4px 6px 12px",
           }}>
-            {ALLOCATIONS.map((a) => (
+            {allocViews.map((a) => (
               <span
                 key={a.slug}
                 onMouseEnter={() => setHoveredToken(a.slug)}
@@ -2616,7 +2719,7 @@ function DashboardPanel() {
             <span style={{ textAlign: "right" }}>Fees</span>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            {POSITIONS_SORTED.map((p) => (
+            {positionsSorted.map((p) => (
               <ExposureRow
                 key={p.slug}
                 p={p}
@@ -2626,44 +2729,136 @@ function DashboardPanel() {
           </div>
         </div>
 
-        <div style={{ marginTop: 8, padding: "0 10px" }}>
+        <div style={{
+          marginTop: 8, padding: "0 10px",
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
+        }}>
           <SectionTitle>Recent actions</SectionTitle>
+          {recentActions.length === 0 && (
+            <span style={{
+              color: "rgba(255,255,255,0.45)",
+              fontFamily: "var(--sans-stack)",
+              fontSize: 11, fontWeight: 500,
+              letterSpacing: "-0.005em",
+            }}>
+              No recent actions
+            </span>
+          )}
         </div>
       </div>
 
-      {/* Only the action log scrolls. Equal top + bottom padding so
-          the first/last item never touches the scroll edge regardless
-          of scroll position. */}
       <div className="panel-scroll" style={{
         flex: 1, minHeight: 0,
         overflowY: "auto", overflowX: "hidden",
         padding: "12px 14px 16px",
         display: "flex", flexDirection: "column", gap: 4,
       }}>
-        {recentActions.map((m) => <ActionLogRow key={m.id} m={m} />)}
+        {recentActions.length === 0 ? (
+          // Skeleton rows fading out — same 3-column grid as ActionLogRow.
+          [0.45, 0.30, 0.18, 0.10].map((opacity, i) => (
+            <div
+              key={i}
+              aria-hidden
+              style={{
+                display: "grid",
+                gridTemplateColumns: "auto minmax(0, 1fr) auto",
+                alignItems: "center",
+                gap: 8,
+                padding: "7px 10px",
+                borderRadius: 8,
+                backgroundColor: "rgba(255,255,255,0.03)",
+                backgroundImage: "radial-gradient(circle, rgba(255,255,255,0.10) 0.7px, transparent 1.1px)",
+                backgroundSize: "9px 9px",
+                border: "1px solid rgba(255,255,255,0.06)",
+                opacity,
+              }}
+            >
+              <span style={{ width: 14, height: 14, borderRadius: 4, background: "rgba(255,255,255,0.10)" }} />
+              <span style={{ height: 9, borderRadius: 3, background: "rgba(255,255,255,0.10)", maxWidth: 120 }} />
+              <span style={{ width: 28, height: 7, borderRadius: 3, background: "rgba(255,255,255,0.08)" }} />
+            </div>
+          ))
+        ) : recentActions.map((m) => <ActionLogRow key={m.id} m={m} />)}
       </div>
     </div>
   );
 }
 
+// Toast copy for send-failure codes. Server-side errors flow through
+// useAgentStream's error field; "disconnected" comes from sendResult.
+function sendErrorCopy(code: "disconnected" | "rate_limited" | "not_subscribed" | "auth_required"): string {
+  switch (code) {
+    case "rate_limited":  return "Sending too quickly, retry shortly";
+    case "disconnected":  return "Reconnecting, try again in a moment";
+    case "not_subscribed":return "Not connected to the agent yet, try again in a moment";
+    case "auth_required": return "Connect your wallet to chat with Sherpa";
+  }
+}
+
+// Sherpa daily-cap mirror of the backend. Persisted to localStorage
+// so refresh-within-day preserves the counter. Server is truth on
+// rate_limited; local state is best-effort optics.
+const SHERPA_DAILY_CAP = 5;
+const SHERPA_COOLDOWN_MS = 20_000;
+const SHERPA_USAGE_KEY = "alp:sherpa-usage";
+
+type SherpaUsage = { date: string; count: number };
+
+function todayKey(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function loadSherpaUsage(): SherpaUsage {
+  if (typeof window === "undefined") return { date: todayKey(), count: 0 };
+  try {
+    const raw = window.localStorage.getItem(SHERPA_USAGE_KEY);
+    if (!raw) return { date: todayKey(), count: 0 };
+    const parsed = JSON.parse(raw) as SherpaUsage;
+    if (parsed.date !== todayKey()) return { date: todayKey(), count: 0 };
+    return parsed;
+  } catch {
+    return { date: todayKey(), count: 0 };
+  }
+}
+
+function saveSherpaUsage(u: SherpaUsage): void {
+  if (typeof window === "undefined") return;
+  try { window.localStorage.setItem(SHERPA_USAGE_KEY, JSON.stringify(u)); } catch { /* ignore */ }
+}
+
+function ClockIcon({ size = 11 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden style={{ display: "block", flexShrink: 0 }}>
+      <circle cx="12" cy="12" r="10" />
+      <polyline points="12 6 12 12 16 14" />
+    </svg>
+  );
+}
+
 function AgentChatPanel() {
-  // Dev stub: seed synchronously to avoid first-paint flicker.
-  // Real backend: start empty, populate via `onHistory`.
-  const [messages, setMessages] = useState<AgentMessage[]>(() =>
-    IS_DEV_STUB ? INITIAL_WIRE_MESSAGES.map(toAgentMessage) : []
+  const { messages: wire, error: agentError } = useAgentStream();
+  const send = useSendUserMessage();
+  const { isConnected } = useAccount();
+  const messages = useMemo(
+    () => wire.map(toAgentMessage).filter((m): m is AgentMessage => m !== null),
+    [wire],
   );
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
+  const [usage, setUsage] = useState<SherpaUsage>(() => loadSherpaUsage());
+  const [cooldownEndsAt, setCooldownEndsAt] = useState<number | null>(null);
+  const [now, setNow] = useState<number>(() => Date.now());
   const scrollRef = useRef<HTMLDivElement>(null);
   const didInitialScroll = useRef(false);
-  const streamRef = useRef<StreamHandle | null>(null);
+  const seenWireCount = useRef(0);
 
+  // First content arrival: instant scroll. Subsequent updates: smooth.
   useLayoutEffect(() => {
     const el = scrollRef.current;
-    if (!el || didInitialScroll.current) return;
+    if (!el || didInitialScroll.current || messages.length === 0) return;
     el.scrollTop = el.scrollHeight;
     didInitialScroll.current = true;
-  }, []);
+  }, [messages.length]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -2671,70 +2866,118 @@ function AgentChatPanel() {
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [messages, thinking]);
 
+  // Clear thinking when a reply event lands. Tracks wire-feed length
+  // so the priming history doesn't accidentally clear it on mount.
   useEffect(() => {
-    if (streamRef.current) return; // StrictMode guard
-    streamRef.current = subscribeAgentStream({
-      url: WSS_URL,
-      onHistory: (events) => {
-        setMessages(events.map(toAgentMessage));
-      },
-      onEvent: (e) => {
-        setMessages((prev) => {
-          // Dedupe by id — server echo of an optimistic user msg
-          // arrives with the same id we issued.
-          if (prev.some((m) => m.id === e.id)) return prev;
-          return [...prev, toAgentMessage(e)];
-        });
-        // Any reply landing means the agent's done thinking.
-        if (e.kind === "reply") setThinking(false);
-      },
-    });
-    return () => { streamRef.current?.close(); streamRef.current = null; };
+    if (wire.length > seenWireCount.current) {
+      const fresh = wire.slice(seenWireCount.current);
+      if (fresh.some((m) => m.kind === "reply")) setThinking(false);
+      seenWireCount.current = wire.length;
+    }
+  }, [wire]);
+
+  // Safety timeout — backend caps subprocess calls at 25s; 30s here
+  // keeps the spinner honest if a reply never arrives.
+  useEffect(() => {
+    if (!thinking) return;
+    const timer = window.setTimeout(() => setThinking(false), 30_000);
+    return () => window.clearTimeout(timer);
+  }, [thinking]);
+
+  // Tick `now` every 250ms while in cooldown so the countdown UI
+  // re-renders. Clears when the deadline passes.
+  useEffect(() => {
+    if (!cooldownEndsAt) return;
+    const tick = window.setInterval(() => {
+      const t = Date.now();
+      setNow(t);
+      if (t >= cooldownEndsAt) setCooldownEndsAt(null);
+    }, 250);
+    return () => window.clearInterval(tick);
+  }, [cooldownEndsAt]);
+
+  // Reset daily counter at midnight UTC — user gets fresh quota
+  // without a refresh.
+  useEffect(() => {
+    const i = window.setInterval(() => {
+      const today = todayKey();
+      setUsage((prev) => {
+        if (prev.date === today) return prev;
+        const fresh = { date: today, count: 0 };
+        saveSherpaUsage(fresh);
+        return fresh;
+      });
+    }, 60_000);
+    return () => window.clearInterval(i);
   }, []);
+
+  // Server-side errors: `rate_limited` toasts AND, if the message
+  // mentions "daily", bumps local usage to the cap so the UI
+  // converges with the server. Other codes are plain toasts.
+  useEffect(() => {
+    if (!agentError) return;
+    const code = agentError.code;
+    if (code === "rate_limited") {
+      toast("error", agentError.message ?? "Rate limited");
+      setThinking(false);
+      if (/daily/i.test(agentError.message ?? "")) {
+        const capped = { date: todayKey(), count: SHERPA_DAILY_CAP };
+        setUsage(capped);
+        saveSherpaUsage(capped);
+        setCooldownEndsAt(null);
+      }
+    } else if (code === "not_subscribed" || code === "auth_required") {
+      toast("error", sendErrorCopy(code));
+      setThinking(false);
+    }
+  }, [agentError]);
+
+  const cooldownRemainingS = cooldownEndsAt ? Math.max(0, Math.ceil((cooldownEndsAt - now) / 1000)) : 0;
+  const inCooldown = cooldownRemainingS > 0;
+  const messagesLeft = SHERPA_DAILY_CAP - usage.count;
+  const dailyExhausted = messagesLeft <= 0;
+  const sendBlocked = thinking || inCooldown || dailyExhausted || !isConnected;
 
   const handleSend = (e: React.FormEvent) => {
     e.preventDefault();
     const text = input.trim();
     if (!text || thinking) return;
-    const cid = clientId();
-    const wireUser: WireMessage = {
-      id: cid,
-      ts: new Date().toISOString(),
-      kind: "user",
-      text,
-    };
-    setMessages((prev) => [...prev, toAgentMessage(wireUser)]);
-    streamRef.current?.send({ v: 1, type: "user_message", text, clientId: cid });
+    if (!isConnected) {
+      toast("error", "Connect your wallet to chat with Sherpa");
+      return;
+    }
+    if (dailyExhausted) {
+      toast("error", "No more messages today");
+      return;
+    }
+    if (inCooldown) {
+      toast("error", `Sherpa is still thinking. Wait ${cooldownRemainingS}s.`);
+      return;
+    }
+    const result = send(text);
+    if (!result.ok) {
+      toast("error", sendErrorCopy(result.reason));
+      return;
+    }
+    // Optimistic accounting; the rate_limited effect above re-syncs
+    // us if the server rejects.
+    const next: SherpaUsage = { date: todayKey(), count: usage.count + 1 };
+    setUsage(next);
+    saveSherpaUsage(next);
+    setCooldownEndsAt(Date.now() + SHERPA_COOLDOWN_MS);
+    setNow(Date.now());
     setInput("");
     setThinking(true);
-    // Real backend emits the reply via `onEvent`; only the dev stub
-    // synthesizes locally.
-    if (IS_DEV_STUB) {
-      window.setTimeout(() => {
-        const reply = getAgentReply(text);
-        const wireReply: WireMessage = {
-          id: `r_${Date.now().toString(36)}`,
-          ts: new Date().toISOString(),
-          kind: "reply",
-          text: reply.text,
-          sources: reply.sources,
-          replyTo: cid,
-        };
-        setMessages((prev) => [...prev, toAgentMessage(wireReply)]);
-        setThinking(false);
-      }, 1500);
-    }
   };
 
   // Bar-click → scroll to the first signal/action message in that
-  // hour and flash for 2s. Tracks by message id so live events
-  // arriving mid-flash don't shift the highlight.
+  // hour and flash for 2s.
   const [flashId, setFlashId] = useState<string | null>(null);
   const flashTimerRef = useRef<number | null>(null);
   const flashStartRef = useRef<number | null>(null);
   const handleSelectHour = (hour: number) => {
     const target = messages.find((m) =>
-      (m.kind === "signal" || m.kind === "action") && parseHour(m.iso) === hour
+      (m.kind === "signal" || m.kind === "thought" || m.kind === "action") && parseHour(m.iso) === hour
     );
     if (!target) return;
     const container = scrollRef.current;
@@ -2755,8 +2998,7 @@ function AgentChatPanel() {
     }, 250);
   };
 
-  // Date shown at the top of the feed — the date of the most recent
-  // (last) message. Re-derives whenever the feed updates.
+  // Date shown at the top of the feed — date of the most recent message.
   const topDate = messages.length > 0 ? messages[messages.length - 1].iso.split(" · ")[0] : "Today";
 
   return (
@@ -2780,10 +3022,6 @@ function AgentChatPanel() {
           <div style={{ color: "#fff", fontFamily: "var(--sans-stack)", fontSize: 13, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1 }}>
             Sherpa
           </div>
-          {/* Histogram floats free in the header — no chrome around
-              it, so the bars sit directly on the panel background.
-              Keeps the same 32px height + horizontal padding for
-              vertical alignment with the avatar on the left. */}
           <div style={{
             marginLeft: "auto",
             height: 32,
@@ -2796,14 +3034,12 @@ function AgentChatPanel() {
         </div>
       </div>
 
-      {/* Messages feed */}
       <div ref={scrollRef} className="panel-scroll" style={{
         flex: 1, minHeight: 0,
         overflowY: "auto", overflowX: "hidden",
         padding: "14px 14px 12px",
         display: "flex", flexDirection: "column", gap: 16,
       }}>
-        {/* Date label — date of the latest message in the feed */}
         <div style={{
           color: "rgba(255,255,255,0.40)",
           fontFamily: "var(--sans-stack)",
@@ -2820,7 +3056,7 @@ function AgentChatPanel() {
         ))}
         {thinking && (
           <div style={{ display: "flex", alignItems: "center", gap: 9, paddingLeft: 2 }}>
-            <ThinkingMark size={22} />
+            <ThinkingMark size={11} />
             <span style={{ color: "rgba(255,255,255,0.55)", fontFamily: "var(--sans-stack)", fontSize: 12, fontStyle: "italic" }}>
               thinking…
             </span>
@@ -2828,7 +3064,6 @@ function AgentChatPanel() {
         )}
       </div>
 
-      {/* Input */}
       <form
         onSubmit={handleSend}
         style={{
@@ -2843,13 +3078,19 @@ function AgentChatPanel() {
           background: "rgba(255,255,255,0.04)",
           border: "1px solid rgba(255,255,255,0.10)",
           borderRadius: 999,
+          opacity: sendBlocked && !inCooldown ? 0.7 : 1,
+          transition: "opacity 200ms ease",
         }}>
           <input
             type="text"
-            placeholder="How can I help you?"
+            placeholder={
+              !isConnected   ? "Connect wallet to chat"
+              : dailyExhausted ? "Daily limit reached"
+              : "How can I help you?"
+            }
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            disabled={thinking}
+            disabled={sendBlocked}
             style={{
               flex: 1, minWidth: 0,
               height: 28,
@@ -2862,14 +3103,14 @@ function AgentChatPanel() {
           />
           <button
             type="submit"
-            disabled={thinking || !input.trim()}
+            disabled={sendBlocked || !input.trim()}
             aria-label="Send"
             style={{
               flexShrink: 0,
               width: 26, height: 26, borderRadius: "50%",
-              background: input.trim() && !thinking ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.06)",
+              background: input.trim() && !sendBlocked ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.06)",
               border: "none",
-              color: input.trim() && !thinking ? "#fff" : "rgba(255,255,255,0.35)",
+              color: input.trim() && !sendBlocked ? "#fff" : "rgba(255,255,255,0.35)",
               display: "inline-flex", alignItems: "center", justifyContent: "center",
               transition: "background 200ms ease, color 200ms ease",
             }}
@@ -2877,6 +3118,28 @@ function AgentChatPanel() {
             <StrokeIcon kind="arrow" size={12} />
           </button>
         </div>
+        {/* Daily-exhausted > cooldown > counter (≤3 left). Hidden
+            when disconnected (placeholder covers it) or fresh state. */}
+        {isConnected && (dailyExhausted || inCooldown || messagesLeft <= 3) && (
+          <div style={{
+            marginTop: 8, paddingLeft: 14,
+            display: "inline-flex", alignItems: "center", gap: 6,
+            color: dailyExhausted
+              ? "rgba(248,113,113,0.92)"
+              : inCooldown
+              ? "rgba(255,255,255,0.55)"
+              : "rgba(248,113,113,0.85)",
+            fontFamily: "var(--sans-stack)",
+            fontSize: 11, fontWeight: 500,
+            lineHeight: 1.3,
+          }}>
+            {dailyExhausted
+              ? "No more messages today!"
+              : inCooldown
+              ? <><ClockIcon size={11} />{`Cooldown ${cooldownRemainingS}s`}</>
+              : `${messagesLeft} more message${messagesLeft === 1 ? "" : "s"} left`}
+          </div>
+        )}
       </form>
     </div>
   );
@@ -2884,17 +3147,10 @@ function AgentChatPanel() {
 
 /* ---------- Sidebar tab switcher ---------- */
 
-// Pill that sits above the right sidebar, inline with the floating
-// nav above the main panel. Two tabs swap the sidebar content
-// between Sherpa (agent chat) and the vault stats dashboard.
-//
-// Positioned in viewport space (matches the sidebar below it).
-// Height + every interior dimension scale with --shell-scale so
-// the pill stays visually identical to the nav (which scales
-// because it lives inside the canvas) at every viewport. Bottom
-// edge sits 14*scale px above the panel — the same offset the nav
-// uses on the other side — so the two chrome strips share both a
-// baseline AND a height at every scale.
+// Pill above the right sidebar that swaps between Sherpa (agent
+// chat) and the vault stats dashboard. Positioned in viewport space
+// (matches the sidebar below it); every interior dimension scales
+// with --shell-scale so the pill stays visually paired with the nav.
 function SidebarTabs({
   tab, onChange, exiting, agentUnread,
 }: {
@@ -2911,8 +3167,7 @@ function SidebarTabs({
       width: "var(--sidebar-w)",
       top: `calc(var(--panel-top) - 14px * var(--shell-scale) - ${NAV_DESIGN_HEIGHT}px * var(--shell-scale))`,
       height: `calc(${NAV_DESIGN_HEIGHT}px * var(--shell-scale))`,
-      // zIndex: 1 keeps the tabs behind the canvas (z=2) so the
-      // slide-in animation reads as "unrolling from behind the panel".
+      // Behind the canvas so the slide-in unrolls from behind the panel.
       zIndex: 1,
     }}>
       <div style={{
@@ -2924,10 +3179,7 @@ function SidebarTabs({
         background: "#0c0c10",
         display: "flex",
         alignItems: "stretch",
-        // Inset matches the FloatingNav's vertical padding (8px) so
-        // the active button bg has the same breathing room from the
-        // pill border that the Connect-wallet button has from the
-        // nav border. Tab-button gap stays small for tight pairing.
+        // Matches FloatingNav's vertical padding (8px).
         padding: "calc(8px * var(--shell-scale))",
         gap: "calc(4px * var(--shell-scale))",
         isolation: "isolate",
@@ -2982,10 +3234,7 @@ function SidebarTabButton({
   );
 }
 
-// Unread-message indicator on the Agent tab. A small red dot —
-// no count, no chrome. Sits inline in the SidebarTabButton flex
-// row (alignItems:center) so it center-aligns with the "Agent"
-// text glyph cap-height naturally, no transform tweaks.
+// Unread-message dot on the Agent tab.
 function UnreadBadge({ count }: { count: number }) {
   return (
     <span
@@ -3004,11 +3253,8 @@ function UnreadBadge({ count }: { count: number }) {
 
 /* ---------- Footer ---------- */
 
-// Slim strip rendered BELOW the main panel (outside its rounded
-// borders). Left button is a 1:1 copy of landing-face's HowItWorks
-// chip (text + 16×16 white-10 square wrapping a 10px arrow). Right
-// edge holds the vault link + version, same chip style as landing's
-// BuiltWith.
+// Strip below the main panel. Left chip toggles How-it-works; right
+// chip links the vault on BaseScan + a version label.
 function FooterStrip({
   left, top, width, showHowItWorks, onToggleHowItWorks,
 }: {
@@ -3016,6 +3262,8 @@ function FooterStrip({
   showHowItWorks: boolean;
   onToggleHowItWorks: () => void;
 }) {
+  const { snapshot: vault } = useVault();
+  const vaultAddress = vault?.address;
   return (
     <div style={{
       position: "absolute",
@@ -3083,7 +3331,9 @@ function FooterStrip({
       </button>
       <span style={{ display: "inline-flex", alignItems: "center", gap: 14 }}>
         <a
-          href="#"
+          href={vaultAddress ? `https://basescan.org/address/${vaultAddress}` : "#"}
+          target="_blank"
+          rel="noopener noreferrer"
           className="text-haze transition-colors hover:text-mist"
           style={{
             textDecoration: "none",
@@ -3091,7 +3341,7 @@ function FooterStrip({
             display: "inline-flex", alignItems: "center", gap: 6,
           }}
         >
-          <span>Vault: 0xA1b2…f9c8</span>
+          <span>Vault: {vaultAddress ? shortAddress(vaultAddress) : "0xA1b2…f9c8"}</span>
           <span
             className="inline-flex items-center justify-center bg-white/10"
             style={{ width: 16, height: 16, borderRadius: 4, position: "relative", top: "1px" }}
@@ -3124,27 +3374,23 @@ function FooterStrip({
 /* ---------- Page ---------- */
 
 export default function AppPage() {
+  // Bridges wagmi's connected address into the api client. Must run
+  // on every /app render so connect/disconnect events route through it.
+  useApiWallet();
   const router = useRouter();
   const [withdrawOpen, setWithdrawOpen] = useState(false);
   const [showHowItWorks, setShowHowItWorks] = useState(false);
   const [exiting, setExiting] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("stats");
-  // Mock unread count for the Agent tab. Real backend: bump on
-  // incoming WireMessage, but always after we know the user isn't
-  // already on the Agent tab. Cleared the moment the user opens the
-  // Agent panel so the badge feels reactive instead of sticky.
+  // Cleared the moment the user opens the Agent panel.
   const [agentUnread, setAgentUnread] = useState(3);
   useEffect(() => {
     if (sidebarTab === "agent" && agentUnread !== 0) setAgentUnread(0);
   }, [sidebarTab, agentUnread]);
 
-  // When the user clicks the alps logo in the floating nav, kick the
-  // exit animation off (canvas/sidebar/tab pull back first, then the
-  // nav drops 420ms later — mirror of the entry stagger) and delay
-  // router.push so the staggered choreography actually plays out
-  // instead of getting cut by a fast cached route swap. 760ms gives
-  // the first beat room to settle before the route changes; the nav
-  // drop continues into the landing's lockup-enter, blending the two.
+  // Run the exit animation, then push to / after the first beat
+  // settles. The nav drop continues into landing's lockup-enter,
+  // blending the two routes together.
   const handleBack = () => {
     if (exiting) return;
     setExiting(true);
@@ -3163,32 +3409,23 @@ export default function AppPage() {
         background: "transparent",
         color: "#fff",
         isolation: "isolate",
-        // Override the global --panel-left/right (which centers the
-        // panel on landing) so /app centers the panel + sidebar
-        // combo instead. The override only propagates to descendants
-        // of this <main>, so PersistentBackdrop (sibling in
-        // layout.tsx) keeps the centered panel position on landing.
+        // Override --panel-left/right so /app centers the panel +
+        // sidebar combo. The override is scoped to this <main>, so
+        // PersistentBackdrop (sibling in layout.tsx) keeps landing's
+        // centered position.
         ["--panel-left" as string]: "calc((100vw - var(--combo-w)) / 2)",
         ["--panel-right" as string]: "calc(var(--panel-left) + var(--panel-w))",
         ["--sidebar-left" as string]: "calc(var(--panel-right) + var(--sidebar-gap))",
       } as React.CSSProperties}
     >
-      {/* Scaled canvas == the main panel rect itself, sized to match
-          the landing page's panel exactly. Nav above and footer
-          below ride this same transform; sidebars deliberately do
-          NOT (they live in viewport space, see below). z-index keeps
-          this canvas (with the opaque main panel inside) layered
-          above the sidebars so the sidebar enter/exit animations
-          read as "unrolling from behind the panel".
-
-          Position-wise the canvas is anchored at the combo-centered
-          --panel-left/--panel-top (top-left transform origin so the
-          scaled box lands exactly on those vars). On entry the canvas
-          slides leftward from landing's centered position to its
-          combo-centered resting spot — the same easing/duration as
-          the sidebar emerging from behind it, so the two reads as
-          one motion: the panel makes room while the sidebar fills
-          it. */}
+      {/* Scaled canvas == the main panel rect, matching landing's
+          panel exactly. Nav and footer ride this same transform;
+          sidebars live in viewport space (below). zIndex layers the
+          canvas above the sidebars so their enter/exit animations
+          read as "unrolling from behind the panel". On entry the
+          canvas slides leftward from landing's centered position to
+          its combo-centered resting spot, paired with the sidebar
+          emerging from behind it — one composite motion. */}
       <div className={canvasClass} style={{
         width: PANEL_W,
         height: PANEL_H,
@@ -3207,11 +3444,10 @@ export default function AppPage() {
         .panel-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.18); }
         .panel-scroll::-webkit-scrollbar-track { background: transparent; }
 
-        /* Nav slides up from BEHIND the main panel (covered by the
-           panel's higher z-index) to its resting spot 14px above.
-           Entry is the FIRST beat (no delay); exit is the SECOND
-           beat (420ms delay) so the choreography mirrors. Total
-           per-direction duration: 1180ms (420 delay + 760 anim). */
+        /* Nav slides up from BEHIND the main panel to its resting
+           spot 14px above. Entry is the FIRST beat (no delay); exit
+           is the SECOND beat (420ms delay), so the choreography
+           mirrors. Total per-direction: 1180ms. */
         @keyframes app-nav-enter {
           from { transform: translateY(34px); opacity: 1; }
           to   { transform: translateY(-100%); opacity: 1; }
@@ -3223,23 +3459,14 @@ export default function AppPage() {
           to   { transform: translateY(34px); opacity: 1; }
         }
         /* 'both' (not 'forwards') so the keyframe's "from" state
-           holds through the 420ms delay — without it, the moment
-           the class swaps from app-nav-enter the nav reverts to its
-           base translateY(0) position (partially behind the panel)
-           for the duration of the delay, then snaps back up to the
-           keyframe's "from" translateY(-100%) when the animation
-           actually starts. That was the disappear-reappear flicker. */
+           holds through the 420ms delay; otherwise the nav snaps
+           between resting and "from" during the delay. */
         .app-nav-exit { animation: app-nav-exit 760ms cubic-bezier(0.16, 1, 0.3, 1) 420ms both; }
 
-        /* Right sidebar — slides out from behind the main panel on
-           entry (translated INTO the main-panel area initially, then
-           rightward to resting). Entry has the SECOND-beat 420ms
-           delay so it pairs with the canvas slide; exit fires in the
-           FIRST beat with no delay, so the symmetric reverse plays:
-           sidebar/canvas first, nav second. The sidebar's resting
-           position is exactly the panel's vertical extent, so the
-           panel (z=2 inside canvas) hides it during the delay even
-           without an opacity fade — pure z-stacking handles it. */
+        /* Right sidebar slides out from behind the main panel.
+           Entry has the second-beat 420ms delay (pairs with canvas);
+           exit fires on the first beat. z-stacking hides it during
+           the delay; no opacity fade needed. */
         @keyframes app-sidebar-right-enter {
           from { transform: translateX(calc(-100% - 14px)); }
           to   { transform: translateX(0); }
@@ -3252,15 +3479,10 @@ export default function AppPage() {
         }
         .app-sidebar-right-exit { animation: app-sidebar-right-exit 760ms cubic-bezier(0.16, 1, 0.3, 1) forwards; }
 
-        /* Sidebar TAB pill — same horizontal slide as the sidebar
-           below it, but the tab sits ABOVE the panel (at the nav's
-           y) so z-stacking can't hide it the way it hides the
-           sidebar. We add an opacity fade to the keyframes: tab is
-           invisible during the nav-only first beat, then fades in as
-           it slides out from behind the panel. Without this, the tab
-           would flash at its resting spot during the delay (the user
-           caught this on entry; same fix prevents it from lingering
-           after the panel slides back on exit). */
+        /* Sidebar tab pill — same horizontal slide as the sidebar
+           below, but the tab sits at the nav's y so z-stacking can't
+           hide it. Opacity fade prevents it from flashing during the
+           delay. */
         @keyframes app-sidebar-tab-enter {
           from { transform: translateX(calc(-100% - 14px)); opacity: 0; }
           to   { transform: translateX(0); opacity: 1; }
@@ -3273,21 +3495,13 @@ export default function AppPage() {
         }
         .app-sidebar-tab-exit { animation: app-sidebar-tab-exit 760ms cubic-bezier(0.16, 1, 0.3, 1) forwards; }
 
-        /* Canvas slide. The canvas's resting position is combo-centered
-           (panel left of viewport center to make room for the sidebar);
-           landing leaves the panel screen-centered. On entry we start
-           the canvas at +canvas-shift (= landing's centered position)
-           and glide it back to 0 (= combo-centered) in lockstep with
-           the sidebar emerging from behind it. The composite read is:
-           panel makes room, sidebar fills it, as a single motion.
-           Same 420ms entry delay as the sidebar so the two paired
-           movements fire as one beat after the nav has settled. On
-           exit no delay — canvas + sidebar move together first,
-           then the nav drops, mirroring the entry sequence in
-           reverse. Scale is repeated in both keyframes since
-           transform is one property — interpolating translate alone
-           requires the scale component to be present at both
-           endpoints. */
+        /* Canvas slide. Resting position is combo-centered; landing
+           leaves the panel screen-centered. Entry starts at
+           +canvas-shift and glides back to 0 in lockstep with the
+           sidebar emerging from behind it — panel makes room, sidebar
+           fills it. Scale is repeated in both keyframes since
+           transform is one property; interpolating translate alone
+           requires scale at both endpoints. */
         @keyframes app-canvas-enter {
           from { transform: translateX(var(--canvas-shift)) scale(var(--shell-scale)); }
           to   { transform: translateX(0) scale(var(--shell-scale)); }
@@ -3300,9 +3514,8 @@ export default function AppPage() {
         }
         .app-canvas-exit { animation: app-canvas-exit 760ms cubic-bezier(0.16, 1, 0.3, 1) forwards; }
 
-        /* Snappy staggered fade for bento items. Pure opacity (no
-           transform) so the wrapper doesn't create a stacking
-           context that swallows backdrop-filter on inner Cards. */
+        /* Pure opacity (no transform) so the wrapper doesn't create
+           a stacking context that swallows inner Cards' backdrop-filter. */
         @keyframes app-bento-enter {
           from { opacity: 0; }
           to   { opacity: 1; }
@@ -3315,8 +3528,7 @@ export default function AppPage() {
         }
         .app-bento-exit { animation: app-bento-exit 280ms cubic-bezier(0.4, 0, 1, 1) forwards; }
 
-        /* Footer strip — fades in/out behind the main panel just
-           like the nav, only vertical instead. */
+        /* Footer strip — vertical fade, paired with the nav. */
         @keyframes app-footer-enter {
           from { opacity: 0; transform: translateY(-8px); }
           to   { opacity: 1; transform: translateY(0); }
@@ -3329,28 +3541,9 @@ export default function AppPage() {
         }
         .app-footer-exit { animation: app-footer-exit 280ms cubic-bezier(0.4, 0, 1, 1) forwards; }
 
-        /* Agent thinking indicator — 5 streaks above the alps mountain
-           fade in one-by-one then together fade out, looping. */
-        @keyframes thinking-streak {
-          0%, 8%   { opacity: 0; }
-          30%, 80% { opacity: 1; }
-          100%     { opacity: 0; }
-        }
-        .thinking-streak { opacity: 0; animation: thinking-streak 2.4s ease-in-out infinite; }
-        .thinking-streak.streak-1 { animation-delay: 0ms; }
-        .thinking-streak.streak-2 { animation-delay: 140ms; }
-        .thinking-streak.streak-3 { animation-delay: 280ms; }
-        .thinking-streak.streak-4 { animation-delay: 420ms; }
-        .thinking-streak.streak-5 { animation-delay: 560ms; }
-
-        /* Message hover affordances. Copy button sits absolute inside
-           the body bubble's top-right; time sits absolute just below
-           the bubble. Both are hidden by default with no reserved
-           space, and just fade in on .chat-msg:hover.
-           On hover we also add an adaptive bottom margin (transition
-           in concert with the time fade) so the timestamp doesn't
-           crowd the next message. The transition makes neighbours
-           glide rather than jump. */
+        /* Message hover affordances. Copy button + time fade in on
+           .chat-msg:hover; the bottom margin grows so the timestamp
+           doesn't crowd the next message. */
         .chat-msg { position: relative; transition: margin-bottom 200ms ease; }
         .chat-msg:hover { margin-bottom: 14px; }
         .chat-msg-copy { opacity: 0; transition: opacity 160ms ease, background 180ms ease; }
@@ -3359,21 +3552,21 @@ export default function AppPage() {
         .chat-msg:hover .chat-msg-time { opacity: 1; }
         .chat-msg-copy:hover { background: rgba(255,255,255,0.18) !important; }
 
-        /* Tx hash link in the action header — brighten both text and
-           the trailing arrow icon together on hover. */
         .chat-tx-link:hover { color: rgba(255,255,255,0.95) !important; }
 
-        /* "Now" bar in the activity histogram — slow opacity pulse so
-           the rightmost (current hour) bar reads as live. */
+        /* Activity rows link to BaseScan; lift bg one notch on hover. */
+        .activity-row { transition: background-color 180ms ease; }
+        .activity-row:hover { background-color: rgba(255,255,255,0.06) !important; }
+
+        /* "Now" bar in the activity histogram pulses to read as live. */
         @keyframes histo-now {
           0%, 100% { opacity: 1; }
           50%      { opacity: 0.55; }
         }
         .histo-now { animation: histo-now 2.2s ease-in-out infinite; }
 
-        /* Flash highlight applied to a chat-msg when its hour is
-           clicked in the histogram. Quick fade-in to a soft white
-           wash, then 2s decay back to transparent. */
+        /* Flash highlight when a chat-msg's hour is clicked in the
+           histogram. */
         @keyframes chat-msg-flash {
           0%   { background-color: rgba(255,255,255,0.00); }
           12%  { background-color: rgba(255,255,255,0.07); }
@@ -3395,9 +3588,8 @@ export default function AppPage() {
         }
       `}</style>
 
-      <FloatingNav layout={MAIN_PANEL} exiting={exiting} onBack={handleBack} />
+      <FloatingNav layout={MAIN_PANEL} exiting={exiting} muted={showHowItWorks} onBack={handleBack} />
 
-      {/* Main panel — fills the canvas exactly. */}
       <section style={{
           position: "absolute",
           left: 0, top: 0, width: PANEL_W, height: PANEL_H,
@@ -3416,17 +3608,8 @@ export default function AppPage() {
               {showHowItWorks ? (
                 <LearnMoreContent open={true} inline />
               ) : (
-                // 4-row × 3-col bento, sized to fill the panel:
-                //   row 1: Hero title (col 1)         | Placeholder upper (cols 2-3)
-                //   row 2: Summary card (col 1)       | Placeholder lower (cols 2-3)
-                //   row 3: Vault upper (col 1, span)  | Position (col 2) | Performance (col 3)
-                //   row 4: Vault lower (col 1, span)  | Activity (cols 2-3)
-                // Col 1 is wider so the Summary's prose fits comfortably.
-                // 4-row × 3-col bento (hero title dropped):
-                //   row 1: Vault (col 1, spans rows 1-3)   | Placeholder (cols 2-3)
-                //   row 2: Vault (continues)               | Position | Performance
-                //   row 3: Vault (continues)               | Activity (cols 2-3, spans rows 3-4)
-                //   row 4: Summary text (col 1)            | Activity (continues)
+                // 4-row × 3-col bento. Col 1 (Vault, Summary) is
+                // wider so the Summary prose fits comfortably.
                 <div style={{
                   display: "grid",
                   gridTemplateColumns: "1.45fr 1fr 1fr",
@@ -3447,17 +3630,12 @@ export default function AppPage() {
                   <div className={enterClass} style={{ animationDelay: exiting ? "60ms" : "360ms", gridColumn: "2 / 4", gridRow: "2 / 4", display: "flex", flexDirection: "column" }}>
                     <UserActivityCard />
                   </div>
-                  {/* No entry animation on this segment — animating
-                      opacity on the Card or any ancestor leaves a
-                      compositor layer that prevents backdrop-filter
-                      from sampling the panel landscape. Static is
-                      the price for the blur to stay live.
-                      Exit, however, uses a binary visibility flip
-                      (no transition) so the segment disappears with
-                      the rest of the bento — no slow fade required,
-                      and no compositor layer because there's no
-                      animation, so the blur stays intact while
-                      visible. */}
+                  {/* No entry animation — animating opacity on the
+                      Card or any ancestor leaves a compositor layer
+                      that prevents backdrop-filter from sampling the
+                      panel landscape. Exit uses a binary visibility
+                      flip (no transition) so the blur stays intact
+                      while visible. */}
                   <div style={{
                     gridColumn: "1", gridRow: "4",
                     display: "flex", flexDirection: "column",
@@ -3476,16 +3654,12 @@ export default function AppPage() {
             </div>
           </div>
 
-          {/* Withdraw modal lives INSIDE the panel section so its
-              backdrop-filter only blurs the panel's own contents —
-              the sidebar/tabs/nav (siblings outside the section)
-              stay sharp. The section already has overflow:hidden,
-              so the modal is naturally clipped to the panel rect. */}
+          {/* Modal lives inside the panel section so its backdrop-
+              filter only blurs the panel's contents; siblings stay
+              sharp. */}
           {withdrawOpen && <WithdrawModal onClose={() => setWithdrawOpen(false)} />}
         </section>
 
-      {/* Bottom strip — sits 12 design-px below the panel, inside the
-          scaled canvas so it tracks the panel's width and scale. */}
       <div className={footerClass}>
         <FooterStrip
           left={0}
@@ -3499,12 +3673,10 @@ export default function AppPage() {
       </div>
 
       {/* Right sidebar + its tab switcher above. Both live in
-          viewport space (NOT scaled by --shell-scale) but anchor to
-          --sidebar-left / --sidebar-w, so they sit one fixed gap
-          right of the (combo-centered) panel and hold a stable
-          design width. zIndex: 1 keeps them behind the canvas (z=2),
-          which is what the slide-in animation expects — they
-          "unroll from behind the panel". */}
+          viewport space and anchor to --sidebar-left / --sidebar-w,
+          one fixed gap right of the (combo-centered) panel.
+          zIndex: 1 keeps them behind the canvas so the slide-in
+          unrolls from behind the panel. */}
       <SidebarTabs tab={sidebarTab} onChange={setSidebarTab} exiting={exiting} agentUnread={agentUnread} />
 
       <section style={{
@@ -3513,15 +3685,26 @@ export default function AppPage() {
         width: "var(--sidebar-w)",
         top: "var(--panel-top)",
         height: "var(--panel-h)",
-        borderRadius: 20,
+        borderRadius: "calc(20px * var(--shell-scale))",
         overflow: "hidden",
-        display: "flex", flexDirection: "column",
         isolation: "isolate",
         zIndex: 1,
         background: "#0c0c10",
         border: "1px solid rgba(255,255,255,0.08)",
       }} className={rightSidebarClass}>
-        {sidebarTab === "agent" ? <AgentChatPanel /> : <DashboardPanel />}
+        {/* Inner is written in design px (450 × 780) and rides the
+            same shell-scale transform as the main canvas, so the
+            agent/stats panels scale in lockstep with the panel. */}
+        <div style={{
+          width: 450,
+          height: PANEL_H,
+          transform: "scale(var(--shell-scale))",
+          transformOrigin: "top left",
+          display: "flex",
+          flexDirection: "column",
+        }}>
+          {sidebarTab === "agent" ? <AgentChatPanel /> : <DashboardPanel />}
+        </div>
       </section>
     </main>
   );

@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "exportedAt": "2026-05-02T21:15:35.326Z",
+  "workflow": {
+    "name": "alp-demo-rebalance",
+    "description": "Manual trigger that lets us force a rebalance from the KeeperHub dashboard. Pressing Run now hits the keeper's /force?pool=<key> endpoint, which skips the cooldown gate and rebalances the chosen pool right away. Used to record the demo and as an on-call lever if we need to step in by hand. Defaults to V3 USDC/USDT, the safest pool to touch."
+  },
+  "nodes": [
+    {
+      "id": "trigger-manual",
+      "data": {
+        "type": "trigger",
+        "label": "Manual trigger (Run now)",
+        "config": {
+          "triggerType": "Manual"
+        },
+        "status": "idle"
+      },
+      "type": "trigger",
+      "position": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": "force-rebalance",
+      "data": {
+        "type": "action",
+        "label": "Force rebalance USDC/USDT",
+        "config": {
+          "endpoint": "https://${KEEPER_PUBLIC_HOST}/force?pool=0x1410c48da640536a03a64200a517f3fe746a9ff6c15e81b1b663c9e18cd222e9&token=${KEEPER_INBOUND_BEARER}",
+          "httpBody": "{}",
+          "actionType": "HTTP Request",
+          "httpMethod": "POST",
+          "httpHeaders": "{\"Content-Type\":\"application/json\"}"
+        },
+        "status": "idle"
+      },
+      "type": "action",
+      "position": {
+        "x": 280,
+        "y": 0
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "type": "animated",
+      "source": "trigger-manual",
+      "target": "force-rebalance"
+    }
+  ],
+  "integrationBindings": []
+}

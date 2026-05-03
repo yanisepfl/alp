@@ -91,8 +91,7 @@ export async function executeRebalance(args: {
     //    centred on spot we need both sides; swap half of the surplus side into
     //    the deficient side.
     //    Heuristic: read both balances; whichever is larger in base-asset terms,
-    //    swap half of it. (Simple v1; later we can size precisely from the new
-    //    range's expected ratio.)
+    //    swap half of it.
     const swapStep = await maybeSwapToBalance({
       config,
       publicClient,
@@ -196,10 +195,8 @@ export async function executeRebalance(args: {
         // amountMins set to 0 because V3's mint only consumes the ratio
         // dictated by the new range, which generally won't match (bal0,
         // bal1) — the limiting token determines liquidity and the other
-        // gets refunded. A meaningful slippage check requires pre-computing
-        // the expected ratio via LiquidityAmounts; deferred to v2. The
-        // URAdapter's swap-side slippage check already protects against
-        // price-move MEV during the rebalance.
+        // gets refunded. The URAdapter's swap-side slippage check already
+        // protects against price-move MEV during the rebalance.
         0n,
         0n,
         addExtra,
@@ -434,7 +431,8 @@ async function maybeSwapToBalance(args: {
     gas: 2_000_000n,
     label: "executeSwap",
   });
-  // Suppress unused-variable lints for parameters reserved for v2 wiring.
+  // Accept the shared `deadline` arg for parity with the other steps; the
+  // Trading API encodes its own deadline into `extra`, so we don't forward it.
   void deadline;
   return {
     kind: "swap",
