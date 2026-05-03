@@ -166,7 +166,7 @@ alps/
 
 The deployed dApp is at **[alps-six.vercel.app](https://alps-six.vercel.app/)** — no local setup needed.
 
-Connect your wallet, deposit USDC, and watch the keeper narrate every decision in real time. The KeeperHub workflows are publicly visible at [app.keeperhub.com](https://app.keeperhub.com) under `alps-rebalance`, `alps-post-rebalance`, and `alps-demo-rebalance`.
+Connect your wallet, deposit USDC, and watch the keeper narrate every decision in real time. The three KeeperHub workflows that drive the loop (`alps-rebalance`, `alps-post-rebalance`, `alps-demo-rebalance`) are checked in as JSON snapshots under [agent/keeperhub-workflows/](agent/keeperhub-workflows/).
 
 ## Local Setup
 

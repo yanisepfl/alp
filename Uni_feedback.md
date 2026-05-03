@@ -1,65 +1,64 @@
 # Uniswap API Feedback
 
-Notes from integrating Uniswap as an API consumer for the ALPS rebalancer. Two API surfaces existed for what we needed: the Trading API for swaps, and the Liquidity API for LP work. We landed on the first one in production and bounced off the second one. Hackathon scope, single VM, Base mainnet only.
+## Context
 
-## What we used (and didn't)
+ALPS is an autonomous concentrated-liquidity vault on Base. The keeper rebalances V3 and V4 positions every 5 minutes; **swap routing goes through the Uniswap Trading API**, **all LP math goes through the V3/V4 SDKs**. Three real on-chain bundles linked from the README, including one V4 ETH/USDC bundle under the Alphix dynamic-fee hook.
 
-| Need | API we wanted | What we actually used |
-|---|---|---|
-| Swap routing for the optional middle leg of a rebalance | Trading API REST `POST /v1/quote` | Trading API REST, exactly as advertised |
-| LP mint, burn, range math across V3 and V4 | Liquidity API REST under `/v1/lp/*` | Got 403 on every `/v1/lp/*` path with the same key that worked on `/v1/quote`. Fell back to `@uniswap/v3-sdk` and `@uniswap/v4-sdk` |
+- **Trading API surface used:** `POST /v1/quote` only — we use the legacy auto-router response that returns `methodParameters.calldata` alongside the quote, and skip `/v1/swap`.
+- **SDKs:** `@uniswap/v3-sdk`, `@uniswap/v4-sdk`, `@uniswap/sdk-core`.
+- **Code:** [keeper/src/quoting.ts](keeper/src/quoting.ts), [keeper/src/uniswapSdk.ts](keeper/src/uniswapSdk.ts).
 
-The keeper hits the Trading API in [keeper/src/quoting.ts](keeper/src/quoting.ts) and runs all LP math through the SDKs in [keeper/src/uniswapSdk.ts](keeper/src/uniswapSdk.ts).
+## What worked well
 
-## Trading API: what worked
+- **Multi-hop routing in one call.** `/v1/quote` returns a quote plus ready-to-execute UniversalRouter calldata. The API key is optional for our usage; we never hit rate limits in testing or during the demo.
+- **`swapper` / `recipient` separation works as advertised.** We pass the vault address for both, since the rebalance swaps from vault custody and keeps the output there.
+- **Errors are plain text with meaningful HTTP status.** Surfaced verbatim in keeper logs ([quoting.ts:83](keeper/src/quoting.ts#L83)) — no JSON-error ceremony to parse.
+- **V4 hooks are first-class in `@uniswap/v4-sdk`.** `new V4Pool(c0, c1, fee, tickSpacing, hooksAddress, ...)` at [uniswapSdk.ts:167](keeper/src/uniswapSdk.ts#L167) lets us reason about ETH/USDC under the Alphix dynamic-fee hook without the SDK treating the hook as opaque.
 
-* `POST /v1/quote` with an `EXACT_INPUT` body returns a quote plus `methodParameters.calldata` ready to push at the UniversalRouter. One call, multi-hop path discovery included, no router writing on our side.
-* Free for our volume. The `apiKey` field is optional in our wiring and we never had to set it for `/v1/quote` itself. Rate limits never bit us during testing or the demo.
-* Good split of responsibilities. We encode trivial single-hop V3 swaps locally with `encodePacked` because the path is one line, and use the API for anything that might need multi-hop. The keeper picks the right path automatically based on whether tokenIn and tokenOut share a direct pool.
+## Issues encountered
 
-## Trading API: what was painful
+### 1. `/v1/quote`'s calldata response is undocumented in the new docs
 
-* `methodParameters.calldata` ships with the `execute(bytes,bytes[],uint256)` 4-byte selector still attached. Our adapter wraps UniversalRouter and expects just the inner `(commands, inputs, deadline)` tuple, so we slice the first 10 hex chars off the response in [quoting.ts:88-90](keeper/src/quoting.ts#L88). Workable but it's the kind of off-by-four bug that bites anyone wrapping the router.
-* Slippage is a percent string (`"0.50"` for 50 bps). Every other DeFi tool we touch uses bps. We divide by 100 at the boundary in [quoting.ts:71](keeper/src/quoting.ts#L71). Trivial, but every consumer is going to write the same line.
-* Round-trip latency to `trade-api.gateway.uniswap.org` is the dominant cost on a fast rebalance, around 200 to 400 ms in our logs. Fine for a 5-minute polling loop, less fine if anyone wanted to actuate per block.
-* No way to ask for just the inner tuple, or to ask for the calldata pre-shaped for "I am calling UniversalRouter from another contract". A second response shape that returns the inner tuple would let adapter patterns work without string slicing.
+**Problem:** The keeper depends on `methodParameters.calldata` in the `/v1/quote` response. The current `/api-reference/swapping/quote` page describes only routing and pricing fields. The embedded calldata is legacy auto-router behavior that the gateway still honors but no longer documents.
 
-## The Liquidity API problem
+**Workaround:** Accept the risk — keep using the field knowing it could change without notice.
 
-This is the part we want to flag clearly, because it's the difference between "Uniswap API integration" being one half of our system and being most of it.
+**Suggestion:** Either re-document it as the canonical adapter fast-path or sunset it loudly with a deprecation date. Right now it's undocumented production surface area that silently breaks every adapter-pattern integration if it changes.
 
-The Liquidity API exists. The endpoints under `/v1/lp/` cover the full LP lifecycle:
-- `/v1/lp/quote` — quote a mint/burn/increase
-- `/v1/lp/create`, `/v1/lp/increase`, `/v1/lp/decrease` — calldata for the position lifecycle
-- `/v1/lp/claim` — fee collection
-- `/v1/lp/approve`, `/v1/lp/check_approval` — token approvals
+### 2. Calldata ships with the `execute(...)` selector pre-attached
 
-We wired every one of those into a first-pass `keeper/src/uniswapApi.ts`. They all returned **403 Forbidden**. The same API key authed cleanly against `/v1/quote` for swaps in the same session, on the same gateway host, with the same headers. So the gateway recognized the key — the LP paths were entitlement-gated separately, and there was no public docs path or self-serve flow we could find to request that entitlement for a hackathon project on Base mainnet. We tried both `Authorization: Bearer …` and `x-api-key: …` (the docs disagree across pages); same result either way.
+**Problem:** Adapter contracts wrapping UniversalRouter need the inner `(commands, inputs, deadline)` tuple, not the full `execute(bytes,bytes[],uint256)` ABI call.
 
-After about half a day of header / path / payload variations we pivoted to the SDKs and deleted `uniswapApi.ts`. That's how we ended up with the integration we shipped: Trading API for swaps, SDK for LP. The reasoning at pivot time is still in our internal notes:
+**Workaround:** Strip the first 4 bytes (10 hex chars) at [quoting.ts:88-90](keeper/src/quoting.ts#L88).
 
-> REST endpoints `/v1/lp/{create,increase,decrease,quote,claim,approve,check_approval}` all return 403 with the gateway key. The gateway recognizes the key — it works on `/v1/quote` — but the LP entitlement isn't there. Rather than chase URL/path/key discovery, swap to the official SDKs. They're typed, they cover V3+V4 hooked pools, and they give us calldata for the V3 NPM and V4 PositionManager directly.
+**Suggestion:** Add a `wrapForAdapter: true` request flag returning the inner tuple — same shape on `/v1/quote` and `/v1/liquidity_provisioning/create_position`.
 
-The pivot was the right call for the hackathon. But it has two consequences worth naming:
+### 3. Slippage tolerance is a percent string
 
-* **The LP integration ships only in TypeScript.** Anyone building LP tooling in Rust, Go, Python or any other language has to either reimplement the SDK math or stand up a Node sidecar. The Trading API works fine from any language because it's REST. LP work does not.
-* **Under the prize criteria, our LP work is functionally invisible as "API integration."** Uniswap's prize structure rewards API usage, and we built real LP infrastructure across V3 and V4 (including the Alphix dynamic-fee hook on ETH/USDC). Because the LP REST surface returned 403, all of that lands on the SDK side of the line, not the API side.
+**Problem:** `slippageTolerance: "0.50"` for 50 bps. Every other DeFi tool we touch uses bps.
 
-What would have unblocked us:
+**Workaround:** Divide by 100 at the boundary ([quoting.ts:71](keeper/src/quoting.ts#L71)).
 
-* A self-serve flow to grant LP entitlements on a Trading-API-issued key, or a clearer error than 403 (something like "this key does not have the LP scope, request via X").
-* A documentation note on the Liquidity API page stating which keys can hit it and how to upgrade. Right now both the docs and the gateway treat the swap and LP paths as one product, but the entitlement check splits them.
-* If the LP API is intentionally gated to specific partners, saying so on the docs page would save anyone else half a day of "is this me, or them?" debugging.
+**Suggestion:** Accept bps as an alternate unit.
 
-A working `POST /v1/lp/quote` shaped exactly like the Trading API — pool key, tick range, available amounts, returning optimal `(amount0, amount1)` plus slippage-floored mins plus ready-to-use calldata for the V3 NPM or V4 PositionManager — would let LP tooling get built the same way swap tooling already does. From what we saw, the surface is already designed that way. We just couldn't reach it.
+### 4. The two-step `/quote → /swap` flow is EOA-shaped, not adapter-shaped
 
-## Smaller things on the Trading API
+**Problem:** The documented flow assumes an EOA that signs Permit2 typed data, then calls `/v1/swap` to compose the final `TransactionRequest`. Our `URAdapter` is a contract that does Permit2 on-chain — pre-approves Permit2 max once per token at [UniversalRouterAdapter.sol:235](contracts/src/adapters/UniversalRouterAdapter.sol#L235), then calls `permit2.approve(token, router, amount, deadline)` before each swap at [line 125](contracts/src/adapters/UniversalRouterAdapter.sol#L125). No signature, no `from` field, no need for `/v1/swap` to compose anything.
 
-* The `swapper` and `recipient` fields work as expected. We pass our vault address as both, since the rebalance does the swap from vault custody and keeps the output there.
-* `EXACT_INPUT` is the right default for our use case. We have a known input amount (the asymmetric leftover from the `remove`) and we want as much of the other token as the router can find.
-* Errors come back as plain text bodies with a meaningful HTTP status. We surface the first 200 chars in our error message in [quoting.ts:83](keeper/src/quoting.ts#L83). Could not ask for less ceremony there.
+**Workaround:** Use `/v1/quote`'s legacy auto-router calldata and skip `/v1/swap` entirely.
 
-## Hackathon caveats
+**Suggestion:** Document the contract-mode path explicitly. Adapter patterns (vaults, intent solvers, batchers) are increasingly common; the current docs treat them as second-class.
 
-* We never used `@uniswap/router-sdk` directly. Trading API is the path of least resistance for one swap per rebalance.
-* We are stuck on `@uniswap/v4-sdk` for V4 work because of the Liquidity API gating. If LP entitlements ever open up (or the API moves to the same "key just works" model the Trading API has), we'd switch over for the same reasons we use the Trading API for swaps.
+## Why SDKs for LP, not `/v1/liquidity_provisioning/*`
+
+The LP REST surface exists. We chose the SDKs:
+
+- **Determinism in the hot path.** Mint sizing has to be byte-exact on-chain to avoid `MaxAllocationExceeded` reverts. The SDKs reproduce `Position.fromAmounts` against live `slot0` in-process, no network failure mode.
+- **V4 hooks first-class.** Same `V4Pool(..., hooksAddress)` reason as above.
+- **Adapter custody.** The vault holds the LP NFT (V3) or position (V4) end-to-end via `UniV3Adapter` / `UniV4Adapter`; we need raw mint params, not signer-shaped `TransactionRequest` objects.
+
+Same `wrapForAdapter` ask applies — a contract-mode response on the LP REST surface would let the vault-keeper pattern use it.
+
+## Summary
+
+The Trading API carried the swap path for us cleanly — `/v1/quote` is doing real work, and three V3 + V4 mainnet rebalance bundles landed unattended on it. Most of the friction we hit comes from one observation: the documented flow is shaped for EOA wallets, and our vault is a contract handling Permit2 directly through the adapter. Anything that nudged the API toward first-class support for the contract/adapter pattern (a `wrapForAdapter` flag, or clearer status on the legacy `methodParameters` field on `/v1/quote`) would have made the integration smoother. Hackathon scope, single integration; sharing it in case any of it is useful.
