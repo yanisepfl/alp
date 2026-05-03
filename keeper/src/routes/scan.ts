@@ -3,7 +3,7 @@ import { Hono } from "hono";
 import { bumpHoldCounter, markCooldown, resetHoldCounter, readHoldCounter, recentRingTexts } from "../db";
 import { tick } from "../engine";
 import { execute } from "../executor";
-import { decisionToSignalText, signal, type WireSource } from "../ingest";
+import { decisionToSignalText, signal, thought, type WireSource } from "../ingest";
 import { narrateUserEventReaction, rewriteAction, rollupTick } from "../narrator";
 import { ACTUATING, type Decision } from "../policies/types";
 import { readTotalAssets } from "../vault";
@@ -65,16 +65,16 @@ export interface ScanResponse {
 export async function runScan(opts: ScanRunOpts): Promise<ScanResponse> {
   const result = await tick(opts);
 
-  // User-flow events (deposit/withdraw) get a single header signal in the
-  // feed naming the flow before any engine reasoning lands. The follow-up
-  // reaction-thought + optional action are scheduled below.
+  // User-flow events (deposit/withdraw) get a single context signal in
+  // the feed naming the flow before any engine reasoning lands. The
+  // follow-up reaction-thought + optional action are scheduled below.
   if (opts.userEvent) {
     const e = opts.userEvent;
     const amt = (Number(BigInt(e.assetsRaw)) / 1e6).toFixed(4);
     const userShort = `${e.user.slice(0, 6)}…${e.user.slice(-4)}`;
     const verb = e.kind === "deposit" ? "Deposit" : "Withdrawal";
     const txOk = /^0x[0-9a-fA-F]{64}$/.test(e.tx);
-    void signal(`[user-${e.kind}] ${verb} of ${amt} USDC by ${userShort}.`, {
+    void signal(`${verb} of ${amt} USDC from ${userShort}.`, {
       sources: txOk ? [{ kind: "basescan", label: `${e.kind} tx`, tx: e.tx }] : undefined,
     });
   }
@@ -108,7 +108,7 @@ export async function runScan(opts: ScanRunOpts): Promise<ScanResponse> {
         ? `KH-supplied pool roster matches (${khCount})`
         : `⚠ pool roster diverges: KH ${khCount} vs keeper ${ownCount}`);
     }
-    if (parts.length > 0) khLines.push(`[kh-context] ${parts.join("; ")}.`);
+    if (parts.length > 0) khLines.push(`KeeperHub pre-flight context: ${parts.join("; ")}.`);
   }
 
   const txs: string[] = [];
@@ -181,12 +181,12 @@ export async function runScan(opts: ScanRunOpts): Promise<ScanResponse> {
         { chosenAction: result.chosen.action, chosenPool: result.chosen.pool, reasonings },
         { recentDecisions: recent },
       );
-      if (polished) await signal(`[react] ${polished}`);
+      if (polished) await thought(polished);
     })();
   } else if (!actuated) {
     void (async () => {
       const polished = await rollupTick(reasonings, { recentDecisions: recent });
-      if (polished) await signal(polished);
+      if (polished) await thought(polished);
     })();
   }
 
@@ -221,6 +221,15 @@ export async function runScan(opts: ScanRunOpts): Promise<ScanResponse> {
 
 async function narrateActionAsync(decision: Decision, recent: readonly string[], sources?: WireSource[]): Promise<void> {
   const polished = await rewriteAction(decision, { recentDecisions: recent });
-  const text = polished ? `[${decision.policy}] ${polished}` : decisionToSignalText(decision);
-  await signal(text, { sources });
+  // Action narration is the agent's first-person account of what it
+  // just did — this is a thought, not external context. The basescan
+  // tx + Uniswap-SDK consult sources stay attached to the signal-side
+  // entries so the user can still drill in.
+  if (polished) {
+    await thought(polished);
+  } else {
+    // Narrator failed/timed out — fall back to a plain context signal
+    // so the action still lands in the feed with sources attached.
+    await signal(decisionToSignalText(decision), { sources });
+  }
 }

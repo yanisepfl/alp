@@ -155,6 +155,24 @@ export function publishIngestSignal(
  return msg.id;
 }
 
+// Thoughts are the agent's own reasoning sentences (rollup, deposit
+// reaction, etc.) — the FE renders them as a left-bordered italic
+// quote, distinct from "New context" signals. No sources field; if
+// reasoning needs to cite something, that's a signal, not a thought.
+export function publishIngestThought(
+ text: string,
+ opts: { ts?: string } = {},
+): string {
+ const msg: WireMessage = {
+ id: ulid(),
+ ts: opts.ts ?? new Date().toISOString(),
+ kind: "thought",
+ text,
+ };
+ broadcastGlobal(msg);
+ return msg.id;
+}
+
 export function publishIngestReply(
  wallet: string,
  text: string,

@@ -51,9 +51,8 @@ logTickRouter.post("/", async (c) => {
     : undefined;
 
   void (async () => {
-    const polished = await rewriteSignal(rawText, "kh-tick", { recentDecisions: [] });
-    const text = polished ? `[kh-tick] ${polished}` : `[kh-tick] ${rawText}`;
-    await signal(text, { sources });
+    const polished = await rewriteSignal(rawText, "KeeperHub workflow", { recentDecisions: [] });
+    await signal(polished ?? rawText, { sources });
   })();
 
   return c.json({ ok: true, narrated: true });

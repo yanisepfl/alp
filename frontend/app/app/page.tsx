@@ -488,10 +488,11 @@ type ActionChip =
 type SourceRef = { kind: SourceKind; label: string; tx?: string; href?: string };
 
 type AgentMessage =
-  | { id: string; kind: "signal"; iso: string; text: string }
-  | { id: string; kind: "action"; title: string; category: ActionCategory; chip: ActionChip; iso: string; tx: string; text: string; thought?: string }
-  | { id: string; kind: "user";   iso: string; text: string }
-  | { id: string; kind: "reply";  iso: string; text: string; sources?: SourceRef[]; replyTo?: string };
+  | { id: string; kind: "signal";  iso: string; text: string }
+  | { id: string; kind: "thought"; iso: string; text: string }
+  | { id: string; kind: "action";  title: string; category: ActionCategory; chip: ActionChip; iso: string; tx: string; text: string; thought?: string }
+  | { id: string; kind: "user";    iso: string; text: string }
+  | { id: string; kind: "reply";   iso: string; text: string; sources?: SourceRef[]; replyTo?: string };
 
 // Pulls the hour-of-day (0–23) from an iso label like "Apr 28 · 14:23".
 function parseHour(iso: string): number | null {
@@ -516,7 +517,7 @@ function buildHourlyActivity(messages: AgentMessage[]): HourBucket[] {
     return 0;
   })();
   for (const m of messages) {
-    if (m.kind !== "signal" && m.kind !== "action") continue;
+    if (m.kind !== "signal" && m.kind !== "thought" && m.kind !== "action") continue;
     const h = parseHour(m.iso);
     if (h === null) continue;
     // Distance backward from lastHour, wrapping mod 24; latest hour
@@ -524,7 +525,7 @@ function buildHourlyActivity(messages: AgentMessage[]): HourBucket[] {
     const dist = (lastHour - h + 24) % 24;
     if (dist > 23) continue;
     const idx = 23 - dist;
-    if (m.kind === "signal") buckets[idx].signals++;
+    if (m.kind === "signal" || m.kind === "thought") buckets[idx].signals++;
     else {
       buckets[idx].actions++;
       const ts: TokenEntry[] = m.chip.type === "pair" ? [m.chip.left, m.chip.right] : [m.chip.token];
@@ -551,12 +552,19 @@ function formatDisplayIso(d: Date): string {
 function resolveToken(sym: string): TokenEntry { return TOKENS[sym] ?? TOKENS.USDC; }
 
 // Wire → view: resolves token symbols, reshapes WireSource → SourceRef,
-// preserves id + replyTo so optimistic reconciliation can work.
-function toAgentMessage(w: WireMessage): AgentMessage {
+// preserves id + replyTo so optimistic reconciliation can work. Returns
+// null when the wire frame uses a `kind` this FE build doesn't know
+// about — the backend may ship new kinds before a redeploy lands, and
+// silently dropping unknowns is better than poisoning the messages
+// array with `undefined`.
+function toAgentMessage(w: WireMessage): AgentMessage | null {
+  if (!w || typeof w !== "object" || typeof (w as { kind?: unknown }).kind !== "string") return null;
   const iso = formatDisplayIso(new Date(w.ts));
   switch (w.kind) {
     case "signal":
       return { id: w.id, kind: "signal", iso, text: w.text };
+    case "thought":
+      return { id: w.id, kind: "thought", iso, text: w.text };
     case "action":
       return {
         id: w.id, kind: "action", iso,
@@ -581,6 +589,8 @@ function toAgentMessage(w: WireMessage): AgentMessage {
             : { kind: s.kind, label: s.label, tx: s.tx }
         ),
       };
+    default:
+      return null;
   }
 }
 
@@ -2155,6 +2165,30 @@ function MessageView({ m, todayLabel, flash }: { m: AgentMessage; todayLabel: st
     );
   }
 
+  if (m.kind === "thought") {
+    // Standalone thought = the agent's own first-person reasoning. Same
+    // italic-quote treatment as the action's tethered thought lead-in,
+    // so the visual language stays consistent.
+    return (
+      <div className={wrapperClass} data-msg-id={m.id} style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+        <div style={{
+          position: "relative",
+          color: "rgba(255,255,255,0.72)",
+          fontFamily: "var(--font-radley)",
+          fontSize: 13.5, lineHeight: 1.55, fontStyle: "italic",
+          paddingLeft: 12,
+          borderLeft: "1.5px solid rgba(255,255,255,0.18)",
+        }}>
+          <span aria-hidden style={{ marginRight: 2, color: "rgba(255,255,255,0.5)" }}>{"“"}</span>
+          {m.text}
+          <span aria-hidden style={{ marginLeft: 2, color: "rgba(255,255,255,0.5)" }}>{"”"}</span>
+          <BubbleCopy copyText={m.text} />
+        </div>
+        <BubbleTime iso={m.iso} todayLabel={todayLabel} />
+      </div>
+    );
+  }
+
   if (m.kind === "action") {
     return (
       <div className={wrapperClass} data-msg-id={m.id} style={{ display: "flex", flexDirection: "column", gap: 7 }}>
@@ -2562,7 +2596,7 @@ function DashboardPanel() {
       .slice(-6)
       .reverse()
       .map((w) => toAgentMessage(w))
-      .filter((m): m is AgentMessage & { kind: "action" } => m.kind === "action"),
+      .filter((m): m is AgentMessage & { kind: "action" } => m !== null && m.kind === "action"),
     [wire]);
 
   const tvl = vault?.tvl ?? 0;
@@ -2823,7 +2857,10 @@ function AgentChatPanel() {
   const { messages: wire, error: agentError } = useAgentStream();
   const send = useSendUserMessage();
   const { isConnected } = useAccount();
-  const messages = useMemo(() => wire.map(toAgentMessage), [wire]);
+  const messages = useMemo(
+    () => wire.map(toAgentMessage).filter((m): m is AgentMessage => m !== null),
+    [wire],
+  );
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
   const [usage, setUsage] = useState<SherpaUsage>(() => loadSherpaUsage());
@@ -2958,7 +2995,7 @@ function AgentChatPanel() {
   const flashStartRef = useRef<number | null>(null);
   const handleSelectHour = (hour: number) => {
     const target = messages.find((m) =>
-      (m.kind === "signal" || m.kind === "action") && parseHour(m.iso) === hour
+      (m.kind === "signal" || m.kind === "thought" || m.kind === "action") && parseHour(m.iso) === hour
     );
     if (!target) return;
     const container = scrollRef.current;

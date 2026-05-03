@@ -93,9 +93,8 @@ postRebalanceRouter.post("/", async (c) => {
     : undefined;
 
   void (async () => {
-    const polished = await rewriteSignal(rawText, "kh-event", { recentDecisions: [] });
-    const text = polished ? `[kh-event] ${polished}` : `[kh-event] ${rawText}`;
-    await signal(text, { sources });
+    const polished = await rewriteSignal(rawText, "KeeperHub post-rebalance audit", { recentDecisions: [] });
+    await signal(polished ?? rawText, { sources });
   })();
 
   return c.json({ ok: true, verified, narrated: true });

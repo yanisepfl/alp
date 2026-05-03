@@ -1,6 +1,7 @@
 // agent ingest HTTP routes.
 //
-//   POST /ingest/signal  — { text, ts? }              → { id }
+//   POST /ingest/signal  — { text, ts?, sources? }    → { id }
+//   POST /ingest/thought — { text, ts? }              → { id }
 //   POST /ingest/reply   — { wallet, text, replyTo?, sources?, ts? } → { id }
 //
 // Auth: Authorization: Bearer <INGEST_SECRET>. Constant-time compare.
@@ -8,7 +9,7 @@
 
 import { Hono } from "hono";
 import type { WireSource } from "../types";
-import { publishIngestSignal, publishIngestReply } from "../topics/agent";
+import { publishIngestSignal, publishIngestThought, publishIngestReply } from "../topics/agent";
 import { verifyIngestSecret } from "../ingest";
 
 const WALLET_RE = /^0x[0-9a-fA-F]{40}$/;
@@ -70,6 +71,26 @@ export function buildIngestRoutes(): Hono {
       ts: body.ts as string | undefined,
       sources: body.sources as WireSource[] | undefined,
     });
+    return c.json({ id });
+  });
+
+  r.post("/thought", async (c) => {
+    if (!checkAuth(c.req.header("authorization"))) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    let body: { text?: unknown; ts?: unknown };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "bad_body" }, 400);
+    }
+    if (typeof body.text !== "string" || body.text.length === 0) {
+      return c.json({ error: "bad_body" }, 400);
+    }
+    if (body.ts !== undefined && !isValidIsoTs(body.ts)) {
+      return c.json({ error: "bad_ts" }, 400);
+    }
+    const id = publishIngestThought(body.text, { ts: body.ts as string | undefined });
     return c.json({ id });
   });
 

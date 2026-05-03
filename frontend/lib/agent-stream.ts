@@ -25,6 +25,7 @@ export type ActionCategory = "swap" | "edit_position" | "claim_fees";
 
 export type WireMessage =
   | { id: string; ts: string; kind: "signal";  text: string }
+  | { id: string; ts: string; kind: "thought"; text: string }
   | { id: string; ts: string; kind: "action";  title: string; category: ActionCategory; chip: WireChip; tx: string; text: string; thought?: string }
   | { id: string; ts: string; kind: "user";    text: string }
   | { id: string; ts: string; kind: "reply";   text: string; replyTo?: string; sources?: WireSource[] };
