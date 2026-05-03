@@ -30,7 +30,7 @@
 // - No reorg handling; Base soft-finalises at ~2 blocks.
 //
 // Every in-memory mutation is mirrored synchronously into the sqlite store
-// at ./data/alp.sqlite (path overridable via ALP_DB_PATH). On boot,
+// at ./data/alps.sqlite (path overridable via ALPS_DB_PATH). On boot,
 // `startIndexer` rehydrates state from disk, then resumes backfill from the
 // persisted `last_indexed_block` cursor.
 

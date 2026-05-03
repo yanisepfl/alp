@@ -14,7 +14,7 @@ import {ISwapRouter02} from "../interfaces/external/ISwapRouter02.sol";
 import {IUniswapV3Factory} from "../interfaces/external/IUniswapV3Factory.sol";
 import {IUniswapV3Pool} from "../interfaces/external/IUniswapV3Pool.sol";
 
-/// @notice ALP adapter for Uniswap V3.
+/// @notice ALPS adapter for Uniswap V3.
 ///
 /// Routes liquidity through `NonfungiblePositionManager` and swaps through
 /// `SwapRouter02`. The vault calls every method; the adapter holds no value

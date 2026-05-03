@@ -1,6 +1,6 @@
-# ALP Frontend
+# ALPS Frontend
 
-Next.js 15 (App Router) dashboard + landing for the Alphix ALP vault. Wallet via Reown AppKit on top of wagmi + viem; targets **Base mainnet only** (chain ID 8453).
+Next.js 15 (App Router) dashboard + landing for the Alphix ALPS vault. Wallet via Reown AppKit on top of wagmi + viem; targets **Base mainnet only** (chain ID 8453).
 
 ## Quickstart
 

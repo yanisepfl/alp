@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-shot bootstrap of an Anvil fork of Base mainnet with the full ALP stack
+# One-shot bootstrap of an Anvil fork of Base mainnet with the full ALPS stack
 # deployed and one in-range V3 USDC/cbBTC position seeded.
 #
 # Usage:

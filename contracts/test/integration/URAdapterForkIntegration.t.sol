@@ -51,7 +51,7 @@ contract URAdapterForkIntegrationTest is Test {
         vm.createSelectFork(rpc);
 
         registry = new PoolRegistry(owner, guardian);
-        vault = new ALPVault(IERC20(USDC), "ALP USDC Vault", "alpUSDC", registry, owner, address(this), guardian);
+        vault = new ALPVault(IERC20(USDC), "ALPS USDC Vault", "alpUSDC", registry, owner, address(this), guardian);
         urAdapter = new UniversalRouterAdapter(
             IUniversalRouter(UNIVERSAL_ROUTER), IPermit2(PERMIT2), IUniswapV3Factory(V3_FACTORY), address(vault)
         );

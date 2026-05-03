@@ -63,7 +63,7 @@ contract ManipulationAttacksTest is V4Deployers {
 
         registry = new PoolRegistry(owner, guardian);
         vault =
-            new ALPVault(IERC20(address(usdc)), "ALP USDC Vault", "alpUSDC", registry, owner, address(this), guardian);
+            new ALPVault(IERC20(address(usdc)), "ALPS USDC Vault", "alpUSDC", registry, owner, address(this), guardian);
         adapter = new UniV4Adapter(positionManager, poolManager, swapRouter, permit2, address(vault));
         seedAdapter = new UniV4Adapter(positionManager, poolManager, swapRouter, permit2, address(this));
 
@@ -366,7 +366,7 @@ contract YieldFlowTest is V4Deployers {
 
         registry = new PoolRegistry(owner, guardian);
         vault =
-            new ALPVault(IERC20(address(usdc)), "ALP USDC Vault", "alpUSDC", registry, owner, address(this), guardian);
+            new ALPVault(IERC20(address(usdc)), "ALPS USDC Vault", "alpUSDC", registry, owner, address(this), guardian);
         adapter = new UniV4Adapter(positionManager, poolManager, swapRouter, permit2, address(vault));
         seedAdapter = new UniV4Adapter(positionManager, poolManager, swapRouter, permit2, address(this));
 

@@ -2,7 +2,7 @@
   "version": 1,
   "exportedAt": "2026-05-02T21:15:35.188Z",
   "workflow": {
-    "name": "alp-post-rebalance",
+    "name": "alps-post-rebalance",
     "description": "Listens for vault.LiquidityAdded events on Base. When one fires, KeeperHub batch-reads vault.poolValueExternal() for all three pools in a single Multicall3 call and sums the values via math/aggregate to get the deployed total. It also re-reads the agent ETH balance. The result is POSTed to the keeper's /post-rebalance endpoint so the keeper can verify the receipt."
   },
   "nodes": [

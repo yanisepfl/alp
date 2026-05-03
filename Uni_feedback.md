@@ -1,6 +1,6 @@
 # Uniswap API Feedback
 
-Notes from integrating Uniswap as an API consumer for the ALP rebalancer. Two API surfaces existed for what we needed: the Trading API for swaps, and the Liquidity API for LP work. We landed on the first one in production and bounced off the second one. Hackathon scope, single VM, Base mainnet only.
+Notes from integrating Uniswap as an API consumer for the ALPS rebalancer. Two API surfaces existed for what we needed: the Trading API for swaps, and the Liquidity API for LP work. We landed on the first one in production and bounced off the second one. Hackathon scope, single VM, Base mainnet only.
 
 ## What we used (and didn't)
 

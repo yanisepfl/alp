@@ -19,7 +19,7 @@ import {ISwapRouter02} from "../src/interfaces/external/ISwapRouter02.sol";
 import {IUniswapV3Factory} from "../src/interfaces/external/IUniswapV3Factory.sol";
 import {IUniversalRouter} from "../src/interfaces/external/IUniversalRouter.sol";
 
-/// @notice One-shot deploy of the full ALP stack to Base mainnet (chainId 8453).
+/// @notice One-shot deploy of the full ALPS stack to Base mainnet (chainId 8453).
 ///
 /// Deploys: PoolRegistry, ALPVault, UniV3Adapter, UniV4Adapter, UniversalRouterAdapter.
 /// Bootstraps the V3 + V4 PositionManager operator approvals.
@@ -79,7 +79,7 @@ contract DeployBase is Script {
         // 1. Deploy core. Deployer = owner = guardian initially; transfer later.
         PoolRegistry registry = new PoolRegistry(deployer, deployer);
         ALPVault vault =
-            new ALPVault(IERC20(USDC), "ALP USDC Vault", "alpUSDC", registry, deployer, agent, deployer);
+            new ALPVault(IERC20(USDC), "ALPS USDC Vault", "alpUSDC", registry, deployer, agent, deployer);
 
         UniV3Adapter v3Adapter = new UniV3Adapter(
             INonfungiblePositionManager(V3_NPM),

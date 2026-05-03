@@ -98,7 +98,7 @@ contract ALPVaultInvariantsTest is StdInvariant, Test {
     function setUp() public {
         usdc = new MockERC20Token("USD Coin", "USDC", 6);
         registry = new PoolRegistry(owner, guardian);
-        vault = new ALPVault(IERC20(address(usdc)), "ALP USDC Vault", "alpUSDC", registry, owner, agent, guardian);
+        vault = new ALPVault(IERC20(address(usdc)), "ALPS USDC Vault", "alpUSDC", registry, owner, agent, guardian);
 
         address[] memory users = new address[](3);
         users[0] = alice;

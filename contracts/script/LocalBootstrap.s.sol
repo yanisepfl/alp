@@ -24,7 +24,7 @@ import {IUniswapV3Factory} from "../src/interfaces/external/IUniswapV3Factory.so
 import {IUniswapV3Pool} from "../src/interfaces/external/IUniswapV3Pool.sol";
 import {IUniversalRouter} from "../src/interfaces/external/IUniversalRouter.sol";
 
-/// @notice One-shot bootstrap of the ALP stack against an Anvil fork of Base
+/// @notice One-shot bootstrap of the ALPS stack against an Anvil fork of Base
 /// mainnet. Deploys all contracts, registers a V4 hooked native-ETH/USDC
 /// pool plus V3 USDC/cbBTC and V3 USDC/USDT LP pools and three URAdapter
 /// swap entries. Seeds three demo positions:
@@ -103,7 +103,7 @@ contract LocalBootstrap is Script {
     function _phase1Deploy() internal {
         vm.startBroadcast(DEPLOYER_KEY);
         sRegistry = new PoolRegistry(DEPLOYER, DEPLOYER);
-        sVault = new ALPVault(IERC20(USDC), "ALP USDC Vault", "alpUSDC", sRegistry, DEPLOYER, AGENT, DEPLOYER);
+        sVault = new ALPVault(IERC20(USDC), "ALPS USDC Vault", "alpUSDC", sRegistry, DEPLOYER, AGENT, DEPLOYER);
         sV3Adapter = new UniV3Adapter(
             INonfungiblePositionManager(V3_NPM),
             ISwapRouter02(V3_SWAP_ROUTER),

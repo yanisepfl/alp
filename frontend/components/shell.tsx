@@ -23,7 +23,7 @@ export function Shell() {
   // and word-by-word reveal animations.
   useEffect(() => {
     try {
-      localStorage.setItem("alp:intro-played", "1");
+      localStorage.setItem("alps:intro-played", "1");
     } catch {
       /* localStorage unavailable; intro will replay. */
     }

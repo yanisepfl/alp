@@ -5,7 +5,7 @@
  *    pnpm deploy:keeperhub              # default: list + status check
  *    pnpm deploy:keeperhub download     # GET workflow JSON, save to keeperhub-workflow.live.json
  *    pnpm deploy:keeperhub patch        # PATCH workflow with current keeperhub-workflow.live.json
- *    pnpm deploy:keeperhub clean        # delete every workflow named "ALP Rebalance Loop"
+ *    pnpm deploy:keeperhub clean        # delete every workflow named "ALPS Rebalance Loop"
  *
  *  Why no full create+activate path: KH's REST `/api/workflows/create`
  *  accepts our (name, nodes, edges) shape but the per-node action `type`
@@ -29,7 +29,7 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { KeeperHubClient } from "../src/keeperhub.js";
 
-const WORKFLOW_NAME = "ALP Rebalance Loop";
+const WORKFLOW_NAME = "ALPS Rebalance Loop";
 const LIVE_PATH = resolve(import.meta.dirname, "..", "keeperhub-workflow.live.json");
 
 async function main(): Promise<void> {

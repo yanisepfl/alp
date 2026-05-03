@@ -1,4 +1,4 @@
-// Sherpa — chat surface of the ALP agent.
+// Sherpa — chat surface of the ALPS agent.
 //
 // Subprocess to the locally-installed `claude` CLI in print mode. Each
 // user_message synthesises a one-shot prompt with live vault + user context
@@ -18,9 +18,9 @@ import type { StreamFrame, UserSnapshot, VaultSnapshot } from "../types";
 const MODEL = Bun.env.SHERPA_MODEL ?? "claude-sonnet-4-6";
 const SUBPROCESS_TIMEOUT_MS = 25_000;
 
-const SYSTEM_PROMPT = `You are Sherpa, the AI co-pilot for Alphix ALP.
+const SYSTEM_PROMPT = `You are Sherpa, the AI co-pilot for Alphix ALPS.
 
-ALP is an automated liquidity provisioner on Base mainnet (chainId 8453). \
+ALPS is an automated liquidity provisioner on Base mainnet (chainId 8453). \
 Users deposit USDC into a single ERC4626 vault. The agent rebalances those \
 deposits across multiple concentrated-liquidity pools (Uniswap V3/V4) — \
 adding/removing liquidity, swapping, harvesting fees — to capture trading \
@@ -42,7 +42,7 @@ Style:
   have that data right now."
 - If the user input isn't a real question — a test ping ("test", "hi", "?", \
   one-word noise) — reply in ONE short sentence inviting a real question. \
-  Do not dump a generic intro about ALP. Do not mention deposit state \
+  Do not dump a generic intro about ALPS. Do not mention deposit state \
   unprompted. The user already knows you exist.
 
 Never call any tools. Respond with the reply text only — no preamble, no \
@@ -115,7 +115,7 @@ function formatUserBlock(wallet: string): string {
       ? `${u.activity[0].kind} ${u.activity[0].amount.toFixed(2)} ${u.activity[0].token} on ${u.activity[0].ts}`
       : "(none)";
     return `Connected user (${wallet}):
-- Holding: ${sharesNum.toFixed(2)} ALP shares (~$${p.valueUsd.toFixed(2)})
+- Holding: ${sharesNum.toFixed(2)} ALPS shares (~$${p.valueUsd.toFixed(2)})
 - Total deposited (lifetime, basis remaining): $${p.totalDepositedUsd.toFixed(2)}
 - PnL: ${p.pnlUsd >= 0 ? "+" : ""}$${p.pnlUsd.toFixed(2)} (${p.pnlPct.toFixed(2)}%)
 - Realized APY: ${p.realizedApyPct.toFixed(2)}%

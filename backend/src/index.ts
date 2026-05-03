@@ -193,7 +193,7 @@ if (VAULT_MODE === "chain") {
 }
 startAgentScript();
 
-console.log(`[alp-backend] listening on http://localhost:${server.port}`);
+console.log(`[alps-backend] listening on http://localhost:${server.port}`);
 console.log(`  ws://localhost:${server.port}/stream`);
 console.log(`  ws://localhost:${server.port}/ingest/stream`);
 console.log(`  http://localhost:${server.port}/health`);
@@ -205,13 +205,13 @@ console.log(`  http://localhost:${server.port}/ingest/{signal,reply}`);
 function shutdown(signal: string): void {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(`[alp-backend] ${signal} received — draining`);
+  console.log(`[alps-backend] ${signal} received — draining`);
   // Best-effort ping to nudge public clients toward reconnect.
   try { broadcastShutdownPing(); } catch { /* closing anyway */ }
   const drainMs = connectionCount() === 0 ? 0 : 2_000;
   setTimeout(() => {
     try { db.close(); } catch (e) {
-      console.warn(`[alp-backend] db.close failed: ${e instanceof Error ? e.message : String(e)}`);
+      console.warn(`[alps-backend] db.close failed: ${e instanceof Error ? e.message : String(e)}`);
     }
     process.exit(0);
   }, drainMs);

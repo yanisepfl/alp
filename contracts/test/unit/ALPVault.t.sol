@@ -24,7 +24,7 @@ contract ALPVaultUnitTest is Test {
     function setUp() public {
         usdc = new MockERC20Token("USD Coin", "USDC", 6);
         registry = new PoolRegistry(owner, guardian);
-        vault = new ALPVault(IERC20(address(usdc)), "ALP USDC Vault", "alpUSDC", registry, owner, agent, guardian);
+        vault = new ALPVault(IERC20(address(usdc)), "ALPS USDC Vault", "alpUSDC", registry, owner, agent, guardian);
 
         usdc.mint(alice, 100_000e6);
         usdc.mint(bob, 100_000e6);
@@ -42,7 +42,7 @@ contract ALPVaultUnitTest is Test {
         assertEq(vault.guardian(), guardian);
         assertEq(vault.asset(), address(usdc));
         assertEq(address(vault.registry()), address(registry));
-        assertEq(vault.name(), "ALP USDC Vault");
+        assertEq(vault.name(), "ALPS USDC Vault");
         assertEq(vault.symbol(), "alpUSDC");
     }
 

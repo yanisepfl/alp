@@ -17,7 +17,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { UserActivityRow } from "./types";
 
-const DB_PATH = Bun.env.ALP_DB_PATH ?? "./data/alp.sqlite";
+const DB_PATH = Bun.env.ALPS_DB_PATH ?? "./data/alps.sqlite";
 mkdirSync(dirname(DB_PATH), { recursive: true });
 
 export const db = new Database(DB_PATH, { create: true });

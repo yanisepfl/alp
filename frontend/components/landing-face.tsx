@@ -3135,7 +3135,7 @@ export function LearnMoreContent({ open, onAppNav, inline = false }: { open: boo
             }}
           >
             <a
-              href="https://github.com/yanisepfl/alp"
+              href="https://github.com/yanisepfl/alps"
               target="_blank"
               rel="noopener noreferrer"
               aria-label="View source on GitHub"

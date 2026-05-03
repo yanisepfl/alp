@@ -26,7 +26,7 @@ import type {
   WireMessage,
 } from "@/lib/api";
 import {
-  ALP_DECIMALS,
+  ALPS_DECIMALS,
   USDC_ADDRESS,
   USDC_DECIMALS,
   VAULT_ADDRESS,
@@ -1089,7 +1089,7 @@ function VaultCard() {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "rgba(255,255,255,0.55)" }}>
             Share price
-            <InfoTip label="Value of one ALP share. Grows as fees accrue into the vault.">
+            <InfoTip label="Value of one ALPS share. Grows as fees accrue into the vault.">
               <InfoIcon size={12} />
             </InfoTip>
           </span>
@@ -1250,7 +1250,7 @@ function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
         </button>
       </div>
 
-      {/* $ value + ALP chip on the dark Card surface. Zeros when
+      {/* $ value + ALPS chip on the dark Card surface. Zeros when
           disconnected; populates when the user snapshot lands. */}
       <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
         <span style={{
@@ -1267,7 +1267,7 @@ function UserPositionCard({ onWithdraw }: { onWithdraw: () => void }) {
             fontFamily: "var(--sans-stack)", fontSize: 12.5, fontWeight: 500,
             fontVariantNumeric: "tabular-nums", lineHeight: 1,
           }}>
-            {sharesNum.toLocaleString("en-US", { maximumFractionDigits: 2 })} ALP
+            {sharesNum.toLocaleString("en-US", { maximumFractionDigits: 2 })} ALPS
           </span>
         </span>
       </div>
@@ -1400,7 +1400,7 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
   const parsedShares: bigint | null = (() => {
     if (num <= 0) return null;
     try {
-      const wei = parseUnits(amount.replace(/,/g, "") as `${number}`, ALP_DECIMALS);
+      const wei = parseUnits(amount.replace(/,/g, "") as `${number}`, ALPS_DECIMALS);
       if (wei <= 0n || wei > userSharesWei) return null;
       return wei;
     } catch {
@@ -1506,7 +1506,7 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
           <H3>We&rsquo;re sad to see you go.</H3>
         </div>
 
-        {/* Withdraw amount input. ALP chip replaces USDC; balance is
+        {/* Withdraw amount input. ALPS chip replaces USDC; balance is
             in shares; bottom row is "You receive" in USDC. */}
         <div style={{
           marginTop: 18,
@@ -1556,7 +1556,7 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
               }}>
                 <AlpChip size={22} />
                 <span style={{ display: "inline-block", position: "relative", top: 1, lineHeight: 1 }}>
-                  ALP
+                  ALPS
                 </span>
               </span>
             </div>
@@ -1577,7 +1577,7 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
                   if (!user?.position) return;
                   // formatUnits → canonical exact decimal that
                   // parseUnits inverts cleanly without rounding drift.
-                  setAmount(formatUnits(BigInt(user.position.shares), ALP_DECIMALS));
+                  setAmount(formatUnits(BigInt(user.position.shares), ALPS_DECIMALS));
                 }}
                 onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "#fff"; }}
                 onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.55)"; }}
@@ -1602,7 +1602,7 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
           }}>
             <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "rgba(255,255,255,0.55)" }}>
               You receive
-              <InfoTip label="ALP shares are redeemed for their pro-rata slice of the vault, paid out in USDC at the current share price.">
+              <InfoTip label="ALPS shares are redeemed for their pro-rata slice of the vault, paid out in USDC at the current share price.">
                 <InfoIcon size={12} />
               </InfoTip>
             </span>
@@ -1625,7 +1625,7 @@ function WithdrawModal({ onClose }: { onClose: () => void }) {
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "rgba(255,255,255,0.55)" }}>
               Share price
-              <InfoTip label="Value of one ALP share. Grows as fees accrue into the vault.">
+              <InfoTip label="Value of one ALPS share. Grows as fees accrue into the vault.">
                 <InfoIcon size={12} />
               </InfoTip>
             </span>
@@ -2800,7 +2800,7 @@ function sendErrorCopy(code: "disconnected" | "rate_limited" | "not_subscribed" 
 // rate_limited; local state is best-effort optics.
 const SHERPA_DAILY_CAP = 5;
 const SHERPA_COOLDOWN_MS = 20_000;
-const SHERPA_USAGE_KEY = "alp:sherpa-usage";
+const SHERPA_USAGE_KEY = "alps:sherpa-usage";
 
 type SherpaUsage = { date: string; count: number };
 

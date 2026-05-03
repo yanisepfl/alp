@@ -27,7 +27,7 @@ import {LiquidityMath} from "../libraries/LiquidityMath.sol";
 import {ILiquidityAdapter} from "../interfaces/ILiquidityAdapter.sol";
 import {PoolRegistry} from "../PoolRegistry.sol";
 
-/// @notice ALP adapter for Uniswap V4.
+/// @notice ALPS adapter for Uniswap V4.
 ///
 /// Uniswap V4 differs from V3 in three places this adapter has to bridge:
 ///   1. Pool identity: V4 pools are not separate contracts. They are keyed by

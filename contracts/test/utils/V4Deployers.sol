@@ -22,7 +22,7 @@ import {V4RouterDeployer} from "hookmate/artifacts/V4Router.sol";
 /// fork tests.
 ///
 /// Adapted from openzeppelin/uniswap-hooks test pattern (and the Alphix
-/// atrium repo) — kept narrow on purpose: ALP only needs the V4 stack and
+/// atrium repo) — kept narrow on purpose: ALPS only needs the V4 stack and
 /// a couple of currency helpers.
 abstract contract V4Deployers is Test {
     IPermit2 internal permit2;

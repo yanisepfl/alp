@@ -18,7 +18,7 @@ import {INonfungiblePositionManager} from "../src/interfaces/external/INonfungib
 import {ISwapRouter02} from "../src/interfaces/external/ISwapRouter02.sol";
 import {IUniswapV3Factory} from "../src/interfaces/external/IUniswapV3Factory.sol";
 
-/// @notice Deploys the ALP stack to Base Sepolia (chainId 84532).
+/// @notice Deploys the ALPS stack to Base Sepolia (chainId 84532).
 ///
 /// Required env vars:
 ///   PRIVATE_KEY            deployer key
@@ -57,7 +57,7 @@ contract Deploy is Script {
 
         // Vault deploys before the adapters so each adapter can pin the vault
         // address as immutable (the `onlyVault` constraint).
-        ALPVault vault = new ALPVault(IERC20(baseAsset), "ALP USDC Vault", "alpUSDC", registry, owner, agent, guardian);
+        ALPVault vault = new ALPVault(IERC20(baseAsset), "ALPS USDC Vault", "alpUSDC", registry, owner, agent, guardian);
 
         UniV3Adapter v3Adapter = new UniV3Adapter(
             INonfungiblePositionManager(V3_NPM),

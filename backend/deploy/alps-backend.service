@@ -1,15 +1,15 @@
 [Unit]
-Description=ALP Backend (read-only)
+Description=ALPS Backend (read-only)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=alp
-Group=alp
-WorkingDirectory=/home/alp/alp/backend
-EnvironmentFile=/home/alp/alp/backend/.env
-ExecStart=/home/alp/.bun/bin/bun run src/index.ts
+User=alps
+Group=alps
+WorkingDirectory=/home/alps/alps/backend
+EnvironmentFile=/home/alps/alps/backend/.env
+ExecStart=/home/alps/.bun/bin/bun run src/index.ts
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
@@ -19,7 +19,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/lib/alp /home/alp/alp/backend
+ReadWritePaths=/var/lib/alps /home/alps/alps/backend
 CapabilityBoundingSet=
 AmbientCapabilities=
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

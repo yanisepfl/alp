@@ -68,7 +68,7 @@ contract UniV4IntegrationTest is V4Deployers {
         // adapter so the adapter can pin the vault address as immutable.
         registry = new PoolRegistry(owner, guardian);
         vault =
-            new ALPVault(IERC20(address(usdc)), "ALP USDC Vault", "alpUSDC", registry, owner, address(this), guardian);
+            new ALPVault(IERC20(address(usdc)), "ALPS USDC Vault", "alpUSDC", registry, owner, address(this), guardian);
         adapter = new UniV4Adapter(positionManager, poolManager, swapRouter, permit2, address(vault));
 
         // Second adapter with this test contract as the "vault" — used only

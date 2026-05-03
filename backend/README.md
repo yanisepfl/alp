@@ -1,6 +1,6 @@
-# ALP Backend — B7 (rate limit + ingest API + deploy)
+# ALPS Backend — B7 (rate limit + ingest API + deploy)
 
-ETHGlobal OpenAgents — backend WSS for the Alphix ALP dashboard. Implements
+ETHGlobal OpenAgents — backend WSS for the Alphix ALPS dashboard. Implements
 the wire layer + topic dispatcher (`agent` / `vault` / `user`) defined in
 [../CONTRACT.md](../CONTRACT.md), plus a SIWE → JWT auth surface on the
 same port. As of B7:
@@ -44,8 +44,8 @@ exec $SHELL                       # or `source ~/.bashrc` to put bun on PATH
 bun --version                     # sanity check
 
 # 2. Per clone
-git clone <repo-url> alp
-cd alp/backend
+git clone <repo-url> alps
+cd alps/backend
 cp .env.example .env
 
 # REQUIRED: replace JWT_SECRET and INGEST_SECRET in .env. The server
@@ -137,20 +137,20 @@ is unset or `0`.
 ### Storage (B6)
 
 Nonces and the consumed-token blacklist are mirrored into the sqlite file
-at `ALP_DB_PATH` (default `./data/alp.sqlite`). A server bounce no longer
+at `ALPS_DB_PATH` (default `./data/alps.sqlite`). A server bounce no longer
 makes a recently issued nonce replayable, and an in-flight verify can land
 across restart. See [Persistence (B6)](#persistence-b6) below.
 
 ## Wire the frontend
 
-Set in `alp/frontend/.env.local`:
+Set in `alps/frontend/.env.local`:
 
 ```
 NEXT_PUBLIC_SHERPA_WSS_URL=ws://<vm-ip>:8787/stream
 ```
 
 For a publicly reachable URL, point `NEXT_PUBLIC_SHERPA_WSS_URL` at the
-TLS-fronted host (`wss://alp.example.com/stream`). The backend itself
+TLS-fronted host (`wss://alps.example.com/stream`). The backend itself
 speaks plain HTTP/WS — TLS terminates upstream in Caddy or nginx; see
 [`deploy/README.md`](deploy/README.md).
 
@@ -167,7 +167,7 @@ speaks plain HTTP/WS — TLS terminates upstream in Caddy or nginx; see
 | `CORS_ALLOW_ORIGIN`  | `http://localhost:3000`  | CORS allow-origin for `/auth/*` and `/health`           |
 | `AUTH_DEV_BYPASS`    | `0`                      | If `1`, exposes `POST /auth/dev-token`. Dev only — must be `0` in production. |
 | `INGEST_SECRET`      | **required (≥32 chars)** | Shared secret for `/ingest/*`. Server exits at boot if absent/short. Generate with `openssl rand -base64 48`. |
-| `ALP_DB_PATH`        | `./data/alp.sqlite`      | sqlite store for persisted state (agent ring, indexer cursor + per-wallet state, auth nonces). Parent dir auto-created. |
+| `ALPS_DB_PATH`        | `./data/alps.sqlite`      | sqlite store for persisted state (agent ring, indexer cursor + per-wallet state, auth nonces). Parent dir auto-created. |
 
 ## Chain reads (B3)
 
@@ -361,7 +361,7 @@ credibility breaks if hashes are fabricated. B5 implements the hybrid:
 ## Persistence (B6)
 
 Every piece of mutable backend state lives in a single sqlite file at
-`ALP_DB_PATH` (default `./data/alp.sqlite`). The DB is opened in WAL mode
+`ALPS_DB_PATH` (default `./data/alps.sqlite`). The DB is opened in WAL mode
 with `synchronous = NORMAL`. Migrations are idempotent `CREATE TABLE IF NOT
 EXISTS` statements that run on every boot from `src/db.ts`.
 
@@ -410,7 +410,7 @@ bun run dev
 bun run scripts/smoke.ts
 
 # 2. Stop the server (Ctrl-C). Inspect the file.
-sqlite3 data/alp.sqlite "SELECT seq, id, kind FROM agent_ring ORDER BY seq DESC LIMIT 5;"
+sqlite3 data/alps.sqlite "SELECT seq, id, kind FROM agent_ring ORDER BY seq DESC LIMIT 5;"
 
 # 3. Restart, then reconnect a WSS client with `since.agent=<reply_id>` —
 #    the history frame returns events strictly newer than that id.
@@ -429,7 +429,7 @@ and cursor on every restart.
   block.
 - **No reorg-aware rollback.** Base soft-finalises at ~2 blocks; if a
   reorg invalidates an already-folded event we'd carry stale state until
-  manual `data/alp.sqlite` deletion.
+  manual `data/alps.sqlite` deletion.
 - **No backups / encryption at rest.** Operational concerns for B7.
 - **No replay of pre-boot chain actions on the agent topic.** Events
   ingested during backfill aren't bridged into the ring (would flood
@@ -587,12 +587,12 @@ late see only future traffic.
 The Linux-VM target ships with a systemd unit + runbook under
 [`deploy/`](deploy/). At a glance:
 
-- [`deploy/alp-backend.service`](deploy/alp-backend.service) — the
-  systemd unit. Runs as `alp:alp`, hardened with `ProtectSystem=strict`,
-  `NoNewPrivileges=true`, etc. Writes to `/var/lib/alp` and
-  `/home/alp/alp/backend` only.
+- [`deploy/alps-backend.service`](deploy/alps-backend.service) — the
+  systemd unit. Runs as `alps:alps`, hardened with `ProtectSystem=strict`,
+  `NoNewPrivileges=true`, etc. Writes to `/var/lib/alps` and
+  `/home/alps/alps/backend` only.
 - [`deploy/README.md`](deploy/README.md) — full runbook from a fresh VM
-  through `systemctl enable --now alp-backend`, plus a Caddy one-liner
+  through `systemctl enable --now alps-backend`, plus a Caddy one-liner
   for TLS termination and a production checklist.
 
 `SIGTERM` (what `systemctl stop` sends) and `SIGINT` (Ctrl-C) trigger
@@ -609,7 +609,7 @@ Production checklist (mirrored in [`deploy/README.md`](deploy/README.md)):
 - [ ] `JWT_SECRET` is a fresh 48+ byte random.
 - [ ] `INGEST_SECRET` is a fresh 48+ byte random, distinct from `JWT_SECRET`.
 - [ ] `AUTH_DEV_BYPASS=0`.
-- [ ] `ALP_DB_PATH=/var/lib/alp/alp.sqlite` (the WorkingDirectory becomes
+- [ ] `ALPS_DB_PATH=/var/lib/alps/alps.sqlite` (the WorkingDirectory becomes
       read-only under `ProtectSystem=strict`).
 - [ ] TLS terminates upstream — **don't** expose `8787` to the public
       internet directly. Caddy is the recommended proxy (one-line

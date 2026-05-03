@@ -57,7 +57,7 @@ contract UniV3ForkIntegrationTest is Test {
         token1 = USDC < WETH ? WETH : USDC;
 
         registry = new PoolRegistry(owner, guardian);
-        vault = new ALPVault(IERC20(USDC), "ALP USDC Vault", "alpUSDC", registry, owner, address(this), guardian);
+        vault = new ALPVault(IERC20(USDC), "ALPS USDC Vault", "alpUSDC", registry, owner, address(this), guardian);
         adapter = new UniV3Adapter(
             INonfungiblePositionManager(V3_NPM),
             ISwapRouter02(V3_SWAP_ROUTER),

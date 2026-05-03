@@ -12,7 +12,7 @@ import {IUniswapV3Factory} from "../interfaces/external/IUniswapV3Factory.sol";
 import {IUniswapV3Pool} from "../interfaces/external/IUniswapV3Pool.sol";
 import {IUniversalRouter} from "../interfaces/external/IUniversalRouter.sol";
 
-/// @notice Swap-only ALP adapter that forwards calls to Uniswap's Universal
+/// @notice Swap-only ALPS adapter that forwards calls to Uniswap's Universal
 /// Router. Lets the off-chain agent execute multi-hop / split-route swaps
 /// returned by the Uniswap Trading API while keeping the vault's accounting,
 /// `onlyAgent` gating and per-tx notional cap intact.

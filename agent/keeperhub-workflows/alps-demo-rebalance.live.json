@@ -2,7 +2,7 @@
   "version": 1,
   "exportedAt": "2026-05-02T21:15:35.326Z",
   "workflow": {
-    "name": "alp-demo-rebalance",
+    "name": "alps-demo-rebalance",
     "description": "Manual trigger that lets us force a rebalance from the KeeperHub dashboard. Pressing Run now hits the keeper's /force?pool=<key> endpoint, which skips the cooldown gate and rebalances the chosen pool right away. Used to record the demo and as an on-call lever if we need to step in by hand. Defaults to V3 USDC/USDT, the safest pool to touch."
   },
   "nodes": [

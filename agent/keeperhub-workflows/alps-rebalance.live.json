@@ -2,7 +2,7 @@
   "version": 1,
   "exportedAt": "2026-05-02T21:15:35.014Z",
   "workflow": {
-    "name": "alp-rebalance",
+    "name": "alps-rebalance",
     "description": "Runs every 5 minutes. KeeperHub reads vault TVL, the active pool list, the agent ETH balance, and the current Base gas price, then sends them to the keeper's /scan endpoint. A Condition node skips the call when the agent does not have enough gas for 2 rebalance bundles. The outcome (fired or held) is posted back to /log-tick."
   },
   "nodes": [
@@ -149,7 +149,7 @@
         "label": "Evaluate Rebalance",
         "config": {
           "endpoint": "https://${KEEPER_PUBLIC_HOST}/scan?token=${KEEPER_INBOUND_BEARER}",
-          "httpBody": "{\"context\":{\"tav\":\"{{@read-tvl:Read TVL.result}}\",\"agentEth\":\"{{@read-gas:Read Agent Gas.balanceWei}}\",\"poolKeys\":\"{{@read-pools:Read Pool Roster.result}}\",\"source\":\"kh-alp-rebalance\"}}",
+          "httpBody": "{\"context\":{\"tav\":\"{{@read-tvl:Read TVL.result}}\",\"agentEth\":\"{{@read-gas:Read Agent Gas.balanceWei}}\",\"poolKeys\":\"{{@read-pools:Read Pool Roster.result}}\",\"source\":\"kh-alps-rebalance\"}}",
           "actionType": "HTTP Request",
           "httpMethod": "POST",
           "httpHeaders": "{\"Content-Type\":\"application/json\"}"

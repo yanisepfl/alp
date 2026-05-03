@@ -1,27 +1,25 @@
-# ALP — Automated Liquidity Provisioner
+# ALPS — Automated Liquidity Positions
 
-Concentrated liquidity on autopilot — powered by the Uniswap V3 + V4 SDKs, the Uniswap Trading API, and KeeperHub orchestration.
+Concentrated liquidity on autopilot. Powered by the Uniswap V3 + V4 SDKs, the Uniswap Trading API, and KeeperHub orchestration.
 
 ## The Problem
 
-**Swap volume on Uniswap created over $2B in LP fees in 2025. Most of it flows to actively managed positions held by sophisticated LPs — and tapping into that yield requires infrastructure and knowledge most depositors don't have.**
+**Swap volume on Uniswap created over $2B in LP fees in 2025. Most of it flows to actively managed positions held by sophisticated LPs. Tapping into that yield requires infrastructure and knowledge most depositors don't have.**
 
-Concentrated liquidity (CL) on Uniswap V3 and V4 is dramatically more capital-efficient than full-range LP, but only while the position is in range. When it drifts out, the LP earns zero fees while the position sits idle. Most depositors are passive — they don't watch tick-by-tick, judge mean reversion, or compare bundle gas costs against expected fee revenue. Manually managing a basket of positions across multiple pools is a 24/7 job that very few LPs do well.
+Concentrated liquidity (CL) on Uniswap V3 and V4 is much more capital-efficient than full-range LP, but only while the position is in range. When it drifts out, the LP earns zero fees. Most LPs are passive, they don't monitor tick-by-tick, judge mean reversion, or compare bundle gas costs against expected fee revenue. Manually managing a basket of positions across multiple pools is a 24/7 job that very few LPs do well.
 
 **The result:** roughly half of CL positions sit out of range at any given time, representing hundreds of millions in idle liquidity earning zero. Most LPs would have been better off just holding their tokens.
 
 ## The Solution
 
-ALP is a single-deposit USDC vault that runs a diversified basket of concentrated-liquidity positions across Uniswap V3 and V4, with an off-chain agent that monitors and rebalances them autonomously.
+ALPS is a single-deposit USDC vault that runs a diversified basket of CL positions across Uniswap V3 and V4, with an off-chain agent that monitors and rebalances them autonomously.
 
 Here's how:
 
-1. You deposit USDC — into a single ERC4626 vault on Base. The vault holds CL positions across whitelisted pools (USDC/USDT V3, USDC/cbBTC V3, ETH/USDC V4 with hooks) and accrues fees back to the share price.
-2. Agents watch and reason — the off-chain keeper runs a 5-policy decision engine every 5 minutes (range drift, anti-whipsaw cooldowns, realized volatility, idle reserve, cap pressure). Claude narrators curate the keeper's reasoning into a easy to understand chat surface.
-3. KeeperHub orchestrates — three KeeperHub workflows drive the loop: a polling workflow generates fresh chain context every 5 minutes and gates rebalances on a dynamic gas floor; a reactive workflow audits every on-chain rebalance with a basket-wide health snapshot; a manual-trigger workflow allows us to ensure there is a rebalancing event during demo time.
-4. The vault executes — when a rebalance is warranted, the keeper consults Uniswap's V3 + V4 SDKs for optimal mint params, then signs `vault.executeRemoveLiquidity → maybe-swap → executeAddLiquidity` as the vault's `agent` role. The vault routes through whitelisted adapter contracts to the V3 NonfungiblePositionManager and V4 PositionManager.
-
-You deposit once, the basket runs itself.
+1. You deposit USDC into a single ERC4626 vault on Base. The vault holds CL positions across whitelisted pools (e.g. USDC/USDT V3, USDC/cbBTC V3, ETH/USDC V4 with hooks) and accrues fees back to the share price.
+2. Agents watch and reason. The off-chain keeper runs a 5-policy decision engine every 5 minutes (range drift, anti-whipsaw cooldowns, realized volatility, idle reserve, cap pressure). Claude narrators curate the keeper's reasoning into a easy to understand chat surface.
+3. KeeperHub orchestrates. Three KeeperHub workflows drive the loop: a polling workflow generates fresh chain context every 5 minutes and gates rebalances on a dynamic gas floor; a reactive workflow audits every on-chain rebalance with a basket-wide health snapshot; a manual-trigger workflow allows us to ensure there is a rebalancing event during demo time.
+4. The vault executes. When a rebalance is warranted, the keeper consults Uniswap's V3 + V4 SDKs for optimal mint params and the Uniswap Trading API for swap routing and UniversalRouter calldata, then signs `vault.executeRemoveLiquidity → maybe-swap → executeAddLiquidity` as the vault's `agent` role. The vault routes through whitelisted adapter contracts to the V3 NonfungiblePositionManager and V4 PositionManager.
 
 ## Architecture
 
@@ -29,7 +27,7 @@ You deposit once, the basket runs itself.
         ┌────────────────────────────────────────────────────────────┐
         │  KeeperHub (app.keeperhub.com)                             │
         │  ┌─────────────────┐ ┌──────────────────┐ ┌─────────────┐  │
-        │  │ alp-rebalance   │ │ alp-post-        │ │ alp-demo-   │  │
+        │  │ alps-rebalance  │ │ alps-post-       │ │ alps-demo-  │  │
         │  │ Schedule */5    │ │  rebalance       │ │  rebalance  │  │
         │  │  → Read TVL     │ │ Event:           │ │ Manual      │  │
         │  │  → Pool roster  │ │  LiquidityAdded  │ │  trigger    │  │
@@ -81,34 +79,34 @@ You deposit once, the basket runs itself.
         └────────────────────────────────────────────────────────────┘
 ```
 
-The keeper, backend, and KeeperHub workflows are independently deployable but speak well-defined contracts. The keeper exposes `/scan` (polling tick), `/post-rebalance` (reactive audit), `/force` (operator override), `/log-tick` (workflow outcome log), and `/react` (user-flow reaction) — all bearer-authed.
+The keeper, backend, and KeeperHub workflows are independently deployable. The keeper exposes `/scan` (polling tick), `/post-rebalance` (reactive audit), `/force` (operator override), `/log-tick` (workflow outcome log), and `/react` (user-flow reaction). All bearer-authed.
 
 ## The Rebalance Flow
 
-1. **Tick** — KeeperHub's `alp-rebalance` Schedule trigger fires every 5 minutes. KeeperHub itself reads `vault.totalAssets()` (TVL), `vault.getActivePools()` (pool roster), the agent EOA's ETH balance, and Base's L2 gas-price oracle.
-2. **Gas gate** — A Condition node short-circuits the workflow when the agent can't cover ≥ 2 rebalance bundles at the current L2 gas price (floor scales with congestion, no hardcoded number). Otherwise the workflow proceeds.
+1. **Tick** — KeeperHub's `alps-rebalance` Schedule trigger fires every 5 minutes. KeeperHub itself reads `vault.totalAssets()` (TVL), `vault.getActivePools()` (pool roster), the agent EOA's ETH balance, and Base's L2 gas-price oracle.
+2. **Gas gate** — A Condition node short-circuits the workflow when the agent can't cover ≥ 2 rebalance bundles at the current L2 gas price (floor scales with congestion). Otherwise the workflow proceeds.
 3. **Evaluate** — KeeperHub POSTs to the keeper's `/scan` with the chain reads composed into the body via template syntax. The keeper cross-checks KH-supplied TVL against its own observation, runs all five policies, and picks the highest-priority Candidate.
 4. **Plan** — When the chosen Decision is `rebalance`, the keeper consults the Uniswap V3 + V4 SDKs (`Position.fromAmounts`, `mintAmountsWithSlippage`, `burnAmountsWithSlippage`) to compute optimal mint amounts and slippage floors. If a swap is needed, the Uniswap Trading API at `trade-api.gateway.uniswap.org` returns multi-hop UniversalRouter calldata that gets embedded in the bundle.
 5. **Sign + submit** — viem signs `vault.executeRemoveLiquidity` then (optionally) `executeSwap` then `executeAddLiquidity` as the vault's `agent` role. The vault dispatches to the relevant adapter contracts which call the V3 / V4 position managers.
 6. **Log** — A second Condition branches on whether the keeper actuated. Both branches POST to `/log-tick` with structured outcome (`fired` or `held`), so the dashboard's run history pairs each tick with a narrated agent-feed entry.
-7. **Audit** — `alp-post-rebalance`'s Blockchain Event trigger detects `vault.LiquidityAdded` within ~8 seconds. It reads `vault.poolValueExternal()` for all three pools in a single Multicall3 call (`web3/batch-read-contract`), sums the deployed total in-workflow (`math/aggregate`), then POSTs the basket-wide audit to the keeper. KeeperHub provides a second pair of eyes on every actuation.
+7. **Audit** — `alps-post-rebalance`'s Blockchain Event trigger detects `vault.LiquidityAdded` within ~8 seconds. It reads `vault.poolValueExternal()` for all three pools in a single Multicall3 call (`web3/batch-read-contract`), sums the deployed total in-workflow (`math/aggregate`), then POSTs the basket-wide audit to the keeper. KeeperHub provides a second pair of eyes on every actuation.
 
-The Uniswap stack is central to this flow: the V3 + V4 SDKs handle all position math, the Trading API handles swap routing and calldata generation, and the V3/V4 PositionManager contracts execute the on-chain mint/burn. The keeper never reimplements any Uniswap logic.
+The Uniswap stack is central to this flow: the V3 + V4 SDKs handle all position math (mint sizing, slippage floors, burn previews), the Trading API picks the best multi-hop route on each swap leg and returns ready-to-sign UniversalRouter calldata that the keeper drops straight into the bundle, and the V3/V4 PositionManager contracts execute the on-chain mint/burn.
 
 ## User Flow Reactions
 
-Deposits and withdrawals don't wait for the next polling tick. The backend's vault indexer watches the live tail for `Deposit` and `Withdraw` events and forwards each one to the keeper's `/react` endpoint. The keeper emits one signal naming the flow ("Deposit of 5.0000 USDC by 0x1234…7890."), runs the engine immediately, emits one reaction-thought reasoning about whether to rebalance, and — if the engine chose to actuate — fires the rebalance and emits the action narration. So a user who deposits sees up to three feed entries within seconds: the deposit, the agent's thinking, and (when warranted) the matching rebalance.
+Deposits and withdrawals don't wait for the next polling tick. The backend's vault indexer watches the live tail for `Deposit` and `Withdraw` events and forwards each one to the keeper's `/react` endpoint. The keeper emits one signal naming the flow ("Deposit of 5.0000 USDC by 0x1234…7890."), runs the engine immediately, emits one reaction-thought reasoning about whether to rebalance, and, if the engine chose to actuate, fires the rebalance and emits the action narration. So a user who deposits sees up to three feed entries within seconds: the deposit, the agent's thinking, and (when warranted) the matching rebalance.
 
 ## Agent Feed Narration
 
-A 5-policy engine across three pools produces a lot of raw reasoning per tick — surfacing it unfiltered would bury the user under spam. ALP curates everything into a high-signal feed using multiple narrators:
+A 5-policy engine across three pools produces a lot of raw reasoning per tick, surfacing it unfiltered would bury the user under spam. ALPS curates everything into a high-signal feed using multiple narrators. Every narrator emits a short, focused line — no walls of text — and each one answers a different question:
 
 | Narrator | Fires when | Output |
 |---|---|---|
-| **Action** | The keeper just submitted a transaction | One past-tense sentence, 4-5 words ("Rebalanced USDC/USDT.") |
-| **Rollup** | A tick finished without actuating (the common case) | Either one 8-20 word sentence — a logical deduction across policies, or a focused observation lifted from one — *or* `SILENCE`, in which case nothing is emitted at all. The rollup sees all five policies' reasoning, the KeeperHub pre-flight context, and the recent feed, and decides whether anything is worth surfacing. |
-| **React** | A user just deposited or withdrew | One 12-22 word sentence reasoning about whether to rebalance to absorb the flow, citing the actual amount. Always emits — the depositor or withdrawer is owed an explanation even when the answer is "holding as idle reserve". |
-| **Signal** | An external integration speaks: KeeperHub post-rebalance audit, inline Uniswap-SDK consult during a rebalance, low-gas alert | One 8-15 word sentence quoting concrete numbers ("Uniswap V3 SDK expects 0.148 USDC + 0.148 USDT for the re-mint.") |
+| **Action** | The keeper just submitted a transaction | A past-tense recap of what landed ("Rebalanced USDC/USDT.") |
+| **Rollup** | A tick finished without actuating (the common case) | Either a deduction across policies, a focused observation lifted from one — *or* `SILENCE`, in which case nothing is emitted at all. The rollup sees all five policies' reasoning, the KeeperHub pre-flight context, and the recent feed, and decides whether anything is worth surfacing. |
+| **React** | A user just deposited or withdrew | A reasoning about whether to rebalance to absorb the flow, citing the actual amount. Always emits — the depositor or withdrawer is owed an explanation even when the answer is "holding as idle reserve". |
+| **Signal** | An external integration speaks: KeeperHub post-rebalance audit, inline Uniswap-SDK consult during a rebalance, low-gas alert | A remark quoting concrete numbers ("Uniswap V3 SDK expects 0.148 USDC + 0.148 USDT for the re-mint.") |
 
 The rollup prompt explicitly leans toward `SILENCE` to minimize messages to highly contextual ones. Narration runs in `claude -p` subprocesses after the tx, never blocking on-chain actuation.
 
@@ -130,7 +128,7 @@ Even with a fully compromised agent key, an attacker cannot withdraw the vault's
 
 ## Uniswap Stack Integration
 
-ALP is built end-to-end on the Uniswap stack:
+ALPS is built end-to-end on the Uniswap stack:
 
 | Component | Usage |
 |---|---|
@@ -141,7 +139,7 @@ ALP is built end-to-end on the Uniswap stack:
 | V3 NonfungiblePositionManager | Target of `UniV3Adapter` for V3 mint, burn, and fee collection on whitelisted V3 pools |
 | V4 PositionManager | Target of `UniV4Adapter` for V4 hooked-pool position management; consumes `modifyLiquidities` action-encoded calldata |
 | UniversalRouter | Swap execution target (called via Trading API-generated calldata wrapped in a vault adapter call) |
-| V4 hook (Alphix dynamic-fee) | The ETH/USDC pool ALP rebalances is a V4 dynamic-fee pool with the Alphix hook — exercises real V4 hooked-pool LP, not just the canonical V4 flow |
+| V4 hook (Alphix dynamic-fee) | The ETH/USDC pool ALPS rebalances is a V4 dynamic-fee pool with the Alphix hook — exercises real V4 hooked-pool LP, not just the canonical V4 flow |
 
 ## Deployed Contracts
 
@@ -156,7 +154,7 @@ ALP is built end-to-end on the Uniswap stack:
 ## Project Structure
 
 ```
-alp/
+alps/
 ├── contracts/    # Foundry — ALPVault (ERC4626), PoolRegistry, V3/V4/UR adapters
 ├── keeper/       # Bun + Hono — 5-policy decision engine, Uniswap SDK consultation, viem signer
 ├── agent/        # KeeperHub workflow snapshots + reference Cloudflare Worker keeper
@@ -168,7 +166,7 @@ alp/
 
 The deployed dApp is at **[alps-six.vercel.app](https://alps-six.vercel.app/)** — no local setup needed.
 
-Connect your wallet, deposit USDC, and watch the keeper narrate every decision in real time. The KeeperHub workflows are publicly visible at [app.keeperhub.com](https://app.keeperhub.com) under `alp-rebalance`, `alp-post-rebalance`, and `alp-demo-rebalance`.
+Connect your wallet, deposit USDC, and watch the keeper narrate every decision in real time. The KeeperHub workflows are publicly visible at [app.keeperhub.com](https://app.keeperhub.com) under `alps-rebalance`, `alps-post-rebalance`, and `alps-demo-rebalance`.
 
 ## Local Setup
 
@@ -238,33 +236,12 @@ The agent EOA at [`0x8cf03f65ffC08a514dA09063b5632deC0b11475D`](https://basescan
 
 ## Future Work
 
-ALP was built in a hackathon sprint. Here's what a production-grade version would address:
+ALPS was built in a hackathon sprint. Here's what a production-grade version would address:
 
-### Smarter Strategies
-
-- **Full 5-policy actuation.** Today, range and anti-whipsaw actuate; idle, cap, and vol emit real-signal narration but do not yet actuate. v2 wires `idle` to a `deploy_idle` actuator that tops up the pool with the most cap headroom; `cap` to a `redistribute` actuator when one pool exceeds its allocation; `vol` to advisory width adjustments on the next rebalance.
-- **Cross-pool USD valuation.** All pools currently have a 100% cap (TAV is denominated in USDC, but multi-asset pool valuations are approximate). v2 introduces a spot-pricing layer (Chainlink + Uniswap TWAP) so cap pressure is enforced precisely.
-- **Volatility-aware range widths.** Use historical volatility or on-chain TWAP data to dynamically size ranges per pool. Stable pairs (USDC/USDT) get tighter ranges; volatile pairs (ETH/USDC) get wider ones; the keeper adapts width to recent realized volatility.
-- **EV-positive rebalance gating.** Compare expected fee improvement against gas + swap costs before firing. Skip rebalances where the marginal capture doesn't justify the bundle cost.
-
-### Security Hardening
-
-- **Hardware-backed signer.** Move the agent key from a VM `.env` to a Turnkey wallet, and use KeeperHub's Direct Execution path so transactions are signed by KeeperHub's signing layer rather than a local hot key.
-- **Named tunnel with stable subdomain.** Replace the ephemeral Cloudflare quick-tunnel with a named tunnel backed by a Cloudflare account, so the KeeperHub workflow URLs are stable across restarts.
-- **Multi-sig vault owner.** The vault's `owner` role (separate from `agent`) is currently a single key. v2 makes it a Safe multisig so guardian and pool-whitelist changes require co-signature.
-- **Rate-limit hardening.** Beyond the existing per-wallet Sherpa rate limit (5/day, 20s cooldown) and per-WS-connection token bucket, add per-IP connection caps and exponential backoff on auth failures.
-
-### Broader Protocol Support
-
-- **More chains.** ALPVault is Base-only today. The vault contract is chain-agnostic; v2 deploys the same shape to Arbitrum and Unichain, with KeeperHub Schedule + Event triggers spanning all three.
-- **More pools.** Add stETH/ETH, USDe/USDC, and additional V4 hooked pools as they launch. The PoolRegistry already supports per-pool cap-bps and volatility profiles; the keeper iterates registry membership at boot.
-- **Public advisory mode.** Expose the keeper's decision feed as a read-only public endpoint so external LPs can mirror its signals without depositing.
-
-### Additional Features
-
-- **Sherpa-native deposits.** Let depositors execute deposits / redeems via natural language in the Sherpa chat surface (an LLM tool layer over the existing wagmi write paths). Removes one wallet-click for power users.
-- **Position analytics.** Track fee APR, impermanent loss, and rebalance P&L over time so depositors can evaluate strategy performance against benchmarks.
-- **Alerting.** Notify users via Telegram, Discord, or email when the basket undergoes a rebalance, when TVL crosses thresholds, or when the agent's gas runway approaches the floor.
+- **Smarter strategies.** Promote `idle`, `cap`, and `vol` from narration-only to real actuators; size range widths from realized volatility; and gate each bundle on expected fee gain vs total cost (today's gas gate only checks the agent can afford the bundle, not that it's net-positive).
+- **Security hardening.** Move the agent key from a VM `.env` to a Turnkey-backed signer behind KeeperHub Direct Execution, promote the vault's `owner` role to a Safe multisig, and add per-IP rate limits on top of the existing per-wallet Sherpa caps.
+- **Broader protocol support.** Deploy the same vault shape to Arbitrum and Unichain, onboard more pools (stETH/ETH, USDe/USDC, additional V4 hooks), and expose the agent's decision feed as a read-only public endpoint for external LPs to mirror.
+- **Additional features.** Sherpa-native natural-language deposits and redeems, position analytics (fee APR, IL, rebalance P&L), and Telegram/Discord/email alerts on rebalances and gas-runway thresholds.
 
 ## Team
 

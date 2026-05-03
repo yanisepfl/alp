@@ -40,7 +40,7 @@ contract ERC4626ConformanceTest is ERC4626Test {
 
         underlying = new MockERC20Token("Mock USDC", "mUSDC", 6);
         registry = new PoolRegistry(owner, guardian);
-        vault = new ALPVault(IERC20(address(underlying)), "ALP Test Vault", "alpTEST", registry, owner, agent, guardian);
+        vault = new ALPVault(IERC20(address(underlying)), "ALPS Test Vault", "alpTEST", registry, owner, agent, guardian);
 
         _underlying_ = address(underlying);
         _vault_ = address(vault);

@@ -1,4 +1,4 @@
-# ALP Agent
+# ALPS Agent
 
 Off-chain rebalancer for [ALPVault](../contracts/src/ALPVault.sol). Monitors every tracked LP position, detects out-of-range positions, and rebalances them through the Uniswap Trading API + Universal Router.
 
@@ -98,16 +98,16 @@ KH's REST `/api/workflows/create` accepts `(name, nodes, edges)` shape but the p
 1. **Trigger node**: pick `Schedule`, set cron `*/5 * * * *`.
 2. **Add HTTP Request node** named `tick`:
    - Method `POST`
-   - URL `https://${ALP_WORKER_URL}/trigger`
-   - Headers: `Authorization: Bearer ${ALP_API_KEY}`, `Content-Type: application/json`
+   - URL `https://${ALPS_WORKER_URL}/trigger`
+   - Headers: `Authorization: Bearer ${ALPS_API_KEY}`, `Content-Type: application/json`
    - Body `{}`
 3. **Add Condition node** named `did_rebalance`:
    - Expression `$.tick.body.rebalances > 0`
 4. **Add Telegram node** named `notify_success` (downstream of Condition's `true` branch):
    - Bot token `${TG_BOT_TOKEN}`, chat id `${TG_CHAT_ID}`, parse mode Markdown
-   - Text: `*ALP rebalanced ${$.tick.body.rebalances} position(s)* — ${$.tick.body.plans[*].pool}`
-5. **(Optional) Add Telegram node** named `notify_failure` on the HTTP node's `failure` edge with text `⚠️ ALP tick failed`.
-6. Define the four workflow secrets in **Settings → Secrets**: `ALP_WORKER_URL`, `ALP_API_KEY`, `TG_BOT_TOKEN`, `TG_CHAT_ID`.
+   - Text: `*ALPS rebalanced ${$.tick.body.rebalances} position(s)* — ${$.tick.body.plans[*].pool}`
+5. **(Optional) Add Telegram node** named `notify_failure` on the HTTP node's `failure` edge with text `⚠️ ALPS tick failed`.
+6. Define the four workflow secrets in **Settings → Secrets**: `ALPS_WORKER_URL`, `ALPS_API_KEY`, `TG_BOT_TOKEN`, `TG_CHAT_ID`.
 7. Click **Go Live**.
 
 **Then snapshot it:**
@@ -133,7 +133,7 @@ With `KEEPERHUB_DIRECT_EXEC=true`, the worker routes all rebalance writes (`exec
 
 Demo proof: vault.agent() returns the Turnkey address; Basescan tx trace shows the Turnkey EOA as `From`.
 
-### Tier 3 — Operate ALP via KeeperHub MCP (deepest)
+### Tier 3 — Operate ALPS via KeeperHub MCP (deepest)
 
 KH hosts an MCP server at `https://app.keeperhub.com/mcp`. Connecting any MCP client (Claude Code, Cursor, custom) lets you manage the workflow via natural language tool calls (`list_workflows`, `execute_workflow`, `get_execution_logs`, `list_action_schemas`, etc.).
 
@@ -142,7 +142,7 @@ claude mcp add --transport http keeperhub https://app.keeperhub.com/mcp \
   --header "Authorization: Bearer kh_..."
 ```
 
-Then in Claude: "list my keeperhub workflows", "trigger ALP Rebalance Loop", "show me the last 5 executions". This satisfies the prize's "MCP server" qualifying-integration call-out without writing any code.
+Then in Claude: "list my keeperhub workflows", "trigger ALPS Rebalance Loop", "show me the last 5 executions". This satisfies the prize's "MCP server" qualifying-integration call-out without writing any code.
 
 ### Telegram secrets
 

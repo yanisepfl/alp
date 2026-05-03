@@ -19,8 +19,8 @@
 //      action events present in the agent history carry a real 66-char
 //      0x-prefixed tx hash (count not asserted — chain may be quiet).
 //   5. B6 persistence — auth + send a user_message, capture the reply id,
-//      close, then open the sqlite db at ALP_DB_PATH (default
-//      ./data/alp.sqlite) directly and assert the reply id is present in
+//      close, then open the sqlite db at ALPS_DB_PATH (default
+//      ./data/alps.sqlite) directly and assert the reply id is present in
 //      agent_ring. Exercises write-through end-to-end. Restart-replay is
 //      tested manually (see README §"Persistence (B6)").
 //   6. B7 ingest API — POST /ingest/signal broadcasts to all agent
@@ -424,19 +424,19 @@ async function flowPersistence(): Promise<void> {
   }
 
   // Open the sqlite store the server is writing to and verify the reply id
-  // landed in agent_ring. ALP_DB_PATH may be unset on the smoke runner side —
-  // we honour the same default the server uses (./data/alp.sqlite resolved
+  // landed in agent_ring. ALPS_DB_PATH may be unset on the smoke runner side —
+  // we honour the same default the server uses (./data/alps.sqlite resolved
   // against the current working directory of the server, which is the backend
   // folder). The smoke is run from the backend folder per README, so this
   // resolves to the same file.
   const { Database } = await import("bun:sqlite");
-  const dbPath = process.env.ALP_DB_PATH ?? "./data/alp.sqlite";
+  const dbPath = process.env.ALPS_DB_PATH ?? "./data/alps.sqlite";
   let db: InstanceType<typeof Database>;
   try {
     db = new Database(dbPath, { readonly: true });
   } catch (e) {
-    fail("persist (B6): sqlite db at ALP_DB_PATH opens",
-      `path=${dbPath} err=${e instanceof Error ? e.message : String(e)} (run smoke from alp/backend so the relative path resolves)`);
+    fail("persist (B6): sqlite db at ALPS_DB_PATH opens",
+      `path=${dbPath} err=${e instanceof Error ? e.message : String(e)} (run smoke from alps/backend so the relative path resolves)`);
     return;
   }
   try {

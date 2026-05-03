@@ -38,11 +38,11 @@ export default async function RootLayout({
             the first body node so it runs before React hydrates — a
             script-injected <style> in <head> sits outside React's
             tree, so hydration can't strip it. Clear the
-            `alp:intro-played` localStorage key to re-watch the intro. */}
+            `alps:intro-played` localStorage key to re-watch the intro. */}
         <script
           dangerouslySetInnerHTML={{
             __html:
-              "try{if(localStorage.getItem('alp:intro-played')==='1'){var s=document.createElement('style');s.id='alp-skip-intro';s.textContent='.settle,.lift,.reveal{animation:none!important}';document.head.appendChild(s);}}catch(e){}",
+              "try{if(localStorage.getItem('alps:intro-played')==='1'){var s=document.createElement('style');s.id='alps-skip-intro';s.textContent='.settle,.lift,.reveal{animation:none!important}';document.head.appendChild(s);}}catch(e){}",
           }}
         />
         {/* Shared landscape backdrop at the panel rect — keeps the bg
