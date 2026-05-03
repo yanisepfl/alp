@@ -175,7 +175,10 @@ async function pollOnce(client: PublicClient, addr: `0x${string}`): Promise<void
  return;
  }
  const sp = round(result.sharePrice, 4);
- const tv = round(result.tvl, 3);
+ // 6 decimals on tvl preserves down to $1 (since wire format is
+ // millions-of-USD: 1e-6 M = $1). 3 decimals floored sub-$1k vaults
+ // to 0 and rendered as "$0.00" on the dashboard.
+ const tv = round(result.tvl, 6);
 
  // Hook the indexer onto the same tick. Errors are swallowed inside
  // indexUpToHead — chain headlines should never be blocked by indexer
@@ -268,7 +271,7 @@ async function sample30d(client: PublicClient, addr: `0x${string}`): Promise<voi
  const r = results[k];
  if (r) {
  sharePrices[off + k] = round(r.sharePrice, 4);
- tvls[off + k] = round(r.tvl, 3);
+ tvls[off + k] = round(r.tvl, 6);
  }
  }
  console.log(`[vault] 30d sample: ${Math.min(off + BATCH, HISTORY_LEN)}/${HISTORY_LEN}`);
