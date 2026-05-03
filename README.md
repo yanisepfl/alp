@@ -4,9 +4,11 @@ Concentrated liquidity on autopilot — powered by the Uniswap V3 + V4 SDKs, the
 
 ## The Problem
 
+**Swap volume on Uniswap created over $2B in LP fees in 2025. Most of it flows to actively managed positions held by sophisticated LPs — and tapping into that yield requires infrastructure and knowledge most depositors don't have.**
+
 Concentrated liquidity (CL) on Uniswap V3 and V4 is dramatically more capital-efficient than full-range LP, but only while the position is in range. When it drifts out, the LP earns zero fees while the position sits idle. Most depositors are passive — they don't watch tick-by-tick, judge mean reversion, or compare bundle gas costs against expected fee revenue. Manually managing a basket of positions across multiple pools is a 24/7 job that very few LPs do well.
 
-**The result:** Roughly half of CL positions sit out of range at any given time, representing hundreds of millions in idle liquidity earning zero. Most LPs would have been better off just holding their tokens.
+**The result:** roughly half of CL positions sit out of range at any given time, representing hundreds of millions in idle liquidity earning zero. Most LPs would have been better off just holding their tokens.
 
 ## The Solution
 
@@ -14,10 +16,10 @@ ALP is a single-deposit USDC vault that runs a diversified basket of concentrate
 
 Here's how:
 
-1. You deposit USDC — into a single ERC4626 vault on Base. The vault holds CL positions across whitelisted pools (USDC/USDT V3, USDC/cbBTC V3, ETH/USDC V4 with hooks) and accrues fees back to the share price. One token, one decision — you never touch the individual pools.
-2. ALP watches and reasons — the off-chain keeper runs a 5-policy decision engine on every tick (range drift, anti-whipsaw cooldowns, realized volatility, idle reserve, cap pressure). Claude narrators curate the keeper's reasoning into a Sherpa chat surface — quoting actual numbers, not vibes — that you can ask questions of.
-3. KeeperHub orchestrates — three KeeperHub workflows drive the loop: a polling workflow hydrates the brain with fresh chain context every 5 minutes and gates rebalances on a dynamic gas floor; a reactive workflow audits every on-chain rebalance with a basket-wide health snapshot; a manual-trigger workflow is the operator override.
-4. The vault actuates — when a rebalance is warranted, the keeper consults Uniswap's V3 + V4 SDKs for optimal mint params, then signs `vault.executeRemoveLiquidity → maybe-swap → executeAddLiquidity` as the vault's `agent` role. The vault routes through whitelisted adapter contracts to the V3 NonfungiblePositionManager and V4 PositionManager.
+1. You deposit USDC — into a single ERC4626 vault on Base. The vault holds CL positions across whitelisted pools (USDC/USDT V3, USDC/cbBTC V3, ETH/USDC V4 with hooks) and accrues fees back to the share price.
+2. Agents watch and reason — the off-chain keeper runs a 5-policy decision engine every 5 minutes (range drift, anti-whipsaw cooldowns, realized volatility, idle reserve, cap pressure). Claude narrators curate the keeper's reasoning into a easy to understand chat surface.
+3. KeeperHub orchestrates — three KeeperHub workflows drive the loop: a polling workflow generates fresh chain context every 5 minutes and gates rebalances on a dynamic gas floor; a reactive workflow audits every on-chain rebalance with a basket-wide health snapshot; a manual-trigger workflow allows us to ensure there is a rebalancing event during demo time.
+4. The vault executes — when a rebalance is warranted, the keeper consults Uniswap's V3 + V4 SDKs for optimal mint params, then signs `vault.executeRemoveLiquidity → maybe-swap → executeAddLiquidity` as the vault's `agent` role. The vault routes through whitelisted adapter contracts to the V3 NonfungiblePositionManager and V4 PositionManager.
 
 You deposit once, the basket runs itself.
 
@@ -73,7 +75,7 @@ You deposit once, the basket runs itself.
                              │ wss://…/stream
                              ▼
         ┌────────────────────────────────────────────────────────────┐
-        │  Next.js 15 dashboard                                      │
+        │  alps frontend, user facing dApp                           │
         │  • Wallet via Reown AppKit + wagmi + viem (Base only)      │
         │  • Live agent feed, vault snapshot, Sherpa chat            │
         └────────────────────────────────────────────────────────────┘
@@ -99,7 +101,7 @@ Deposits and withdrawals don't wait for the next polling tick. The backend's vau
 
 ## Agent Feed Narration
 
-A 5-policy engine across three pools produces a lot of raw reasoning per tick — surfacing it unfiltered would bury the user under spam. ALP curates everything into a high-signal feed through four Claude narrator personas, each with its own voice and triggering condition:
+A 5-policy engine across three pools produces a lot of raw reasoning per tick — surfacing it unfiltered would bury the user under spam. ALP curates everything into a high-signal feed using multiple narrators:
 
 | Narrator | Fires when | Output |
 |---|---|---|
@@ -108,7 +110,7 @@ A 5-policy engine across three pools produces a lot of raw reasoning per tick �
 | **React** | A user just deposited or withdrew | One 12-22 word sentence reasoning about whether to rebalance to absorb the flow, citing the actual amount. Always emits — the depositor or withdrawer is owed an explanation even when the answer is "holding as idle reserve". |
 | **Signal** | An external integration speaks: KeeperHub post-rebalance audit, inline Uniswap-SDK consult during a rebalance, low-gas alert | One 8-15 word sentence quoting concrete numbers ("Uniswap V3 SDK expects 0.148 USDC + 0.148 USDT for the re-mint.") |
 
-The rollup prompt explicitly leans toward `SILENCE` — a user who sees one polished entry per 15-30 minutes is happier than one buried under five flat status reports. Narration runs in `claude -p` subprocesses after the tx, never blocking on-chain actuation.
+The rollup prompt explicitly leans toward `SILENCE` to minimize messages to highly contextual ones. Narration runs in `claude -p` subprocesses after the tx, never blocking on-chain actuation.
 
 ## Security Model
 
@@ -164,7 +166,7 @@ alp/
 
 ## Try It Live
 
-You can try ALP on the deployed Vercel frontend without any local setup.
+The deployed dApp is at **[alps-six.vercel.app](https://alps-six.vercel.app/)** — no local setup needed.
 
 Connect your wallet, deposit USDC, and watch the keeper narrate every decision in real time. The KeeperHub workflows are publicly visible at [app.keeperhub.com](https://app.keeperhub.com) under `alp-rebalance`, `alp-post-rebalance`, and `alp-demo-rebalance`.
 
